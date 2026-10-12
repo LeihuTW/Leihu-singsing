@@ -1172,7 +1172,7 @@ async function rescoreTake(id, quiet) {
 }
 async function selectTake(id) {
   const t = await api(`/api/songs/${S.song.id}/takes/${id}`);
-  if (t.status === "done" && (t.algo || 1) < 2 && !S.rescored?.[id]) {
+  if (t.status === "done" && (t.algo || 1) < 3 && !S.rescored?.[id]) {
     // 1.2 以前的錄音：用新的分析方式（去掉音頭音尾往下掉的雜訊）自動重新評分一次
     (S.rescored ||= {})[id] = true;
     toast("用新的分析方式重新評分這次錄音…");
@@ -1196,7 +1196,7 @@ function renderTakeDetail() {
   if (!t) { box.innerHTML = ""; return; }
   if (t.acc == null) { box.innerHTML = `<p class="hint">評分中…</p>`; return; }
   const worst = (t.lines || []).slice().sort((a, b) => a.acc - b.acc).slice(0, 3);
-  box.innerHTML = `<div class="hint">命中率是落在原唱 ±50 音分內的比例。已自動對齊 ${t.offset > 0 ? "+" : ""}${t.offset}s 的錄音延遲${t.octave ? "，並換算八度" : ""}。</div>
+  box.innerHTML = `<div class="hint">命中率是落在原唱 ±50 音分內的比例（換音時早晚 0.1 秒內都算對）。已自動對齊 ${t.offset > 0 ? "+" : ""}${t.offset}s 的錄音延遲${t.octave ? "，並換算八度" : ""}。</div>
     ${worst.length ? `<b>最需要練的句子</b>` : ""}
     <div class="wl"></div>
     <div class="row"><button id="coach">請 Claude 給練習建議</button><button id="rescore" class="ghost">重新評分</button><button id="del-take" class="ghost danger">刪除這次錄音</button></div>
@@ -1339,7 +1339,7 @@ function draw() {
   if (S.take && S.take.pitch && S.take.pitch.midiArr) {
     const p = S.take.pitch, arr = p.midiArr;
     const a = Math.max(0, Math.floor((G.left - p.t0) / p.hop)), b = Math.min(arr.length - 1, Math.ceil((t1 - p.t0) / p.hop));
-    drawVoice(g, G, i => p.t0 + i * p.hop, i => arr[i], a, b, 1.8, 0.75);
+    drawVoice(g, G, i => p.t0 + i * p.hop, i => arr[i], a, b, 1.8, 0.75, false, S.take.octave || 0);
   }
   // 即時麥克風
   if (S.live.length) drawVoice(g, G, i => S.live[i].t, i => S.live[i].m ?? NaN, 0, S.live.length - 1, 2.6, 1, true);
@@ -1409,23 +1409,34 @@ function drawCharLyrics(g, G, t1) {
   }
   g.textAlign = "left";
 }
-function drawVoice(g, G, tAt, mAt, a, b, width, alpha, liveMode) {
+function drawVoice(g, G, tAt, mAt, a, b, width, alpha, liveMode, octave = 0) {
+  // 你和原唱可能差八度（例如男生唱女生的 KEY）。有原唱音的地方換算到原唱的八度；
+  // 原唱沒有音的空檔（句尾拖長、換氣前後）沿用上一次的換算，不會掉到畫面外變成垂直線。
   g.lineWidth = width; g.globalAlpha = alpha; g.lineCap = "round";
+  let shift = liveMode ? (S.liveShift ?? 0) : octave * 12;
   let prev = null;
   for (let i = a; i <= b; i++) {
     const t = tAt(i), m = mAt(i);
-    // 沒聲音、中斷太久，或一瞬間跳超過 3 個半音（通常是音頭音尾分析不準）：斷開線，不畫垂直的線
-    if (isNaN(m) || (prev && (Math.abs(m - prev.m) > 3 || (liveMode && t - prev.t > 0.12)))) { prev = isNaN(m) ? null : { t, m }; continue; }
-    if (prev) {
-      const ref = refAt(t);
-      let shown = m, ok = true;
-      if (!isNaN(ref)) { const d = fold(m - ref); shown = ref + d; ok = Math.abs(d) <= 0.5; }
-      const pm = isNaN(refAt(prev.t)) ? prev.m : refAt(prev.t) + fold(prev.m - refAt(prev.t));
-      g.strokeStyle = ok ? colors.voice : colors.bad;
-      g.beginPath(); g.moveTo(G.x(prev.t), G.y(pm)); g.lineTo(G.x(t), G.y(shown)); g.stroke();
+    if (isNaN(m)) { prev = null; continue; }
+    const ref = refAt(t);
+    if (!isNaN(ref)) shift = 12 * Math.round((m - ref) / 12);
+    const shown = m - shift;
+    // 顏色：和評分一樣，前後 0.1 秒內有對到原唱的音（±50 音分）就算準
+    let best = Infinity;
+    for (const dt of [0, -0.05, 0.05, -0.1, 0.1]) {
+      const r = refAt(t + dt);
+      if (!isNaN(r)) best = Math.min(best, Math.abs(fold(m - r)));
+      if (best <= 0.5) break;
     }
-    prev = { t, m };
+    const ok = best <= 0.5 || best === Infinity;
+    // 一瞬間跳超過 3 個半音或中斷太久：斷開，不畫垂直的線
+    if (prev && Math.abs(shown - prev.s) <= 3 && !(liveMode && t - prev.t > 0.12)) {
+      g.strokeStyle = ok ? colors.voice : colors.bad;
+      g.beginPath(); g.moveTo(G.x(prev.t), G.y(prev.s)); g.lineTo(G.x(t), G.y(shown)); g.stroke();
+    }
+    prev = { t, s: shown };
   }
+  if (liveMode) S.liveShift = shift;
   g.globalAlpha = 1;
 }
 function roundRect(g, x, y, w, h, r) {

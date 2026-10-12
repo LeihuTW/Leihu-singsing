@@ -17,7 +17,7 @@ from flask import Flask, abort, jsonify, request, send_file, send_from_directory
 import claude_api as C
 import pipeline as P
 
-VERSION = "1.2"
+VERSION = "1.2.1"
 HOST, PORT = "127.0.0.1", int(os.environ.get("LIANTAI_PORT", "8765"))
 app = Flask(__name__, static_folder=str(P.ROOT / "static"), static_url_path="/static")
 app.config["MAX_CONTENT_LENGTH"] = 1024 * 1024 * 1024

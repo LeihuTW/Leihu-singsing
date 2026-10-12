@@ -889,7 +889,8 @@ def lyric_lines(d: Path) -> list[dict]:
     return [l for l in parse_lrc(p.read_text("utf-8")) if l["t"] is not None]
 
 
-TAKE_ALGO = 2   # 錄音分析方式的版本；舊版分析的錄音會自動重新評分
+TAKE_ALGO = 3   # 錄音分析方式的版本；舊版分析的錄音會自動重新評分
+TOL_FRAMES = 10   # 評分的時間容錯：±0.1 秒
 
 
 def score_take(d: Path, take_id: str, report) -> None:
@@ -926,10 +927,15 @@ def score_take(d: Path, take_id: str, report) -> None:
         if m > best:
             best, best_off = m, float(off)
     ts, dd, r = diffs(best_off)
+    # 時間容錯：每一格取前後 0.1 秒內最接近的原唱音高（換音稍早或稍晚不算走音）
+    for k in list(range(-TOL_FRAMES, 0)) + list(range(1, TOL_FRAMES + 1)):
+        _, d2, _ = diffs(best_off + k * HOP_S)
+        better = np.isnan(dd) & ~np.isnan(d2) | (~np.isnan(d2) & (np.abs(d2) < np.abs(dd)))
+        dd = np.where(better, d2, dd)
     valid = ~np.isnan(dd)
     cents = dd[valid] * 100
     octave = 0
-    raw = (mine - r)[valid]
+    raw = (mine - r)[~np.isnan(mine - r)]
     if raw.size:
         octave = int(np.median(np.round(raw / 12)))
 
@@ -1143,7 +1149,7 @@ def similarity(recognized: str, candidate: str) -> float | None:
     return round(sum(x.size for x in m.get_matching_blocks()) / len(a), 3)
 
 
-USER_AGENT = "LeihuLiantai/1.2 (+https://github.com/LeihuTW/Leihu-singsing)"   # HTTP 標頭只能用英文字
+USER_AGENT = "LeihuLiantai/1.2.1 (+https://github.com/LeihuTW/Leihu-singsing)"   # HTTP 標頭只能用英文字
 
 
 def _http_json(url: str, headers: dict | None = None, timeout: int = 10):
