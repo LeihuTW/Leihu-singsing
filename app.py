@@ -17,7 +17,7 @@ from flask import Flask, abort, jsonify, request, send_file, send_from_directory
 import claude_api as C
 import pipeline as P
 
-VERSION = "1.1"
+VERSION = "1.2"
 HOST, PORT = "127.0.0.1", int(os.environ.get("LIANTAI_PORT", "8765"))
 app = Flask(__name__, static_folder=str(P.ROOT / "static"), static_url_path="/static")
 app.config["MAX_CONTENT_LENGTH"] = 1024 * 1024 * 1024
@@ -413,7 +413,7 @@ def claude_coach(sid):
 
 @app.get("/api/songs/<sid>/lyrics/search")
 def lyrics_search(sid):
-    """手動搜尋：LRCLIB＋網易雲（原文與簡體各搜一次），依和辨識結果的相似度排序。"""
+    """手動搜尋：LRCLIB＋網易雲＋酷狗（原文與簡體各搜一次），依和辨識結果的相似度排序。"""
     d = P.song_dir(sid)
     q = (request.args.get("q") or "").strip()
     if not q and not P.lyric_queries(P.read_meta(d)):
@@ -445,6 +445,14 @@ def lyrics_apply(sid):
     if not (cand.get("synced") or cand.get("plain")):
         raise P.UserError("這筆歌詞沒有內容")
     lrc, how = P.apply_candidate(d, cand)
+    return jsonify(lrc=lrc, how=how)
+
+
+@app.post("/api/songs/<sid>/lyrics/import")
+def lyrics_import(sid):
+    d = P.song_dir(sid)
+    body = request.get_json(force=True) or {}
+    lrc, how = P.import_lyrics(d, body.get("text", ""), P.load_config(), body.get("name", ""))
     return jsonify(lrc=lrc, how=how)
 
 

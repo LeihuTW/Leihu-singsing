@@ -239,3 +239,19 @@ a.tab { text-decoration: none; font-size: 14px; }
   .song .acts { justify-content: flex-start; }
 }
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+
+/* 1.2：旋律／歌詞比例分隔條 */
+.split { height: 10px; cursor: row-resize; display: flex; align-items: center; justify-content: center; border-top: 1px solid var(--line); touch-action: none; }
+.split span { width: 44px; height: 4px; border-radius: 2px; background: var(--line); }
+.split:hover span, .split:focus-visible span, .split.drag span { background: var(--accent); }
+.split + .lyr { border-top: 0; }
+/* 1.2：麥克風音量 */
+.mic-lv { display: flex; flex-direction: column; gap: 6px; margin-top: 4px; }
+.mic-lv .lv-label { width: 32px; flex: none; }
+.meter { position: relative; flex: 1; min-width: 0; height: 10px; border-radius: 5px; background: var(--bg); border: 1px solid var(--line); overflow: hidden; }
+.meter .bar { position: absolute; inset: 0; background: linear-gradient(90deg, #3fb37f 0 80%, #e0b341 80% 95%, #e5534b 95%); clip-path: inset(0 calc(100% - var(--v, 0%)) 0 0); }
+.meter .pk { position: absolute; top: 0; bottom: 0; width: 2px; left: 0; background: var(--ink); opacity: .8; }
+.meter i { position: absolute; top: 0; bottom: 0; width: 1px; background: var(--line); }
+#mic-db, #mic-gain-v { width: 58px; text-align: right; flex: none; }
+#mic-warn.bad { color: var(--bad); }
+#mic-warn.ok { color: var(--accent); }

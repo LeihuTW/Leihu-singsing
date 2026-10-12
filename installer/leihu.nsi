@@ -1,4 +1,4 @@
-; 雷虎練唱台 1.0 安裝程式
+; 雷虎練唱台 安裝程式
 Unicode true
 ManifestDPIAware true
 !include "MUI2.nsh"
@@ -6,17 +6,17 @@ ManifestDPIAware true
 !include "LogicLib.nsh"
 
 !define APPNAME "雷虎練唱台"
-!define VERSION "1.1"
+!define VERSION "1.2"
 !define REGKEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\LeihuLiantai"
 
 Name "${APPNAME} ${VERSION}"
-OutFile "out\雷虎練唱台1.1.exe"
+OutFile "out\雷虎練唱台1.2.exe"
 InstallDir "$LOCALAPPDATA\LeihuLiantai"
 InstallDirRegKey HKCU "${REGKEY}" "InstallLocation"
 RequestExecutionLevel user
 SetCompressor /SOLID lzma
 BrandingText "${APPNAME} ${VERSION}"
-VIProductVersion "1.1.0.0"
+VIProductVersion "1.2.0.0"
 VIAddVersionKey /LANG=1028 "ProductName" "${APPNAME}"
 VIAddVersionKey /LANG=1028 "FileDescription" "${APPNAME} ${VERSION} 安裝程式"
 VIAddVersionKey /LANG=1028 "FileVersion" "${VERSION}"
@@ -75,6 +75,29 @@ FunctionEnd
 
 Section "Install"
   AddSize 7000000
+  ; 偵測之前的安裝：完整安裝過 → 問要更新還是全新重裝；裝到一半中斷 → 問要接著修復還是清除重裝
+  ${If} ${FileExists} "$INSTDIR\python\python.exe"
+    ${If} ${FileExists} "$INSTDIR\installed.json"
+      MessageBox MB_YESNOCANCEL|MB_ICONQUESTION "這台電腦已經安裝過雷虎練唱台。$\r$\n$\r$\n「是」：更新（沿用已下載的套件與模型，最快）$\r$\n「否」：全新重裝（清除舊的程式與套件，重新下載）$\r$\n「取消」：不安裝$\r$\n$\r$\n兩種方式都會保留歌曲庫、錄音與設定。" IDYES keep IDNO wipe
+    ${Else}
+      MessageBox MB_YESNOCANCEL|MB_ICONEXCLAMATION "偵測到上次安裝沒有完成。$\r$\n$\r$\n「是」：接著安裝，並自動檢查、修復不完整的檔案（建議）$\r$\n「否」：清除上次留下的檔案後全新安裝$\r$\n「取消」：不安裝$\r$\n$\r$\n兩種方式都會保留歌曲庫、錄音與設定。" IDYES keep IDNO wipe
+    ${EndIf}
+    Abort "已取消安裝"
+  wipe:
+    !insertmacro StopApp "$INSTDIR"
+    DetailPrint "清除舊的程式與套件…"
+    RMDir /r "$INSTDIR\python"
+    RMDir /r "$INSTDIR\downloads"
+    RMDir /r "$INSTDIR\static"
+    RMDir /r "$INSTDIR\setup"
+    RMDir /r "$INSTDIR\bin"
+    RMDir /r "$INSTDIR\__pycache__"
+    RMDir /r "$INSTDIR\.webview"
+    Delete "$INSTDIR\*.py"
+    Delete "$INSTDIR\requirements*.txt"
+    Delete "$INSTDIR\installed.json"
+  keep:
+  ${EndIf}
   !insertmacro StopApp "$INSTDIR"
   SetOutPath "$INSTDIR"
   File /r "payload\*"
@@ -83,7 +106,7 @@ Section "Install"
   Call FindPowerShell
   ExecWait '"$PS" -NoProfile -ExecutionPolicy Bypass -File "$INSTDIR\setup\install.ps1" -AppDir "$INSTDIR"' $0
   ${If} $0 != 0
-    MessageBox MB_ICONEXCLAMATION "安裝沒有完成。$\r$\n$\r$\n請確認網路連線後重新執行安裝程式，已下載的部分不會重來。$\r$\n詳細紀錄：$INSTDIR\logs\install.log"
+    MessageBox MB_ICONEXCLAMATION "安裝沒有完成。$\r$\n$\r$\n請確認網路連線後重新執行安裝程式，選「是」接著安裝，已下載的部分不會重來。$\r$\n詳細紀錄：$INSTDIR\logs\install.log"
     Abort "安裝沒有完成"
   ${EndIf}
 
@@ -92,6 +115,7 @@ Section "Install"
   CreateDirectory "$SMPROGRAMS\${APPNAME}"
   CreateShortCut "$SMPROGRAMS\${APPNAME}\${APPNAME}.lnk" "$INSTDIR\python\pythonw.exe" '"$INSTDIR\desktop.py"' "$INSTDIR\static\icon.ico" 0
   CreateShortCut "$SMPROGRAMS\${APPNAME}\${APPNAME} 修復與更新.lnk" "$PS" '-NoProfile -ExecutionPolicy Bypass -File "$INSTDIR\setup\install.ps1" -AppDir "$INSTDIR" -Repair' "$INSTDIR\static\icon.ico" 0
+  CreateShortCut "$SMPROGRAMS\${APPNAME}\${APPNAME} 修復（強制使用顯示卡加速）.lnk" "$PS" '-NoProfile -ExecutionPolicy Bypass -File "$INSTDIR\setup\install.ps1" -AppDir "$INSTDIR" -Repair -Gpu cu128' "$INSTDIR\static\icon.ico" 0
   CreateShortCut "$SMPROGRAMS\${APPNAME}\${APPNAME} 使用說明.lnk" "$INSTDIR\使用說明.html"
   CreateShortCut "$SMPROGRAMS\${APPNAME}\解除安裝 ${APPNAME}.lnk" "$INSTDIR\uninstall.exe"
 
@@ -116,6 +140,7 @@ Section "Uninstall"
   MessageBox MB_YESNO|MB_ICONQUESTION "要一併刪除歌曲庫、錄音與設定（含 API 金鑰）嗎？$\r$\n$\r$\n選「否」會保留在：$INSTDIR\library" IDYES all
     ; 保留歌曲庫：只移除程式
     RMDir /r "$INSTDIR\python"
+    RMDir /r "$INSTDIR\downloads"
     RMDir /r "$INSTDIR\models"
     RMDir /r "$INSTDIR\static"
     RMDir /r "$INSTDIR\setup"

@@ -1053,12 +1053,14 @@ _CREDIT = re.compile(r"^\s*(作词|作曲|编曲|作詞|編曲|制作人|製作�
                      r"吉他|贝斯|貝斯|鼓|弦乐|弦樂|出品|发行|發行|OP|SP|Lyrics|Composer|Arranger|Producer)\s*[:：]", re.I)
 
 
-def clean_lrc(text: str) -> str:
-    """去掉作詞作曲等資訊行與空白行。"""
+def clean_lrc(text: str, track: str = "", artist: str = "") -> str:
+    """去掉作詞作曲等資訊行、「歌手 - 歌名」標題行與空白行。"""
     out = []
+    title_lines = {f"{artist} - {track}", f"{track} - {artist}"} if track and artist else set()
     for line in (text or "").splitlines():
         body = re.sub(r"\[[^\]]*\]", "", line).strip()
-        if not body or _CREDIT.match(body) or re.match(r"^\[(ti|ar|al|by|offset|length|re):", line, re.I):
+        if not body or _CREDIT.match(body) or body in title_lines or \
+                re.match(r"^\[(ti|ar|al|by|offset|length|re|id|hash|sign|qq|total):", line, re.I):
             continue
         out.append(line.strip())
     return "\n".join(out)
@@ -1080,11 +1082,24 @@ def similarity(recognized: str, candidate: str) -> float | None:
     return round(sum(x.size for x in m.get_matching_blocks()) / len(a), 3)
 
 
+USER_AGENT = "LeihuLiantai/1.2 (+https://github.com/LeihuTW/Leihu-singsing)"   # HTTP 標頭只能用英文字
+
+
 def _http_json(url: str, headers: dict | None = None, timeout: int = 10):
     import urllib.request
-    req = urllib.request.Request(url, headers={"User-Agent": f"Mozilla/5.0 {APP_NAME}/1.1", **(headers or {})})
+    req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT, **(headers or {})})
     with urllib.request.urlopen(req, timeout=timeout) as r:
         return json.loads(r.read().decode("utf-8", "replace"))
+
+
+def log_error(where: str, err: Exception) -> None:
+    """把連線等錯誤寫進 logs/lyrics.log，方便之後查原因。"""
+    try:
+        (ROOT / "logs").mkdir(exist_ok=True)
+        with open(ROOT / "logs" / "lyrics.log", "a", encoding="utf-8") as f:
+            f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {where}: {type(err).__name__}: {err}\n")
+    except Exception:
+        pass
 
 
 def search_lrclib(query: str) -> list[dict]:
@@ -1126,28 +1141,62 @@ def search_netease(query: str, limit: int = 6) -> list[dict]:
     return out
 
 
+def search_kugou(query: str, limit: int = 5) -> list[dict]:
+    """酷狗音樂：先搜尋歌曲，再用歌曲 hash 找歌詞並下載 LRC。"""
+    import base64
+    import urllib.parse
+    data = _http_json("http://mobilecdn.kugou.com/api/v3/search/song?" +
+                      urllib.parse.urlencode({"format": "json", "keyword": query, "page": 1, "pagesize": limit}))
+    out = []
+    for song in (((data or {}).get("data") or {}).get("info") or [])[:limit]:
+        try:
+            dur = int(song.get("duration") or 0)
+            cands = _http_json("http://krcs.kugou.com/search?" + urllib.parse.urlencode(
+                {"ver": 1, "man": "yes", "client": "mobi", "keyword": "", "duration": dur * 1000,
+                 "hash": song.get("hash", "")})).get("candidates") or []
+            if not cands:
+                continue
+            c = cands[0]
+            lyr = _http_json("http://lyrics.kugou.com/download?" + urllib.parse.urlencode(
+                {"ver": 1, "client": "pc", "id": c["id"], "accesskey": c["accesskey"], "fmt": "lrc", "charset": "utf8"}))
+            raw = base64.b64decode(lyr.get("content") or "").decode("utf-8", "replace")
+        except Exception as e:
+            log_error("kugou lyric", e)
+            continue
+        track, artist = song.get("songname") or "", song.get("singername") or ""
+        synced = clean_lrc(raw, track, artist)
+        if not synced:
+            continue
+        plain = "\n".join(re.sub(r"\[[^\]]*\]", "", l).strip() for l in synced.splitlines()).strip()
+        out.append({"source": "酷狗音樂", "id": f"kugou:{song.get('hash')}", "track": track, "artist": artist,
+                    "album": song.get("album_name") or "", "duration": dur or None,
+                    "synced": synced if re.search(r"\[\d+:\d+", synced) else "", "plain": plain})
+    return out
+
+
 def recognized_text(d: Path) -> str:
     p = d / "lyrics_auto.lrc"
     return "\n".join(l["text"] for l in parse_lrc(p.read_text("utf-8"))) if p.exists() else ""
 
 
 def find_candidates(d: Path, cfg: dict, query: str = "") -> tuple[list[str], list[dict]]:
-    """用歌名（原文與簡體）到 LRCLIB 和網易雲搜尋，與辨識結果比對後排序。"""
+    """用歌名（原文與簡體）到 LRCLIB、網易雲和酷狗搜尋，與辨識結果比對後排序。"""
     meta = read_meta(d)
     queries = [query] if query else lyric_queries(meta)
     tried, found, errors = [], {}, []
     for q in queries:
         for qq in dict.fromkeys([q, to_simplified(q)]):
             tried.append(qq)
-            for fn in (search_lrclib, search_netease):
+            for fn in (search_lrclib, search_netease, search_kugou):
                 try:
                     for c in fn(qq):
                         found.setdefault(c["id"], c)
                 except Exception as e:
                     errors.append(f"{fn.__name__}: {type(e).__name__}")
+                    log_error(f"{fn.__name__}({qq})", e)
         if len(found) >= 8:
             break
-    if not found and errors and len(errors) >= len(tried) * 2:
+    if not found and errors and len(errors) >= len(tried) * 3:
         raise UserError("無法連到歌詞網站，請確認網路後再試。")
     rec = recognized_text(d)
     dur = meta.get("duration")
@@ -1228,6 +1277,52 @@ def align_to_recognized(lines: list[str], d: Path) -> list[dict]:
         out.append({"t": round(t, 2), "text": text})
         last = t
     return out
+
+
+def srt_to_lrc(text: str) -> str:
+    """SRT 字幕 → LRC（每段字幕取開始時間，多行合成一句）。"""
+    out = []
+    for block in re.split(r"\r?\n\s*\r?\n", text.strip()):
+        m = re.search(r"(\d+):(\d+):(\d+)[,.](\d+)\s*-->", block)
+        if not m:
+            continue
+        t = int(m.group(1)) * 3600 + int(m.group(2)) * 60 + int(m.group(3)) + int(m.group(4)[:3].ljust(3, "0")) / 1000
+        body = " ".join(l.strip() for l in block.splitlines()[block.splitlines().index(
+            next(l for l in block.splitlines() if "-->" in l)) + 1:] if l.strip())
+        body = re.sub(r"<[^>]+>|\{[^}]*\}", "", body).strip()
+        if body:
+            out.append({"t": t, "text": body})
+    return to_lrc(out)
+
+
+def import_lyrics(d: Path, text: str, cfg: dict, filename: str = "") -> tuple[str, str]:
+    """匯入歌詞檔（LRC、SRT 或純文字）。純文字依辨識結果的時間自動對上每一句。回傳 (lrc, 說明)。"""
+    text = (text or "").replace("\ufeff", "").strip()
+    if not text:
+        raise UserError("歌詞檔是空的")
+    ext = filename.lower().rsplit(".", 1)[-1] if "." in filename else ""
+    if ext == "srt" or re.search(r"\d+:\d+:\d+[,.]\d+\s*-->", text):
+        lrc, how = srt_to_lrc(text), "已從 SRT 字幕轉成 LRC，使用字幕的時間"
+    elif re.search(r"\[\d+:\d+(?:\.\d+)?\]", text):
+        lrc, how = clean_lrc(text) + "\n", "使用歌詞檔裡的時間"
+    else:
+        lines = [l.strip() for l in text.splitlines() if l.strip()]
+        auto = d / "lyrics_auto.lrc"
+        lrc = to_lrc(align_to_recognized(lines, d))
+        how = "歌詞檔沒有時間，已依辨識結果自動對上每一句" if auto.exists() else \
+              "歌詞檔沒有時間，暫時每句間隔 3.5 秒，可以用「跟拍打點」或 Claude 對齊調整"
+    if not lrc.strip():
+        raise UserError("讀不到歌詞內容，請確認檔案格式（LRC、SRT 或 TXT）")
+    if cfg.get("convert_to_taiwan", True) and re.search(r"[\u4e00-\u9fff]", lrc):
+        lrc = to_taiwan(lrc)
+    (d / "lyrics.lrc").write_text(lrc, "utf-8")
+    meta = read_meta(d)
+    meta["steps"]["lyrics"] = True
+    meta["lyrics_source"] = "import"
+    meta["lyrics_pending"] = False
+    meta["notes"] = [x for x in meta.get("notes", []) if "歌詞辨識沒有完成" not in x]
+    write_meta(d, meta)
+    return lrc, how
 
 
 def apply_candidate(d: Path, cand: dict) -> tuple[str, str]:

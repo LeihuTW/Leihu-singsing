@@ -8,7 +8,7 @@
 </head>
 <body>
 <header class="bar">
-  <span class="logo">雷虎練唱台<small id="ver">1.1</small></span>
+  <span class="logo">雷虎練唱台<small id="ver">1.2</small></span>
   <nav class="row">
     <button id="nav-lib" class="tab cur">歌曲庫</button>
     <button id="nav-practice" class="tab" disabled>練唱</button>
@@ -63,6 +63,7 @@
         <input id="char-edit" class="char-edit" type="text" hidden aria-label="修改這個字">
         <div id="loading" class="loading" hidden></div>
       </div>
+      <div id="split" class="split" role="separator" aria-orientation="horizontal" aria-label="拖曳調整旋律和歌詞的高度比例" tabindex="0" title="拖曳調整旋律區和歌詞區的比例，雙擊還原"><span></span></div>
       <div class="lyr" id="lyr">
         <div class="lyr-size"><button id="lyr-smaller" class="ghost" aria-label="歌詞縮小">A−</button><button id="lyr-bigger" class="ghost" aria-label="歌詞放大">A＋</button></div>
         <div id="lyr-prev" class="lyr-prev"></div>
@@ -128,6 +129,20 @@
           <select id="mic-dev" style="flex:1;min-width:0"><option value="">系統預設</option></select>
           <span id="mic-state" class="hint">戴耳機唱，避免伴奏被麥克風收進去。</span>
         </div>
+        <div id="mic-lv" class="mic-lv" hidden>
+          <div class="row">
+            <span class="hint lv-label">音量</span>
+            <div class="meter" aria-hidden="true"><div id="mic-bar" class="bar"></div><div id="mic-pk" class="pk"></div><i style="left:80%" title="-12 dB"></i><i style="left:95%" title="-3 dB"></i></div>
+            <span id="mic-db" class="num hint">-∞ dB</span>
+          </div>
+          <div class="row">
+            <label for="mic-gain" class="hint lv-label">增益</label>
+            <input id="mic-gain" type="range" min="10" max="300" step="5" value="100" style="flex:1;min-width:0">
+            <span id="mic-gain-v" class="num hint">100%</span>
+            <button id="mic-auto" class="ghost" title="唱幾句，程式會自動把音量調到適合評分的大小">自動調整</button>
+          </div>
+          <span id="mic-warn" class="hint"></span>
+        </div>
         <div id="takes" class="takes"></div>
         <div id="take-detail" class="detail"></div>
       </div>
@@ -145,6 +160,8 @@
           <button id="lrc-save">儲存歌詞</button>
           <button id="tap-start">跟拍打點</button>
           <button id="lrc-auto" class="ghost">還原辨識結果</button>
+          <button id="lrc-import" class="ghost" title="匯入 LRC、SRT 或 TXT 歌詞檔">匯入歌詞檔</button>
+          <input id="lrc-file" type="file" accept=".lrc,.srt,.txt,text/plain" hidden>
         </div>
         <div class="row">
           <select id="exp-fmt" aria-label="匯出格式">
@@ -165,7 +182,7 @@
           </div>
         </details>
         <details id="ls-box">
-          <summary>搜尋線上歌詞（LRCLIB、網易雲，需連網）</summary>
+          <summary>搜尋線上歌詞（LRCLIB、網易雲、酷狗，需連網）</summary>
           <div class="detail" style="margin-top:8px">
             <div class="row"><input id="ls-q" type="text" placeholder="歌名 歌手" style="flex:1;min-width:0"><button id="ls-go">搜尋</button></div>
             <span id="ls-msg" class="hint"></span>

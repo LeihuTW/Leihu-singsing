@@ -704,6 +704,46 @@ $("#lrc-auto").onclick = () => {
   $("#lrc").value = S.autoLrc; setLines(S.autoLrc); toast("已還原，按「儲存歌詞」才會保存");
 };
 
+/* 匯入歌詞檔（LRC／SRT／TXT），自動判斷 UTF-8、Big5、GBK 編碼 */
+$("#lrc-import").onclick = () => { if (!S.song) return; $("#lrc-file").value = ""; $("#lrc-file").click(); };
+$("#lrc-file").onchange = async e => {
+  const f = e.target.files[0];
+  if (!f) return;
+  if (f.size > 2e6) return toast("檔案太大，不像是歌詞檔");
+  const buf = await f.arrayBuffer();
+  let text = new TextDecoder("utf-8").decode(buf);
+  if (text.includes("\ufffd")) {
+    // 不是 UTF-8：試繁體（Big5）和簡體（GBK），取亂碼最少的
+    const tries = ["big5", "gbk"].map(enc => { try { return new TextDecoder(enc).decode(buf); } catch { return ""; } });
+    const bad = t => (t ? (t.match(/\ufffd/g) || []).length + (t.match(/[\u4e00-\u9fff]/g) ? 0 : 50) : 1e9);
+    text = [text, ...tries].sort((a, b) => bad(a) - bad(b))[0];
+  }
+  try {
+    const r = await api(`/api/songs/${S.song.id}/lyrics/import`, { json: { text, name: f.name } });
+    $("#lrc").value = r.lrc; setLines(r.lrc); S.dirty = true;
+    $("#cand-box").hidden = true;
+    toast(`已匯入「${f.name}」：${r.how}`, 5000);
+  } catch (err) { toast(err.message); }
+};
+
+/* 旋律與歌詞區的高度比例（拖曳分隔條，記在這台電腦） */
+(() => {
+  const wrap = $(".roll-wrap"), bar = $("#split");
+  const apply = h => { if (h) wrap.style.height = clamp(h, 160, window.innerHeight * 0.8) + "px"; else wrap.style.height = ""; S.dirty = true; };
+  apply(store.get("rollH", 0));
+  let drag = null;
+  bar.addEventListener("pointerdown", e => { drag = { y: e.clientY, h: wrap.getBoundingClientRect().height }; bar.setPointerCapture(e.pointerId); bar.classList.add("drag"); });
+  bar.addEventListener("pointermove", e => { if (drag) apply(drag.h + e.clientY - drag.y); });
+  const end = () => { if (!drag) return; drag = null; bar.classList.remove("drag"); store.set("rollH", Math.round(wrap.getBoundingClientRect().height)); };
+  bar.addEventListener("pointerup", end); bar.addEventListener("pointercancel", end);
+  bar.addEventListener("dblclick", () => { apply(0); store.set("rollH", 0); });
+  bar.addEventListener("keydown", e => {
+    const d = e.key === "ArrowUp" ? -20 : e.key === "ArrowDown" ? 20 : 0;
+    if (!d) return;
+    e.preventDefault(); apply(wrap.getBoundingClientRect().height + d); store.set("rollH", Math.round(wrap.getBoundingClientRect().height));
+  });
+})();
+
 /* 旋律顯示方式、歌詞字級（記在這台電腦） */
 S.melMode = store.get("melMode", "both");
 S.lyrSize = store.get("lyrSize", 18);
@@ -830,7 +870,7 @@ $("#cand-keep").onclick = async () => {
 };
 async function searchLyrics(q) {
   const msg = $("#ls-msg"), box = $("#ls-results");
-  msg.textContent = "搜尋中（LRCLIB、網易雲，原文與簡體各搜一次）…"; box.innerHTML = "";
+  msg.textContent = "搜尋中（LRCLIB、網易雲、酷狗，原文與簡體各搜一次）…"; box.innerHTML = "";
   try {
     const r = await api(`/api/songs/${S.song.id}/lyrics/search?q=${encodeURIComponent(q || "")}`);
     if (!q) $("#ls-q").value = r.query;
@@ -952,9 +992,17 @@ async function startMic() {
     });
     const c = ac(); c.resume();
     const src = c.createMediaStreamSource(stream);
+    // 麥克風 → (原始音量表) → 增益 → (音量表、音高) → 限幅器 → 錄音
+    const raw = c.createAnalyser(); raw.fftSize = 2048;
+    const gain = c.createGain(); gain.gain.value = S.micGain;
     const an = c.createAnalyser(); an.fftSize = 2048;
-    src.connect(an);
-    S.mic = { stream, src, an, buf: new Float32Array(an.fftSize), tick: 0 };
+    const lim = c.createDynamicsCompressor();   // 防爆音：超過 -3 dB 才壓，平常不影響聲音
+    lim.threshold.value = -3; lim.knee.value = 0; lim.ratio.value = 20; lim.attack.value = 0.002; lim.release.value = 0.1;
+    const dest = c.createMediaStreamDestination();
+    src.connect(raw); src.connect(gain); gain.connect(an); gain.connect(lim); lim.connect(dest);
+    S.mic = { stream, src, raw, gain, an, lim, dest, buf: new Float32Array(an.fftSize),
+              rbuf: new Float32Array(raw.fftSize), tick: 0, peak: 0, peakT: 0, clipRaw: 0, clipGain: 0, auto: null };
+    $("#mic-lv").hidden = false;
     $("#mic").textContent = "關閉麥克風"; $("#mic").classList.add("on");
     $("#rec").disabled = false;
     const label = stream.getAudioTracks()[0]?.label || "";
@@ -971,7 +1019,8 @@ async function startMic() {
 function stopMic() {
   if (S.rec) stopRecording();
   S.mic.stream.getTracks().forEach(t => t.stop());
-  S.mic.src.disconnect(); S.mic = null; S.liveNow = null;
+  S.mic.src.disconnect(); S.mic.gain.disconnect(); S.mic.lim.disconnect(); S.mic = null; S.liveNow = null;
+  $("#mic-lv").hidden = true;
   $("#mic").textContent = "開啟麥克風"; $("#mic").classList.remove("on");
   $("#rec").disabled = true;
   $("#mic-state").textContent = "戴耳機唱，避免伴奏被麥克風收進去。";
@@ -980,6 +1029,7 @@ function micFrame() {
   if (!S.mic) return;
   if (++S.mic.tick % 2) return;
   S.mic.an.getFloatTimeDomainData(S.mic.buf);
+  micLevel();
   const m = detect(S.mic.buf, ac().sampleRate);
   S.liveNow = m;
   if (S.playing) {
@@ -990,12 +1040,63 @@ function micFrame() {
   S.dirty = true;
 }
 
+/* 麥克風音量表、增益、自動調整（1.2） */
+S.micGain = store.get("micGain", 1);
+const toDb = v => (v > 1e-5 ? 20 * Math.log10(v) : -120);
+function syncGainUi() {
+  $("#mic-gain").value = Math.round(S.micGain * 100);
+  $("#mic-gain-v").textContent = Math.round(S.micGain * 100) + "%";
+  if (S.mic) S.mic.gain.gain.setTargetAtTime(S.micGain, ac().currentTime, 0.02);
+}
+function setMicGain(g) { S.micGain = clamp(g, 0.1, 3); store.set("micGain", S.micGain); syncGainUi(); }
+$("#mic-gain").oninput = e => setMicGain(e.target.value / 100);
+syncGainUi();
+function micLevel() {
+  const M = S.mic, now = performance.now();
+  let pk = 0, sum = 0;
+  for (const v of M.buf) { const a = Math.abs(v); if (a > pk) pk = a; sum += v * v; }
+  M.raw.getFloatTimeDomainData(M.rbuf);
+  let rpk = 0; for (const v of M.rbuf) { const a = Math.abs(v); if (a > rpk) rpk = a; }
+  const db = toDb(pk), rms = toDb(Math.sqrt(sum / M.buf.length));
+  if (pk >= M.peak || now - M.peakT > 1500) { M.peak = pk; M.peakT = now; }
+  const pos = d => clamp((d + 60) / 60, 0, 1) * 100;
+  $("#mic-bar").style.setProperty("--v", pos(db).toFixed(1) + "%");
+  $("#mic-pk").style.left = `calc(${pos(toDb(M.peak)).toFixed(1)}% - 1px)`;
+  $("#mic-db").textContent = db < -59 ? "-∞ dB" : `${db.toFixed(0)} dB`;
+  if (rpk >= 0.985) M.clipRaw = now;
+  if (pk >= 0.985) M.clipGain = now;
+  if (M.auto) autoStep(pk, rms);
+  const w = $("#mic-warn");
+  let msg = "", cls = "";
+  if (now - M.clipRaw < 2500) { msg = "麥克風本身收音過大（爆音）：請到 Windows 的音效設定把麥克風音量調低，或離麥克風遠一點"; cls = "bad"; }
+  else if (now - M.clipGain < 2500) { msg = "音量太大，已自動壓住避免爆音；建議把增益調低一點，評分會更準"; cls = "bad"; }
+  else if (M.auto) { msg = "自動調整中：請用平常練唱的音量唱幾句…"; cls = "ok"; }
+  if (w._m !== msg) { w.textContent = msg; w.className = "hint " + cls; w._m = msg; }
+}
+// 自動調整：聽約 4 秒有聲音的片段，讓最大音量落在 -6 dB 左右
+$("#mic-auto").onclick = () => {
+  if (!S.mic) return toast("先開啟麥克風");
+  S.mic.auto = { peaks: [], t0: performance.now() };
+};
+function autoStep(pk) {
+  const A = S.mic.auto;
+  if (pk > 0.02) A.peaks.push(pk / S.micGain);   // 換算回增益前的音量
+  if (A.peaks.length >= 70 || performance.now() - A.t0 > 12000) {
+    S.mic.auto = null;
+    if (A.peaks.length < 15) return toast("沒聽到聲音，請靠近麥克風再試一次");
+    A.peaks.sort((a, b) => a - b);
+    const ref = A.peaks[Math.floor(A.peaks.length * 0.95)];
+    setMicGain(0.5 / ref);
+    toast(`已把增益調成 ${Math.round(S.micGain * 100)}%`);
+  }
+}
+
 /* 錄音 */
 $("#rec").onclick = () => (S.rec ? stopRecording() : startRecording());
 function startRecording() {
   if (!S.mic) return;
   if (!S.playing) { if (S.loopA != null) S.t = S.loopA; S.live = []; play(); }
-  const mr = new MediaRecorder(S.mic.stream);
+  const mr = new MediaRecorder(S.mic.dest.stream);   // 錄的是調過增益、防爆音後的聲音
   const chunks = [];
   mr.ondataavailable = e => e.data.size && chunks.push(e.data);
   S.rec = { mr, chunks, start: cur() - 0.06 * S.speed, key: S.key, speed: S.speed };
