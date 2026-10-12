@@ -295,6 +295,15 @@ def get_take(sid, tid):
     return send_file(j, mimetype="application/json", max_age=0)
 
 
+@app.post("/api/songs/<sid>/takes/<tid>/rescore")
+def rescore_take(sid, tid):
+    d, j, w = _take_paths(sid, tid)
+    if not (j.exists() and w.exists()):
+        abort(404)
+    jid = jobs.find("take", sid, tid) or jobs.submit("take", sid, lambda report: P.score_take(d, tid, report), label=tid)
+    return jsonify(job=jid)
+
+
 @app.get("/api/songs/<sid>/takes/<tid>/audio")
 def take_audio(sid, tid):
     _, _, w = _take_paths(sid, tid)

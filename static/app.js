@@ -1162,8 +1162,22 @@ function renderTakes(takes) {
     box.appendChild(el);
   }
 }
+async function rescoreTake(id, quiet) {
+  try {
+    if (!quiet) toast("重新分析這次錄音…");
+    const r = await api(`/api/songs/${S.song.id}/takes/${id}/rescore`, { json: {} });
+    await waitJob(r.job);
+    await refreshTakes(id);
+  } catch (e) { toast(e.message); }
+}
 async function selectTake(id) {
   const t = await api(`/api/songs/${S.song.id}/takes/${id}`);
+  if (t.status === "done" && (t.algo || 1) < 2 && !S.rescored?.[id]) {
+    // 1.2 以前的錄音：用新的分析方式（去掉音頭音尾往下掉的雜訊）自動重新評分一次
+    (S.rescored ||= {})[id] = true;
+    toast("用新的分析方式重新評分這次錄音…");
+    return rescoreTake(id, true);
+  }
   S.take = t; S.takeBuf = null;
   if (t.pitch) t.pitch.midiArr = Float32Array.from(t.pitch.midi, v => (v == null ? NaN : v));
   renderTakes(S.takes);
@@ -1185,7 +1199,7 @@ function renderTakeDetail() {
   box.innerHTML = `<div class="hint">命中率是落在原唱 ±50 音分內的比例。已自動對齊 ${t.offset > 0 ? "+" : ""}${t.offset}s 的錄音延遲${t.octave ? "，並換算八度" : ""}。</div>
     ${worst.length ? `<b>最需要練的句子</b>` : ""}
     <div class="wl"></div>
-    <div class="row"><button id="coach">請 Claude 給練習建議</button><button id="del-take" class="ghost danger">刪除這次錄音</button></div>
+    <div class="row"><button id="coach">請 Claude 給練習建議</button><button id="rescore" class="ghost">重新評分</button><button id="del-take" class="ghost danger">刪除這次錄音</button></div>
     <div class="coach" ${t.coach ? "" : "hidden"}></div>`;
   const wl = $(".wl", box);
   for (const l of worst) {
@@ -1203,6 +1217,7 @@ function renderTakeDetail() {
     catch (e) { out.textContent = e.message; }
     finally { b.disabled = false; }
   };
+  $("#rescore").onclick = () => rescoreTake(t.id);
   const del = $("#del-take");
   del.onclick = async () => {
     if (!del.dataset.armed) { del.dataset.armed = "1"; del.textContent = "確定刪除？"; setTimeout(() => { delete del.dataset.armed; del.textContent = "刪除這次錄音"; }, 3000); return; }
@@ -1399,7 +1414,8 @@ function drawVoice(g, G, tAt, mAt, a, b, width, alpha, liveMode) {
   let prev = null;
   for (let i = a; i <= b; i++) {
     const t = tAt(i), m = mAt(i);
-    if (isNaN(m) || (liveMode && prev && t - prev.t > 0.12)) { prev = isNaN(m) ? null : { t, m }; continue; }
+    // 沒聲音、中斷太久，或一瞬間跳超過 3 個半音（通常是音頭音尾分析不準）：斷開線，不畫垂直的線
+    if (isNaN(m) || (prev && (Math.abs(m - prev.m) > 3 || (liveMode && t - prev.t > 0.12)))) { prev = isNaN(m) ? null : { t, m }; continue; }
     if (prev) {
       const ref = refAt(t);
       let shown = m, ok = true;

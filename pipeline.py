@@ -503,8 +503,11 @@ def step_separate(d: Path, cfg: dict, report) -> None:
 
 # ---------------------------------------------------------------- 音高
 
-def track_pitch(y16: np.ndarray, cfg: dict | None = None) -> np.ndarray:
-    """16 kHz 單聲道 → 每 10 ms 一個 MIDI 音高（無聲為 NaN）。"""
+def track_pitch(y16: np.ndarray, cfg: dict | None = None, strict: bool = False) -> np.ndarray:
+    """16 kHz 單聲道 → 每 10 ms 一個 MIDI 音高（無聲為 NaN）。
+
+    strict=True 用於麥克風錄音：門檻較嚴、依背景噪音決定靜音門檻，並去掉每個音頭尾的滑落／滑入
+    （聲音變弱時音高分析會往下掉，畫出來像垂直往下的線，也會拉低評分）。"""
     import librosa
     cfg = cfg or load_config()
     n_frames = 1 + len(y16) // HOP
@@ -525,7 +528,7 @@ def track_pitch(y16: np.ndarray, cfg: dict | None = None) -> np.ndarray:
             p = torchcrepe.filter.median(p, 3)
         f0 = f[0].cpu().numpy()
         per = p[0].cpu().numpy()
-        voiced = per > 0.45
+        voiced = per > (0.6 if strict else 0.45)
     else:
         f0, voiced, _ = librosa.pyin(y16, fmin=65, fmax=1100, sr=PITCH_SR,
                                      frame_length=1024, hop_length=HOP)
@@ -533,10 +536,64 @@ def track_pitch(y16: np.ndarray, cfg: dict | None = None) -> np.ndarray:
     m = min(len(f0), len(rms), n_frames)
     f0, voiced, rms = f0[:m], voiced[:m], rms[:m]
     gate = rms < max(float(rms.max()) * 0.03, 1e-4)
+    if strict and m:
+        floor = float(np.percentile(rms, 10))   # 背景噪音
+        gate |= rms < max(floor * 4, float(np.percentile(rms, 95)) * 0.06)
     midi = np.full(m, np.nan, dtype=np.float32)
     ok = voiced & ~gate & np.isfinite(f0) & (f0 > 0)
     midi[ok] = 69 + 12 * np.log2(f0[ok] / 440.0)
+    if strict:
+        midi[midi < 36] = np.nan   # 低於 C2 不可能是歌聲
+        midi = trim_glides(midi)
     return clean_pitch(midi)
+
+
+def trim_glides(midi: np.ndarray, slope: float = 0.9, k: int = 3) -> np.ndarray:
+    """去掉每段聲音開頭與結尾「快速滑動」的部分（30 ms 內變化超過 slope 個半音）。
+
+    只從兩端往內修，句子中間正常的換音、滑音不受影響。"""
+    out = midi.copy()
+    n = len(out)
+    i = 0
+    while i < n:
+        if np.isnan(out[i]):
+            i += 1
+            continue
+        j = i
+        while j < n and not np.isnan(out[j]):
+            j += 1
+        s, e = i, j
+        while s + k < e and abs(out[s] - out[s + k]) > slope:
+            s += 1
+        while e - k - 1 >= s and abs(out[e - 1] - out[e - 1 - k]) > slope:
+            e -= 1
+        # 第二步：從兩端找最近一段穩定的音（8 格內起伏小於 0.6 半音），
+        # 比它偏離超過 1.5 半音的頭尾視為滑入／滑落（慢慢掉下去的尾音也能去掉）
+        w = 8
+        for q in range(e - w, s - 1, -1):
+            seg = out[q:q + w]
+            if seg.max() - seg.min() < 0.6:
+                med = float(np.median(seg))
+                t = q + w
+                while t < e and abs(out[t] - med) <= 1.5:
+                    t += 1
+                e = t
+                break
+        for q in range(s, e - w + 1):
+            seg = out[q:q + w]
+            if seg.max() - seg.min() < 0.6:
+                med = float(np.median(seg))
+                t = q
+                while t > s and abs(out[t - 1] - med) <= 1.5:
+                    t -= 1
+                s = t
+                break
+        out[i:s] = np.nan
+        out[e:j] = np.nan
+        if e - s < 6:
+            out[s:e] = np.nan
+        i = j
+    return out
 
 
 def clean_pitch(f0: np.ndarray) -> np.ndarray:
@@ -832,12 +889,15 @@ def lyric_lines(d: Path) -> list[dict]:
     return [l for l in parse_lrc(p.read_text("utf-8")) if l["t"] is not None]
 
 
+TAKE_ALGO = 2   # 錄音分析方式的版本；舊版分析的錄音會自動重新評分
+
+
 def score_take(d: Path, take_id: str, report) -> None:
     td = d / "takes"
     info = json.loads((td / f"{take_id}.json").read_text("utf-8"))
     report("分析你的錄音", 0.2)
     y16 = read_audio(td / f"{take_id}.wav", sr=PITCH_SR, mono=True)
-    mine = track_pitch(y16)
+    mine = track_pitch(y16, strict=True)
     ref, _ = load_pitch(d)
     key = int(info.get("key", 0))
     speed = float(info.get("speed", 1.0))
@@ -901,6 +961,7 @@ def score_take(d: Path, take_id: str, report) -> None:
             "midi": [None if np.isnan(v) else round(float(v), 2) for v in mine],
         },
         "status": "done",
+        "algo": TAKE_ALGO,
     })
     (td / f"{take_id}.json").write_text(json.dumps(info, ensure_ascii=False), "utf-8")
 
