@@ -8,7 +8,7 @@
 </head>
 <body>
 <header class="bar">
-  <span class="logo">雷虎練唱台<small id="ver">1.2.2</small></span>
+  <span class="logo">雷虎練唱台<small id="ver">1.3</small></span>
   <nav class="row">
     <button id="nav-lib" class="tab cur">歌曲庫</button>
     <button id="nav-practice" class="tab" disabled>練唱</button>
@@ -76,10 +76,8 @@
         <label class="hint" title="從頭播放或錄音時，自動從第一句前 5 秒開始"><input id="auto-skip" type="checkbox"> 自動</label>
         <span id="time" class="num">0:00.0 / 0:00</span>
         <input id="seek" class="seek" type="range" min="0" max="1" step="0.01" value="0" aria-label="播放位置">
-        <span class="grp"><label>KEY</label>
-          <button id="key-down" aria-label="降半音">−</button>
-          <span id="key-val" class="keyval">0</span>
-          <button id="key-up" aria-label="升半音">+</button>
+        <span class="grp"><label for="key-sel">KEY</label>
+          <select id="key-sel" title="升降幾個半音；選了才會開始轉換，一次到位"></select>
         </span>
         <span class="grp"><label for="speed">速度</label>
           <select id="speed">
@@ -100,6 +98,7 @@
         <span class="grp"><label>歌詞</label>
           <button id="lyr-show" title="在旋律上方逐字顯示歌詞">字在旋律上</button>
           <button id="lyr-edit" title="拖曳調整每句、每個字的時間">調整</button>
+          <button id="lyr-color" title="唱到哪個字就把哪個字上色；歌詞時間沒對準時可以關掉">逐字上色</button>
           <label for="lyr-size" title="旋律上歌詞的字級">字級</label>
           <input id="lyr-size" type="range" min="12" max="40" step="1" value="18" style="width:80px">
         </span>
@@ -145,6 +144,7 @@
           </div>
           <span id="mic-warn" class="hint"></span>
         </div>
+        <div id="key-hint" class="key-hint" hidden><span></span><button class="primary" hidden></button></div>
         <div id="takes" class="takes"></div>
         <div id="take-detail" class="detail"></div>
       </div>

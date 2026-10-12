@@ -255,3 +255,11 @@ a.tab { text-decoration: none; font-size: 14px; }
 #mic-db, #mic-gain-v { width: 58px; text-align: right; flex: none; }
 #mic-warn.bad { color: var(--bad); }
 #mic-warn.ok { color: var(--accent); }
+
+/* 1.3：建議 KEY */
+.key-hint { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 6px; padding: 8px 10px; border-radius: 8px; border: 1px solid var(--line); font-size: 13px; }
+.key-hint.warn { border-color: var(--melody); }
+.key-hint button { padding: 3px 10px; font-size: 12px; }
+/* 1.3：關閉逐字上色時，正在唱的那句整句用一般文字色，不做漸進上色 */
+.lyr.nocolor .lyr-now .base { color: var(--ink); }
+.lyr.nocolor .lyr-now .fill { display: none; }

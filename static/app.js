@@ -302,6 +302,7 @@ async function waitJob(jid, onStep) {
     onStep && onStep(j);
     if (j.status === "done") return j;
     if (j.status === "error") throw new Error(j.error || "處理失敗");
+    if (j.status === "cancelled") throw Object.assign(new Error("已取消"), { cancelled: true });
     await new Promise(r => setTimeout(r, 700));
   }
 }
@@ -360,6 +361,7 @@ async function openSong(id) {
   S.key = saved.key || 0; S.speed = saved.speed || 1;
   if (saved.vol) Object.assign(S.vol, saved.vol);
   S.t = 0; S.loopA = S.loopB = null; S.live = []; S.take = null; S.takeBuf = null;
+  keyHintReset();
   computeRange();
   $("#p-title").textContent = song.title;
   $("#p-chips").innerHTML = `<span class="chip ${song.separation === "uvr" ? "ok" : "warn"}">${song.separation === "uvr" ? "AI 分軌" : "聲像分軌"}</span>`
@@ -369,7 +371,7 @@ async function openSong(id) {
   checkCandidates(id);
 
   $("#speed").value = String(S.speed);
-  $("#key-val").textContent = (S.key > 0 ? "+" : "") + S.key;
+  $("#key-sel").value = String(S.key);
   $("#nav-practice").disabled = false;
   renderFaders();
   renderTakes(song.takes);
@@ -401,11 +403,19 @@ async function loadAudio() {
   const busy = $("#loading");
   S.loadingAudio = true;
   busy.hidden = false; busy.textContent = "載入分軌…";
+  const req = (S.audioReq = (S.audioReq || 0) + 1);   // 連續切換時，只有最後一次有效
   try {
     const v = await api(`/api/songs/${id}/variant`, { json: { key: S.key, speed: S.speed } });
     if (!v.ready) {
-      await waitJob(v.job, j => (busy.textContent = `${j.step}（${Math.round(j.progress * 100)}%）`));
+      const label = `KEY ${S.key > 0 ? "+" : ""}${S.key}、速度 ${Math.round(S.speed * 100)}%`;
+      await waitJob(v.job, j => {
+        if (req !== S.audioReq) throw Object.assign(new Error("已切換"), { cancelled: true });
+        busy.textContent = j.status === "queued"
+          ? `準備 ${label}：等待前面 ${j.ahead || 1} 個工作完成…`
+          : `${j.step}（${Math.round(j.progress * 100)}%）　第一次轉換這個 KEY 需要一點時間，之後會存起來`;
+      });
     }
+    if (req !== S.audioReq) return;
     busy.textContent = "解碼音訊…";
     const ctx = ac();
     const stems = await Promise.all(["lead", "back", "inst"].map(async s => {
@@ -413,16 +423,17 @@ async function loadAudio() {
       if (!r.ok) throw new Error("讀不到分軌檔");
       return ctx.decodeAudioData(await r.arrayBuffer());
     }));
-    if (!S.song || S.song.id !== id) return;
+    if (!S.song || S.song.id !== id || req !== S.audioReq) return;
     S.bufs = { lead: stems[0], back: stems[1], inst: stems[2] };
     S.dur = S.song.duration || stems[2].duration * S.speed;
     S.guide = await renderGuide();
     $("#seek").max = String(S.dur);
     busy.hidden = true;
   } catch (e) {
+    if (e.cancelled) return;   // 被新的切換取代：交給最新的那次處理
     busy.textContent = e.message;
   } finally {
-    S.loadingAudio = false; S.dirty = true;
+    if (req === S.audioReq) { S.loadingAudio = false; S.dirty = true; }
   }
 }
 
@@ -539,8 +550,9 @@ async function changeVariant(key, speed) {
   const wasPlaying = S.playing;
   const songT = cur();
   pause();
+  if (S.key !== clamp(key, -12, 12)) keyHintReset();
   S.key = clamp(key, -12, 12); S.speed = speed;
-  $("#key-val").textContent = (S.key > 0 ? "+" : "") + S.key;
+  $("#key-sel").value = String(S.key);
   $("#speed").value = String(S.speed);
   saveSongPrefs();
   computeRange();
@@ -548,8 +560,17 @@ async function changeVariant(key, speed) {
   S.t = songT;
   if (wasPlaying) play();
 }
-$("#key-up").onclick = () => changeVariant(S.key + 1, S.speed);
-$("#key-down").onclick = () => changeVariant(S.key - 1, S.speed);
+// KEY 下拉選單：-12～+12，選了才轉換，一次到位
+(() => {
+  const sel = $("#key-sel");
+  for (let k = 12; k >= -12; k--) {
+    const o = document.createElement("option");
+    o.value = String(k);
+    o.textContent = k === 0 ? "0（原調）" : (k > 0 ? "+" : "−") + Math.abs(k) + (Math.abs(k) === 12 ? (k > 0 ? "（高八度）" : "（低八度）") : "");
+    sel.appendChild(o);
+  }
+  sel.onchange = () => changeVariant(+sel.value, S.speed);
+})();
 $("#speed").onchange = e => changeVariant(S.key, +e.target.value);
 function saveSongPrefs() { if (S.song) store.set(`song:${S.song.id}`, { key: S.key, speed: S.speed, vol: S.vol }); }
 
@@ -788,6 +809,10 @@ function syncLyrButtons() {
   $("#roll").classList.toggle("editing", S.editLyr);
   S.dirty = true;
 }
+S.charColor = store.get("charColor", true);
+const syncColorBtn = () => { $("#lyr-color").classList.toggle("on", S.charColor); $("#lyr").classList.toggle("nocolor", !S.charColor); S.dirty = true; };
+$("#lyr-color").onclick = () => { S.charColor = !S.charColor; store.set("charColor", S.charColor); syncColorBtn(); toast(S.charColor ? "已開啟逐字上色" : "已關閉逐字上色：只標出正在唱的那一句", 2000); };
+syncColorBtn();
 $("#lyr-show").onclick = () => { S.showLyr = !S.showLyr; if (!S.showLyr) S.editLyr = false; store.set("showLyr", S.showLyr); syncLyrButtons(); };
 $("#lyr-edit").onclick = () => { S.editLyr = !S.editLyr; if (S.editLyr) { S.showLyr = true; store.set("showLyr", true); if (S.playing) pause(); } syncLyrButtons(); };
 syncLyrButtons();
@@ -1056,6 +1081,7 @@ function micFrame() {
   if (S.playing) {
     const t = cur() - (S.mic.buf.length / 2 / ac().sampleRate) * S.speed;
     S.live.push({ t, m });
+    if (m != null) keyHintAdd(m, refAt(t));
     if (S.live.length > 4000) S.live.splice(0, 1000);
   }
   S.dirty = true;
@@ -1111,6 +1137,38 @@ function autoStep(pk) {
     toast(`已把增益調成 ${Math.round(S.micGain * 100)}%`);
   }
 }
+
+/* 建議 KEY（1.3）：唱的時候比對你和原唱的音高差（八度差不算），
+   大多數音都固定差同樣幾個半音，就代表這個 KEY 不適合你的音域 */
+const KH = { buf: [], tick: 0 };
+function keyHintReset() { KH.buf = []; KH.tick = 0; renderKeyHint(null); }
+function keyHintAdd(m, r) {
+  if (isNaN(r)) return;
+  let b = Math.round(fold(m - r)); if (b === -6) b = 6;
+  KH.buf.push(b); if (KH.buf.length > 900) KH.buf.shift();   // 最近約 30 秒
+  if (++KH.tick % 30 === 0 && KH.buf.length >= 240) renderKeyHint(keyHintCalc(KH.buf));
+}
+function keyHintCalc(arr) {
+  const cnt = {}; for (const b of arr) cnt[b] = (cnt[b] || 0) + 1;
+  let shift = 0, best = 0; for (const [b, c] of Object.entries(cnt)) if (c > best) { best = c; shift = +b; }
+  const share = best / arr.length;
+  return { shift: Math.abs(shift) >= 2 && share >= 0.3 ? shift : 0, share, suggest: clamp(S.key + shift, -12, 12) };
+}
+function renderKeyHint(h) {
+  const box = $("#key-hint"), txt = $("span", box), btn = $("button", box);
+  if (!h) { box.hidden = true; return; }
+  box.hidden = false;
+  if (!h.shift) {
+    box.className = "key-hint"; btn.hidden = true;
+    txt.textContent = `目前 KEY ${fmtKey(S.key)} 和你的音域相符${h.share < 0.3 ? "（音高變化較大，再多唱幾句會更準）" : ""}。`;
+    return;
+  }
+  box.className = "key-hint warn"; btn.hidden = false;
+  txt.textContent = `你唱的音大多比目前 KEY ${h.shift > 0 ? "高" : "低"} ${Math.abs(h.shift)} 個半音（已排除八度差），建議改成 KEY ${fmtKey(h.suggest)}。`;
+  btn.textContent = `改用 KEY ${fmtKey(h.suggest)}`;
+  btn.onclick = () => { if (S.rec) stopRecording(); changeVariant(h.suggest, S.speed); keyHintReset(); toast(`已改成 KEY ${fmtKey(h.suggest)}，再唱一次試試`); };
+}
+const fmtKey = k => (k > 0 ? "+" : k < 0 ? "−" : "") + Math.abs(k);
 
 /* 錄音 */
 $("#rec").onclick = () => (S.rec ? stopRecording() : startRecording());
@@ -1197,7 +1255,7 @@ async function rescoreTake(id, quiet) {
 }
 async function selectTake(id) {
   const t = await api(`/api/songs/${S.song.id}/takes/${id}`);
-  if (t.status === "done" && (t.algo || 1) < 3 && !S.rescored?.[id]) {
+  if (t.status === "done" && (t.algo || 1) < 4 && !S.rescored?.[id]) {
     // 1.2 以前的錄音：用新的分析方式（去掉音頭音尾往下掉的雜訊）自動重新評分一次
     (S.rescored ||= {})[id] = true;
     toast("用新的分析方式重新評分這次錄音…");
@@ -1230,7 +1288,9 @@ function renderTakeDetail() {
     return;
   }
   const worst = (t.lines || []).slice().sort((a, b) => a.acc - b.acc).slice(0, 3);
-  box.innerHTML = `<div class="hint">命中率是落在原唱 ±50 音分內的比例（換音時早晚 0.1 秒內都算對）。已自動對齊 ${t.offset > 0 ? "+" : ""}${t.offset}s 的錄音延遲${t.octave ? "，並換算八度" : ""}。</div>
+  const kh = t.key_hint;
+  const khHtml = kh && kh.shift ? `<div class="key-hint warn"><span>這次錄音大多比 KEY ${fmtKey(t.key)} ${kh.shift > 0 ? "高" : "低"} ${Math.abs(kh.shift)} 個半音（已排除八度差，佔 ${Math.round(kh.share * 100)}%），建議改成 KEY ${fmtKey(kh.suggest)}。</span><button class="primary" id="take-key">改用 KEY ${fmtKey(kh.suggest)}</button></div>` : "";
+  box.innerHTML = khHtml + `<div class="hint">命中率是落在原唱 ±50 音分內的比例（換音時早晚 0.1 秒內都算對）。已自動對齊 ${t.offset > 0 ? "+" : ""}${t.offset}s 的錄音延遲${t.octave ? "，並換算八度" : ""}。</div>
     ${worst.length ? `<b>最需要練的句子</b>` : ""}
     <div class="wl"></div>
     <div class="row"><button id="coach">請 Claude 給練習建議</button><button id="rescore" class="ghost">重新評分</button><button id="del-take" class="ghost danger">刪除這次錄音</button></div>
@@ -1252,6 +1312,7 @@ function renderTakeDetail() {
     finally { b.disabled = false; }
   };
   $("#rescore").onclick = () => rescoreTake(t.id);
+  if ($("#take-key")) $("#take-key").onclick = () => { changeVariant(kh.suggest, S.speed); toast(`已改成 KEY ${fmtKey(kh.suggest)}`); };
   bindDelete(t, box);
 }
 function bindDelete(t, box) {
@@ -1436,7 +1497,7 @@ function drawCharLyrics(g, G, t1) {
       // 兩個字靠太近會疊在一起：往上錯開，最多疊三層
       for (let k = 0; k < 3 && placed.some(b => x - half < b.x1 && x + half > b.x0 && Math.abs(b.y - y) < fs * 0.9); k++) y -= fs + 2;
       placed.push({ x0: x - half, x1: x + half, y });
-      const sung = G.t >= u.t;
+      const sung = S.charColor && G.t >= u.t;
       g.lineWidth = 3.5; g.strokeStyle = C.panel; g.strokeText(u.c, x, y);
       g.fillStyle = sung ? C.melody : C.ink; g.fillText(u.c, x, y);
       const w = g.measureText(u.c).width;
@@ -1515,7 +1576,7 @@ function updateLyrics(t) {
     const prevT = k > 0 ? u[k - 1].t : now.t;
     p = k === 0 ? 0 : clamp((k - 1 + clamp((t - prevT) / Math.max(0.05, nextT - prevT), 0, 1)) / n, 0, 1);
   }
-  el.style.setProperty("--p", (p * 100).toFixed(1) + "%");
+  el.style.setProperty("--p", (S.charColor ? p * 100 : 0).toFixed(1) + "%");
   for (const [id, l] of [["#lyr-prev", prev], ["#lyr-next", next]]) {
     const node = $(id), tx = l ? l.text : (id === "#lyr-next" && !now && S.lines[0] ? S.lines[0].text : "");
     if (node._t !== tx) { node.textContent = tx; node._t = tx; }

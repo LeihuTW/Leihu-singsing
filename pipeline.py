@@ -8,7 +8,7 @@
   inst.wav          伴奏
   pitch.json        主唱音高曲線與音符
   lyrics.lrc        歌詞（含時間）
-  v_k+2_s100/       移調／變速後的分軌快取
+  v2_k+2_s100/      移調／變速後的分軌快取
   takes/            你的錄音與評分
 """
 from __future__ import annotations
@@ -491,7 +491,7 @@ def step_separate(d: Path, cfg: dict, report) -> None:
     else:
         notes.append("沒有安裝 audio-separator，使用聲像分離（品質較差）")
         separate_dsp(d, report)
-    for old in d.glob("v_*"):
+    for old in [*d.glob("v_*"), *d.glob("v2_*")]:
         shutil.rmtree(old, ignore_errors=True)
     meta = read_meta(d)
     meta["steps"]["separate"] = True
@@ -821,7 +821,8 @@ def step_lyrics(d: Path, cfg: dict, report) -> None:
 def variant_dir(d: Path, key: int, speed: float) -> Path:
     if key == 0 and abs(speed - 1) < 1e-3:
         return d
-    return d / f"v_k{key:+d}_s{int(round(speed * 100))}"
+    # v2：1.3 起分段處理（時間不漂移）；舊版的 v_k… 資料夾會在產生新版本時清掉
+    return d / f"v2_k{key:+d}_s{int(round(speed * 100))}"
 
 
 def shift_audio(y: np.ndarray, sr: int, semis: int, speed: float) -> np.ndarray:
@@ -843,20 +844,86 @@ def shift_audio(y: np.ndarray, sr: int, semis: int, speed: float) -> np.ndarray:
         return np.stack(out)
 
 
+def shift_parts(n: int, sr: int, cpus: int = 0) -> list[tuple[int, int]]:
+    """把一軌切成約 6 秒一段。
+
+    好處有兩個：所有 CPU 核心可以一起算；而且移調演算法處理長音檔時時間會慢慢漂移
+    （實測 40 秒累積約 45 毫秒），切短後每段重新對齊，伴奏和旋律線、歌詞不會越來越不同步。"""
+    parts = max(1, -(-n // (6 * sr)))
+    step = -(-n // parts)
+    return [(a, min(n, a + step)) for a in range(0, n, step)]
+
+
+def shift_piece(y: np.ndarray, sr: int, semis: int, speed: float, a: int, b: int) -> np.ndarray:
+    """處理 [a, b) 這一段，前後多帶 1 秒讓接縫處的聲音和整段處理時一樣。"""
+    pad = sr
+    sa, sb = max(0, a - pad), min(y.shape[1], b + pad)
+    return shift_audio(y[:, sa:sb], sr, semis, speed), sa
+
+
+def join_pieces(pieces: list, bounds: list[tuple[int, int]], n: int, sr: int, speed: float) -> np.ndarray:
+    """把各段接回去：交界處用 40 ms 交叉淡化，聽不出接縫。"""
+    total = int(round(n / speed))
+    ch = pieces[0][0].shape[0]
+    out = np.zeros((ch, total), dtype=np.float32)
+    xf = int(0.04 * sr)
+    for i, ((seg, sa), (a, b)) in enumerate(zip(pieces, bounds)):
+        g0 = int(round(a / speed)) - (xf // 2 if i else 0)
+        g1 = int(round(b / speed)) + (xf - xf // 2 if i < len(bounds) - 1 else 0)
+        g1 = min(g1, total)
+        off = int(round(sa / speed))
+        l0, l1 = g0 - off, g1 - off
+        l1 = min(l1, seg.shape[1])
+        g1 = g0 + (l1 - l0)
+        w = np.ones(g1 - g0, dtype=np.float32)
+        if i:
+            w[:xf] = np.linspace(0, 1, xf, dtype=np.float32)
+        if i < len(bounds) - 1:
+            w[-xf:] = np.linspace(1, 0, xf, dtype=np.float32)
+        out[:, g0:g1] += seg[:, l0:l1] * w
+    return out
+
+
 def step_variant(d: Path, key: int, speed: float, report) -> None:
+    """產生移調／變速版本。三軌各切成多段，用所有 CPU 核心同時處理。"""
+    from concurrent.futures import ThreadPoolExecutor, as_completed
     vd = variant_dir(d, key, speed)
     if vd == d:
         return
     vd.mkdir(exist_ok=True)
-    for i, stem in enumerate(STEMS):
-        dst = vd / f"{stem}.wav"
-        if dst.exists():
-            continue
-        report(f"移調 {key:+d}、速度 {int(speed * 100)}%：{('主唱', '合音', '伴奏')[i]}", 0.1 + i * 0.3)
+    for old in d.glob("v_k*"):   # 1.3 以前產生的版本（時間會漂移），用不到了
+        shutil.rmtree(old, ignore_errors=True)
+    todo = [s for s in STEMS if not (vd / f"{s}.wav").exists()]
+    if not todo:
+        return
+    label = f"移調 {key:+d}、速度 {int(speed * 100)}%"
+    cpus = max(1, os.cpu_count() or 1)
+    report(f"{label}：讀取音軌", 0.02)
+    data = {}
+    for stem in todo:
         y, sr = sf.read(str(d / f"{stem}.wav"), dtype="float32", always_2d=True)
-        out = shift_audio(y.T, sr, key, speed)
+        y = np.ascontiguousarray(y.T)
+        data[stem] = (y, sr, shift_parts(y.shape[1], sr, cpus))
+    total = sum(len(v[2]) for v in data.values())
+    report(f"{label}：用 {min(cpus, total)} 個 CPU 核心同時處理", 0.05)
+    results = {stem: [None] * len(v[2]) for stem, v in data.items()}
+    done = 0
+    ex = ThreadPoolExecutor(max_workers=cpus)
+    try:
+        futs = {ex.submit(shift_piece, y, sr, key, speed, a, b): (stem, i)
+                for stem, (y, sr, parts) in data.items() for i, (a, b) in enumerate(parts)}
+        for f in as_completed(futs):
+            stem, i = futs[f]
+            results[stem][i] = f.result()
+            done += 1
+            report(f"{label}：{done}/{total} 段（{min(cpus, total)} 核心同時處理）", 0.05 + 0.9 * done / total)
+    finally:
+        ex.shutdown(wait=True, cancel_futures=True)   # 取消時，還沒開始的段落直接丟掉
+    for stem, (y, sr, parts) in data.items():
+        out = join_pieces(results[stem], parts, y.shape[1], sr, speed)
         write_wav(vd / f"{stem}.tmp.wav", out, sr)
-        (vd / f"{stem}.tmp.wav").replace(dst)
+        (vd / f"{stem}.tmp.wav").replace(vd / f"{stem}.wav")
+    report(f"{label}：完成", 1.0)
 
 
 def variant_ready(d: Path, key: int, speed: float) -> bool:
@@ -892,7 +959,25 @@ def lyric_lines(d: Path) -> list[dict]:
     return [l for l in parse_lrc(p.read_text("utf-8")) if l["t"] is not None]
 
 
-TAKE_ALGO = 3   # 錄音分析方式的版本；舊版分析的錄音會自動重新評分
+def suggest_key(dd: np.ndarray, key: int) -> dict | None:
+    """依你和原唱的音高差（已去掉八度差，-6～+6 半音）找出最常見的偏移，推算適合你的 KEY。
+
+    大多數音都固定差同樣幾個半音，代表你習慣的音域和目前的 KEY 不合，而不是單純唱不準。"""
+    v = dd[~np.isnan(dd)]
+    if v.size < 150:
+        return None
+    b = np.round(v).astype(int)
+    b[b == -6] = 6   # -6 和 +6 是同一個音
+    vals, counts = np.unique(b, return_counts=True)
+    i = int(np.argmax(counts))
+    shift, share = int(vals[i]), float(counts[i] / b.size)
+    # 只差 0～1 個半音多半是音準問題；差 2 個以上而且有一定比例的音都這樣，才建議換 KEY
+    if abs(shift) < 2 or share < 0.3:
+        return {"shift": 0, "share": round(share, 2), "suggest": key}
+    return {"shift": shift, "share": round(share, 2), "suggest": max(-12, min(12, key + shift))}
+
+
+TAKE_ALGO = 4   # 錄音分析方式的版本；舊版分析的錄音會自動重新評分
 TOL_FRAMES = 10   # 評分的時間容錯：±0.1 秒
 
 
@@ -929,6 +1014,16 @@ def score_take(d: Path, take_id: str, report) -> None:
         m = int(np.sum(np.abs(dd[~np.isnan(dd)]) < 0.5))
         if m > best:
             best, best_off = m, float(off)
+    # 建議 KEY 用另一種對齊：找「最多音都差同樣幾個半音」的位置（整首唱在別的 KEY 時，
+    # 上面「最準」的對齊會找錯位置）
+    kbest, koff = -1, best_off
+    for off in np.arange(-0.5, 1.0001, 0.02):
+        _, dk, _ = diffs(off)
+        b = np.round(dk[~np.isnan(dk)]).astype(int) % 12
+        c = int(np.bincount(b, minlength=12).max()) if b.size else 0
+        if c > kbest:
+            kbest, koff = c, float(off)
+    key_hint = suggest_key(diffs(koff)[1], key)
     ts, dd, r = diffs(best_off)
     # 時間容錯：每一格取前後 0.1 秒內最接近的原唱音高（換音稍早或稍晚不算走音）
     for k in list(range(-TOL_FRAMES, 0)) + list(range(1, TOL_FRAMES + 1)):
@@ -980,11 +1075,16 @@ def score_take(d: Path, take_id: str, report) -> None:
         },
         "status": "done",
         "algo": TAKE_ALGO,
+        "key_hint": key_hint,
     })
     (td / f"{take_id}.json").write_text(json.dumps(info, ensure_ascii=False), "utf-8")
 
 
 # ---------------------------------------------------------------- 背景工作
+
+class JobCancelled(Exception):
+    """工作被新的要求取代（例如又換了 KEY），中途停止。"""
+
 
 class Jobs:
     """一次只跑一個重工作，避免記憶體爆掉。"""
@@ -1016,24 +1116,56 @@ class Jobs:
     def active(self) -> list[dict]:
         cutoff = time.time() - 600
         with self.lock:
-            return [dict(j) for j in self.state.values()
-                    if j["status"] in ("queued", "running") or j["created"] > cutoff]
+            return [dict(j) for j in self.state.values() if j["status"] != "cancelled"
+                    and (j["status"] in ("queued", "running") or j["created"] > cutoff)]
+
+    def cancel_queued(self, kind: str, song_id: str, keep_label: str) -> int:
+        """取消同一首歌還在排隊、但已經不需要的工作（例如連按好幾次 KEY 時中間的那些）。"""
+        n = 0
+        with self.lock:
+            for j in self.state.values():
+                if j["kind"] == kind and j["song"] == song_id and j["label"] != keep_label:
+                    if j["status"] == "queued":
+                        j.update(status="cancelled", step="已取消")
+                        n += 1
+                    elif j["status"] == "running":
+                        j["cancel"] = True   # 執行中的工作會在下一段處理完時停下
+                        n += 1
+        return n
+
+    def position(self, jid: str) -> int:
+        """前面還有幾個工作。"""
+        with self.lock:
+            me = self.state.get(jid)
+            if not me or me["status"] != "queued":
+                return 0
+            return sum(1 for j in self.state.values()
+                       if j["status"] in ("queued", "running") and j["created"] < me["created"])
 
     def find(self, kind: str, song_id: str, label: str = "") -> str | None:
         with self.lock:
             for j in self.state.values():
                 if (j["kind"], j["song"], j["label"]) == (kind, song_id, label) \
-                        and j["status"] in ("queued", "running"):
+                        and j["status"] in ("queued", "running") and not j.get("cancel"):
                     return j["id"]
         return None
 
     def _run(self):
         while True:
             jid, fn = self.q.get()
+            if self.get(jid)["status"] == "cancelled":
+                continue
             self.update(jid, status="running", step="開始")
+
+            def report(step, p, jid=jid):
+                if self.state[jid].get("cancel"):
+                    raise JobCancelled()
+                self.update(jid, step=step, progress=round(p, 3))
             try:
-                fn(lambda step, p: self.update(jid, step=step, progress=round(p, 3)))
+                fn(report)
                 self.update(jid, status="done", step="完成", progress=1.0)
+            except JobCancelled:
+                self.update(jid, status="cancelled", step="已取消")
             except UserError as e:
                 self.update(jid, status="error", error=str(e))
             except Exception as e:
@@ -1161,7 +1293,7 @@ def similarity(recognized: str, candidate: str) -> float | None:
     return round(sum(x.size for x in m.get_matching_blocks()) / len(a), 3)
 
 
-USER_AGENT = "LeihuLiantai/1.2.2 (+https://github.com/LeihuTW/Leihu-singsing)"   # HTTP 標頭只能用英文字
+USER_AGENT = "LeihuLiantai/1.3 (+https://github.com/LeihuTW/Leihu-singsing)"   # HTTP 標頭只能用英文字
 
 
 def _http_json(url: str, headers: dict | None = None, timeout: int = 10):

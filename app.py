@@ -17,11 +17,12 @@ from flask import Flask, abort, jsonify, request, send_file, send_from_directory
 import claude_api as C
 import pipeline as P
 
-VERSION = "1.2.2"
+VERSION = "1.3"
 HOST, PORT = "127.0.0.1", int(os.environ.get("LIANTAI_PORT", "8765"))
 app = Flask(__name__, static_folder=str(P.ROOT / "static"), static_url_path="/static")
 app.config["MAX_CONTENT_LENGTH"] = 1024 * 1024 * 1024
 jobs = P.Jobs()
+vjobs = P.Jobs()   # 移調／變速另外排隊：不會被分軌、評分卡住，也不會卡住它們
 
 
 @app.errorhandler(P.UserError)
@@ -42,7 +43,7 @@ def status():
     return jsonify(version=VERSION, root=str(P.ROOT), modules=P.module_status(),
                    claude_ready=bool(cfg.get("anthropic_api_key") or os.environ.get("ANTHROPIC_API_KEY")),
                    session_cost=C.summary()["session"]["cost_usd"],
-                   jobs=jobs.active())
+                   jobs=jobs.active() + vjobs.active())
 
 
 @app.get("/api/config")
@@ -219,7 +220,8 @@ def variant(sid):
     if P.variant_ready(d, key, speed):
         return jsonify(ready=True)
     label = f"{key}:{speed}"
-    jid = jobs.find("variant", sid, label) or jobs.submit(
+    vjobs.cancel_queued("variant", sid, label)   # 連按時，中間不要的 KEY 不用再算
+    jid = vjobs.find("variant", sid, label) or vjobs.submit(
         "variant", sid, lambda report: P.step_variant(d, key, speed, report), label=label)
     return jsonify(ready=False, job=jid)
 
@@ -250,9 +252,11 @@ def debug_stacks():
 
 @app.get("/api/jobs/<jid>")
 def job(jid):
-    j = jobs.get(jid)
+    q = jobs if jobs.get(jid) else vjobs
+    j = q.get(jid)
     if not j:
         abort(404)
+    j["ahead"] = q.position(jid)
     return jsonify(j)
 
 
