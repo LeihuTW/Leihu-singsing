@@ -1,0 +1,235 @@
+<!doctype html>
+<html lang="zh-Hant-TW">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>雷虎練唱台 1.1</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header class="bar">
+  <span class="logo">雷虎練唱台<small id="ver">1.1</small></span>
+  <nav class="row">
+    <button id="nav-lib" class="tab cur">歌曲庫</button>
+    <button id="nav-practice" class="tab" disabled>練唱</button>
+    <a id="nav-help" class="tab" href="/static/help.html">說明</a>
+  </nav>
+  <span class="spacer"></span>
+  <button id="claude-chip" class="chip" title="查看 Claude 用量">Claude：未設定</button>
+  <button id="btn-settings" class="ghost">設定</button>
+</header>
+
+<main>
+  <!-- 歌曲庫 -->
+  <section id="view-lib">
+    <div class="lib-head">
+      <h1>歌曲庫</h1>
+      <label class="btn primary">匯入歌曲<input type="file" id="import" accept="audio/*,.mp3,.wav,.flac,.ogg,.m4a" multiple hidden></label>
+      <span class="hint">處理都在這台電腦上進行，第一次使用各模型時需要連網下載。</span>
+    </div>
+    <form id="yt-form" class="yt">
+      <label for="yt-url" class="yt-label">YouTube</label>
+      <input id="yt-url" type="text" inputmode="url" autocomplete="off" placeholder="https://www.youtube.com/watch?v=…">
+      <button id="yt-go" type="submit">下載並分析</button>
+      <span id="yt-msg" class="hint"></span>
+    </form>
+    <div id="drop" class="drop">把音訊檔拖到這裡。匯入後會自動分離主唱、合音、伴奏，分析旋律並辨識歌詞。</div>
+    <div id="jobs" class="jobs"></div>
+    <div class="lib-tools">
+      <nav id="cats" class="cats" aria-label="分類"></nav>
+      <input id="lib-q" type="search" placeholder="搜尋歌名、歌手、歌詞" aria-label="搜尋歌曲">
+    </div>
+    <div id="cat-tools" class="row cat-tools" hidden>
+      <span class="hint" id="cat-hint"></span>
+      <button id="cat-rename" class="ghost">改名</button>
+      <button id="cat-del" class="ghost danger">刪除分類</button>
+    </div>
+    <div id="songs" class="songs"></div>
+  </section>
+
+  <!-- 練唱 -->
+  <section id="view-practice" hidden>
+    <div class="p-head">
+      <button id="back" class="ghost">← 歌曲庫</button>
+      <h1 id="p-title"></h1>
+      <span id="p-chips" class="row"></span>
+    </div>
+
+    <div class="stage">
+      <div class="roll-wrap">
+        <canvas id="roll" aria-label="旋律卷軸，點一下可跳到該時間"></canvas>
+        <div id="hud" class="hud"></div>
+        <div id="edit-hint" class="edit-hint" hidden>調整模式：拖曳上方的句子標記移動整句，拖曳旋律上的字調整時間，雙擊字可以修改文字</div>
+        <input id="char-edit" class="char-edit" type="text" hidden aria-label="修改這個字">
+        <div id="loading" class="loading" hidden></div>
+      </div>
+      <div class="lyr" id="lyr">
+        <div class="lyr-size"><button id="lyr-smaller" class="ghost" aria-label="歌詞縮小">A−</button><button id="lyr-bigger" class="ghost" aria-label="歌詞放大">A＋</button></div>
+        <div id="lyr-prev" class="lyr-prev"></div>
+        <div id="lyr-now" class="lyr-now"><span class="base"></span><span class="fill" aria-hidden="true"></span></div>
+        <div id="lyr-next" class="lyr-next"></div>
+      </div>
+      <div class="transport">
+        <button id="play" class="primary">播放</button>
+        <span id="time" class="num">0:00.0 / 0:00</span>
+        <input id="seek" class="seek" type="range" min="0" max="1" step="0.01" value="0" aria-label="播放位置">
+        <span class="grp"><label>KEY</label>
+          <button id="key-down" aria-label="降半音">−</button>
+          <span id="key-val" class="keyval">0</span>
+          <button id="key-up" aria-label="升半音">+</button>
+        </span>
+        <span class="grp"><label for="speed">速度</label>
+          <select id="speed">
+            <option value="0.7">70%</option><option value="0.8">80%</option><option value="0.9">90%</option>
+            <option value="1" selected>100%</option><option value="1.1">110%</option>
+          </select>
+        </span>
+        <span class="grp">
+          <button id="set-a">A</button><button id="set-b">B</button><button id="clear-ab" class="ghost">取消循環</button>
+        </span>
+        <span class="grp"><label for="mel-mode">旋律</label>
+          <select id="mel-mode" title="旋律的顯示方式">
+            <option value="both">原聲＋區塊</option>
+            <option value="curve">原聲曲線</option>
+            <option value="blocks">音符區塊</option>
+          </select>
+        </span>
+        <span class="grp"><label>歌詞</label>
+          <button id="lyr-show" title="在旋律上方逐字顯示歌詞">字在旋律上</button>
+          <button id="lyr-edit" title="拖曳調整每句、每個字的時間">調整</button>
+          <label for="lyr-size" title="旋律上歌詞的字級">字級</label>
+          <input id="lyr-size" type="range" min="12" max="40" step="1" value="18" style="width:80px">
+        </span>
+        <span class="grp"><label for="zoom">視窗</label><input id="zoom" type="range" min="3" max="30" step="1" value="8"></span>
+      </div>
+    </div>
+
+    <div class="panels">
+      <div class="panel">
+        <h2>分軌與混音</h2>
+        <div class="row">
+          <button data-preset="orig">原曲</button>
+          <button data-preset="karaoke">卡拉OK</button>
+          <button data-preset="practice">練唱</button>
+          <button data-preset="solo">只聽主唱</button>
+        </div>
+        <div id="faders" class="detail"></div>
+        <p class="hint">「練唱」會把主唱調小、打開旋律導引音。移調和變速在本機算好後會存起來，下次切換不用再等。</p>
+      </div>
+
+      <div class="panel">
+        <h2>我的演唱</h2>
+        <div class="row">
+          <button id="mic">開啟麥克風</button>
+          <button id="rec" class="rec" disabled>● 錄一次</button>
+        </div>
+        <div class="row">
+          <label for="mic-dev" class="hint">麥克風</label>
+          <select id="mic-dev" style="flex:1;min-width:0"><option value="">系統預設</option></select>
+          <span id="mic-state" class="hint">戴耳機唱，避免伴奏被麥克風收進去。</span>
+        </div>
+        <div id="takes" class="takes"></div>
+        <div id="take-detail" class="detail"></div>
+      </div>
+
+      <div class="panel">
+        <h2>歌詞</h2>
+        <div id="cand-box" class="cand" hidden>
+          <b>找到線上歌詞，選一版使用</b>
+          <span class="hint">相似度是和自動辨識結果比對的程度，越高越可能是同一首歌、同一個版本。</span>
+          <div id="cand-list" class="ls-results"></div>
+          <div class="row"><button id="cand-keep" class="ghost">都不用，保留辨識結果</button></div>
+        </div>
+        <textarea id="lrc" spellcheck="false" aria-label="歌詞（LRC 格式）"></textarea>
+        <div class="row">
+          <button id="lrc-save">儲存歌詞</button>
+          <button id="tap-start">跟拍打點</button>
+          <button id="lrc-auto" class="ghost">還原辨識結果</button>
+        </div>
+        <div class="row">
+          <select id="exp-fmt" aria-label="匯出格式">
+            <option value="lrc">LRC（含時間）</option>
+            <option value="srt">SRT 字幕</option>
+            <option value="txt">純文字 TXT</option>
+          </select>
+          <button id="exp-go">匯出歌詞</button>
+          <button id="exp-show" class="ghost" hidden>顯示檔案</button>
+        </div>
+        <span id="exp-msg" class="hint"></span>
+        <details id="timing-box">
+          <summary>逐句調整開始時間</summary>
+          <div class="detail" style="margin-top:8px">
+            <span class="hint">播放到某句開頭時按「對準」，或用 ±0.1 秒微調。改完按「儲存歌詞」。</span>
+            <div id="timing" class="timing"></div>
+            <div class="row"><button id="lyr-dist">自動分配每個字的時間</button><span class="hint">依旋律音符把每個字放到對應的音上</span></div>
+          </div>
+        </details>
+        <details id="ls-box">
+          <summary>搜尋線上歌詞（LRCLIB、網易雲，需連網）</summary>
+          <div class="detail" style="margin-top:8px">
+            <div class="row"><input id="ls-q" type="text" placeholder="歌名 歌手" style="flex:1;min-width:0"><button id="ls-go">搜尋</button></div>
+            <span id="ls-msg" class="hint"></span>
+            <div id="ls-results" class="ls-results"></div>
+          </div>
+        </details>
+        <div id="tapbox" class="tapbox" hidden>
+          <span class="hint">播放中每唱到新的一句就按空白鍵或下面的按鈕。</span>
+          <span id="tap-next" class="next"></span>
+          <div class="row"><button id="tap-hit" class="primary">這句開始</button><button id="tap-stop" class="ghost">結束打點</button></div>
+        </div>
+        <details>
+          <summary>貼上正確歌詞，用 Claude 對齊時間（需連網）</summary>
+          <div class="detail" style="margin-top:8px">
+            <textarea id="ref-lyrics" placeholder="每行一句，照演唱順序貼上" style="min-height:120px"></textarea>
+            <div class="row"><button id="align">用 Claude 對齊</button><span id="align-state" class="hint"></span></div>
+            <span id="align-cost" class="hint"></span>
+          </div>
+        </details>
+      </div>
+    </div>
+  </section>
+</main>
+
+<div id="settings" class="modal" hidden>
+  <div class="sheet" role="dialog" aria-modal="true" aria-labelledby="set-title">
+    <h1 id="set-title">設定</h1>
+    <div class="field"><span>已安裝的離線功能</span><div id="mods" class="mods"></div></div>
+    <label class="field"><span>Anthropic API 金鑰（只有對齊歌詞、練習建議會用到）</span>
+      <input id="cfg-key" type="password" autocomplete="off" placeholder="sk-ant-…"></label>
+    <label class="field"><span>Claude 模型</span><input id="cfg-model" type="text"></label>
+    <div id="usage" class="usage">
+      <div class="usage-head"><span>Claude 用量與費用</span><span class="hint">依官方價目估算，美元</span></div>
+      <div id="usage-grid" class="usage-grid"></div>
+      <div id="usage-recent" class="usage-recent"></div>
+      <label class="field"><span>目前 API 餘額（US$）：到 Anthropic Console 的 Billing 頁面查看後填入，之後會自動扣掉這裡的花費</span>
+        <input id="cfg-balance" type="text" inputmode="decimal" placeholder="例如 12.50"></label>
+      <span class="hint">Anthropic 沒有提供查詢餘額的 API，所以剩餘金額是估計值。Console 網址：console.anthropic.com/settings/billing</span>
+    </div>
+    <label class="field"><span>歌詞辨識模型</span>
+      <select id="cfg-whisper">
+        <option value="large-v3-turbo">large-v3-turbo（建議）</option>
+        <option value="large-v3">large-v3（最準、最慢）</option>
+        <option value="medium">medium</option>
+        <option value="small">small（最快）</option>
+      </select></label>
+    <label class="field"><span>歌詞語言</span>
+      <select id="cfg-lang">
+        <option value="zh">中文</option><option value="">自動判斷</option>
+        <option value="en">英文</option><option value="ja">日文</option><option value="ko">韓文</option>
+      </select></label>
+    <label class="row"><input id="cfg-tw" type="checkbox"> 中文歌詞轉成台灣繁體用字</label>
+    <label class="field"><span>人聲分離模型</span><input id="cfg-sep" type="text"></label>
+    <label class="field"><span>主唱／合音分離模型</span><input id="cfg-kara" type="text"></label>
+    <label class="field"><span>音高模型</span>
+      <select id="cfg-pitch"><option value="auto">自動（有顯示卡用 full）</option><option value="full">full（準、CPU 很慢）</option><option value="tiny">tiny（快）</option></select></label>
+    <div class="row">
+      <button id="cfg-save" class="primary">儲存</button>
+      <button id="cfg-close" class="ghost">關閉</button>
+      <button id="cfg-clear-key" class="ghost danger">清除金鑰</button>
+    </div>
+  </div>
+</div>
+<div id="toast" class="toast" role="status" hidden></div>
+<script src="/static/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,247 @@
+<!doctype html>
+<html lang="zh-Hant-TW">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>雷虎練唱台 1.1 使用說明</title>
+<style>
+/* 和程式本體同一套色彩：冷色控台底、琥珀色是原唱旋律、藍色是你的聲音 */
+:root {
+  --bg: #eef1f4; --panel: #fbfcfd; --ink: #172029; --muted: #5b6672; --line: #d5dbe2;
+  --melody: #c06a14; --voice: #1d78bb; --accent: #0f6f73; --bad: #cc4237; --code: #e4e9ee;
+  --sans: "Noto Sans TC", "PingFang TC", "Microsoft JhengHei", "Heiti TC", system-ui, sans-serif;
+  --lyric: "LXGW WenKai TC", "Kaiti TC", "BiauKai", "DFKai-SB", "Noto Serif TC", serif;
+  --mono: ui-monospace, "SF Mono", Consolas, "Cascadia Mono", monospace;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root { --bg: #0e1318; --panel: #151c23; --ink: #e5eaef; --muted: #91a0ae; --line: #26313b;
+    --melody: #f0a04a; --voice: #5cb2ef; --accent: #3cb6ad; --bad: #f06a5f; --code: #1d262f; color-scheme: dark; }
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; background: var(--bg); color: var(--ink); font: 15px/1.75 var(--sans); }
+.wrap { max-width: 860px; margin: 0 auto; padding: 24px 20px 64px; }
+.top { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 8px; }
+.top a { color: var(--accent); text-decoration: none; font-size: 14px; }
+h1 { font-family: var(--lyric); font-size: 34px; font-weight: 500; letter-spacing: .12em; margin: 8px 0 0; text-wrap: balance; }
+.ver { font-family: var(--mono); font-size: 13px; color: var(--muted); }
+.lede { color: var(--muted); max-width: 62ch; margin: 6px 0 22px; }
+nav.toc { display: flex; flex-wrap: wrap; gap: 6px 14px; padding: 12px 14px; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; font-size: 14px; }
+nav.toc a { color: var(--ink); text-decoration: none; border-bottom: 1px dotted var(--muted); }
+h2 { font-size: 21px; margin: 40px 0 8px; padding-top: 8px; border-top: 1px solid var(--line); text-wrap: balance; }
+h3 { font-size: 16px; margin: 22px 0 4px; }
+p, li { max-width: 68ch; }
+ol, ul { padding-left: 1.4em; }
+li { margin: 4px 0; }
+kbd, code { font-family: var(--mono); font-size: 13px; background: var(--code); border-radius: 5px; padding: 1px 6px; }
+.note { border-left: 3px solid var(--melody); padding: 8px 14px; background: var(--panel); border-radius: 0 8px 8px 0; margin: 12px 0; }
+.warn { border-left-color: var(--bad); }
+table { border-collapse: collapse; width: 100%; font-size: 14px; }
+.tw { overflow-x: auto; }
+th, td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
+th { color: var(--muted); font-weight: 600; font-size: 13px; }
+.legend { display: grid; grid-template-columns: auto 1fr; gap: 6px 12px; align-items: center; margin: 10px 0; }
+.sw { width: 34px; height: 10px; border-radius: 3px; }
+.num { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+@media (max-width: 560px) { h1 { font-size: 28px; } .wrap { padding: 16px; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="top"><a href="/" id="back">← 回到雷虎練唱台</a></div>
+  <h1>雷虎練唱台 <span class="ver">1.1</span></h1>
+  <p class="lede">在自己電腦上練歌的工具：把歌曲拆成主唱、合音、伴奏，畫出主唱旋律，辨識歌詞，讓你調 KEY、放慢速度，邊唱邊看自己的音準。所有處理都在電腦上完成，只有兩個選用功能會連網使用 Claude。</p>
+
+  <nav class="toc" aria-label="目錄">
+    <a href="#req">系統需求</a><a href="#install">安裝</a><a href="#import">匯入歌曲</a><a href="#practice">練唱畫面</a>
+    <a href="#record">錄音評分</a><a href="#lyrics">歌詞</a><a href="#claude">Claude 與費用</a><a href="#settings">設定</a>
+    <a href="#faq">常見問題</a><a href="#uninstall">解除安裝</a><a href="#changes">版本紀錄</a>
+  </nav>
+
+  <h2 id="req">系統需求</h2>
+  <div class="tw"><table>
+    <tr><th>項目</th><th>需求</th></tr>
+    <tr><td>作業系統</td><td>Windows 10 或 11（64 位元）</td></tr>
+    <tr><td>硬碟空間</td><td>有 NVIDIA 顯示卡約 7 GB；沒有約 4 GB。之後每首歌約 50–100 MB</td></tr>
+    <tr><td>顯示卡</td><td>選配。有 NVIDIA 顯示卡（驅動程式要支援 CUDA 12.6 以上）時，處理速度會快很多；沒有也能用，只是比較慢</td></tr>
+    <tr><td>網路</td><td>安裝時需要（下載約 3–5 GB）。之後可以完全離線，只有 YouTube 匯入和 Claude 功能需要連網</td></tr>
+    <tr><td>其他</td><td>耳機與麥克風（錄音評分用）</td></tr>
+  </table></div>
+
+  <h2 id="install">安裝</h2>
+  <ol>
+    <li>雙擊 <code>雷虎練唱台1.1.exe</code>。已經裝過 1.0 的，直接安裝 1.1 即可，歌曲庫和設定會保留。</li>
+    <li>如果出現藍色的「Windows 已保護您的電腦」，按「其他資訊」，再按「仍要執行」。這是因為安裝程式沒有付費的數位簽章，不是病毒警告。</li>
+    <li>選安裝位置（預設即可，不需要系統管理員權限），按「安裝」。</li>
+    <li>會跳出一個黑色視窗，自動下載 Python、AI 套件和模型。有 NVIDIA 顯示卡時會自動裝顯示卡加速版。依網路速度大約 15–40 分鐘，期間不要關掉這個視窗。</li>
+    <li>完成後桌面和開始選單會出現「雷虎練唱台」。</li>
+  </ol>
+  <div class="note">安裝中途斷網或失敗時，重新執行安裝程式即可，已下載的部分不會重來。安裝紀錄在安裝資料夾的 <code>logs\install.log</code>。</div>
+
+  <h2 id="import">匯入歌曲</h2>
+  <p>開啟後的第一個畫面是「歌曲庫」，有三種匯入方式：</p>
+  <ul>
+    <li><b>拖曳</b>：把音訊檔拖進視窗。</li>
+    <li><b>匯入歌曲</b>按鈕：一次可以選多首。支援 mp3、wav、flac、ogg、m4a。</li>
+    <li><b>YouTube</b>：貼上影片網址，按「下載並分析」。請只下載你有權使用的內容。</li>
+  </ul>
+  <p>匯入後會自動依序處理：分離主唱／合音／伴奏、分析主唱旋律、辨識歌詞並轉成台灣繁體用字，最後到線上歌詞網站找同一首歌的歌詞來比對（見「歌詞」一節）。進度會顯示在歌曲庫上方，處理時可以繼續練別首歌。</p>
+  <h3>分類與搜尋</h3>
+  <ul>
+    <li>按「＋ 新增分類」建立自己的分類，例如「中文歌」「日文歌」「練習中」。</li>
+    <li>選了某個分類後再匯入（檔案或 YouTube），歌就會直接放進這個分類。</li>
+    <li>每首歌右邊的分類選單可以隨時換分類。選取某個分類後可以改名或刪除；刪除分類不會刪歌，歌會移到「未分類」。</li>
+    <li>右上的搜尋框可以用歌名、歌手或一段歌詞找歌，多個關鍵字用空白隔開。</li>
+  </ul>
+  <p>歌名旁的標籤：<b>AI 分軌</b>代表用 AI 模型分離；<b>聲像分軌</b>代表 AI 分離沒有成功，改用比較粗略的方式，可以按「重新處理」再試；<b>清唱</b>代表原曲本身就是沒有伴奏的純人聲。清唱的歌第一次開啟時，會自動用歌名搜尋線上歌詞讓你挑選。</p>
+
+  <h2 id="practice">練唱畫面</h2>
+  <div class="legend">
+    <span class="sw" style="background: var(--melody); opacity: .45"></span><span>琥珀色長條：原唱的音符，上面標有音名</span>
+    <span class="sw" style="background: var(--melody)"></span><span>琥珀色細線：原唱實際的音高，看得出滑音和抖音</span>
+    <span class="sw" style="background: var(--voice)"></span><span>藍線：你的聲音（麥克風或錄音）</span>
+    <span class="sw" style="background: var(--bad)"></span><span>紅線：你和原唱差超過 50 音分（約四分之一個全音）的地方</span>
+  </div>
+  <p>卷軸的音域依整首歌的旋律固定，高音和低音都看得到，播放時不會上下跳動。右上角會顯示目前的目標音，和你偏高或偏低多少。</p>
+  <p>控制列的「旋律」可以切換顯示方式：<b>原聲曲線</b>是原唱實際的音高，看得出滑音、轉音、抖音；<b>音符區塊</b>只顯示整理過的音符，比較容易看出每個字該唱哪個音；<b>原聲＋區塊</b>兩者疊在一起。</p>
+  <p>卷軸下方的歌詞有三行：上一句、正在唱的、下一句。正在唱的那句會一直顯示到下一句開始，就算歌詞時間有點誤差也不會一閃就過。右上角的 A−／A＋ 可以調整這三行的大小。</p>
+  <h3>操作</h3>
+  <div class="tw"><table>
+    <tr><th>功能</th><th>用法</th></tr>
+    <tr><td>播放／暫停</td><td>「播放」按鈕或 <kbd>空白鍵</kbd></td></tr>
+    <tr><td>前後跳轉</td><td><kbd>←</kbd> <kbd>→</kbd> 各 3 秒；或直接點卷軸上的位置</td></tr>
+    <tr><td>KEY</td><td>＋／－ 每次一個半音，範圍 ±12。第一次切換某個 KEY 要計算幾秒，之後會記住</td></tr>
+    <tr><td>速度</td><td>70%–110%，放慢時音高不變</td></tr>
+    <tr><td>A／B 循環</td><td>在句子開頭按 A、結尾按 B，就會反覆播放這一段。「取消循環」恢復正常</td></tr>
+    <tr><td>字在旋律上</td><td>把歌詞逐字標在對應的音符上方，唱過的字會變色。可以隨時開關；旁邊的「字級」拉桿調整字的大小</td></tr>
+    <tr><td>調整</td><td>開啟後可以用滑鼠拖曳：上方的句子標記移動整句、旋律上的字調整單字時間；雙擊字可以修改文字。放開後自動儲存</td></tr>
+    <tr><td>視窗</td><td>拉桿調整卷軸一次顯示幾秒</td></tr>
+  </table></div>
+  <h3>混音</h3>
+  <p>每一軌都可以單獨調音量。四個快速設定：</p>
+  <ul>
+    <li><b>原曲</b>：原本的歌</li>
+    <li><b>卡拉OK</b>：關掉主唱，保留合音與伴奏</li>
+    <li><b>練唱</b>：主唱調小，加上旋律導引音，最適合對音準</li>
+    <li><b>只聽主唱</b>：只留主唱，適合抓咬字和換氣</li>
+  </ul>
+  <p>每首歌的 KEY、速度、混音會自動記住。</p>
+
+  <h2 id="record">錄音評分</h2>
+  <ol>
+    <li>戴上耳機（避免伴奏被麥克風收進去，影響評分）。</li>
+    <li>在「麥克風」選單選要用的輸入裝置（例如 GoXLR、USB 麥克風），再按「開啟麥克風」，卷軸上會即時畫出你的音高。第一次開啟後選單才會顯示裝置名稱；之後會記住你的選擇。</li>
+    <li>按「錄一次」：會從 A 點（沒設就從目前位置）開始播放並錄音。唱完按「停止」。</li>
+    <li>幾秒後出現分數。命中率是你的音落在原唱 ±50 音分內的比例；平均偏差是正數代表偏高、負數偏低。</li>
+  </ol>
+  <p>評分完全在你的電腦上進行，不需要連網或 Claude。系統會自動對齊錄音延遲。男生唱女生的歌（或相反）差一個八度也沒關係，會自動換算。點錄音紀錄可以把你的音高曲線疊在卷軸上，並列出最需要練的三句，點句子就會跳到那裡。</p>
+
+  <h2 id="lyrics">歌詞</h2>
+  <p>歌詞是 LRC 格式，每行前面的 <code>[分:秒]</code> 是這句開始的時間。自動辨識難免有錯字，可以用下面幾種方式修正：</p>
+  <ul>
+    <li><b>直接修改</b>：在文字框改好後按「儲存歌詞」。</li>
+    <li><b>跟拍打點</b>：先把正確歌詞貼進文字框（每行一句，不用時間），按「跟拍打點」，播放時每唱到新的一句就按 <kbd>空白鍵</kbd>。</li>
+    <li><b>用 Claude 對齊</b>：展開「貼上正確歌詞」，貼上歌詞後按「用 Claude 對齊」，Claude 會參考辨識結果和旋律自動填上每句的時間，並依旋律把每個字放到對應的音上（需要 API 金鑰，見下一節）。</li>
+    <li><b>逐句調整開始時間</b>：每一句都有時間欄位。播放到某句開頭時按「對準」，或用 −／＋ 每次調 0.1 秒，也可以直接輸入時間。按 ▶ 會從那句前 1 秒開始播放。</li>
+    <li><b>自動分配每個字的時間</b>：已有每句時間的歌詞，可以一鍵依旋律音符分配每個字的時間，再用「調整」微調。</li>
+    <li><b>線上歌詞比對</b>：匯入歌曲時，程式會用歌名（原文和轉成簡體各一次）到 LRCLIB 和網易雲音樂搜尋，並和自動辨識的結果比對相似度。找到相似的版本時，歌詞面板會列出每一版的歌名、歌手、相似度、有沒有時間軸和開頭幾句，讓你選一版使用；都不像或沒找到，就維持辨識結果。</li>
+    <li><b>套用線上歌詞</b>：有時間軸且長度和這首歌相符的，直接用網站的時間；只有文字或長度不符的，程式會依辨識結果的時間自動對上每一句。網易雲的簡體歌詞會自動轉成台灣繁體。</li>
+    <li><b>手動搜尋</b>：展開「搜尋線上歌詞」，輸入歌名和歌手再搜尋，結果一樣依相似度排序。</li>
+    <li><b>還原辨識結果</b>：回到自動辨識的版本。</li>
+  </ul>
+  <h3>匯出歌詞</h3>
+  <p>選格式後按「匯出歌詞」，檔案會存到「下載\雷虎練唱台」資料夾，按「顯示檔案」可以直接開啟位置。</p>
+  <div class="tw"><table>
+    <tr><th>格式</th><th>適合</th></tr>
+    <tr><td>LRC</td><td>音樂播放器、KTV 軟體的同步歌詞；有逐字時間時會一起匯出（Enhanced LRC）</td></tr>
+    <tr><td>SRT</td><td>影片字幕（剪輯軟體、直播字幕）</td></tr>
+    <tr><td>TXT</td><td>只要文字，沒有時間</td></tr>
+  </table></div>
+
+  <h2 id="claude">Claude 功能與費用</h2>
+  <p>只有兩個功能會用到 Claude，而且只有在你按按鈕時才會連網：</p>
+  <ul>
+    <li>歌詞對齊（歌詞面板）</li>
+    <li>練習建議（點選一次錄音後，按「請 Claude 給練習建議」）</li>
+  </ul>
+  <h3>設定 API 金鑰</h3>
+  <ol>
+    <li>到 <code>console.anthropic.com</code> 註冊並登入，在 Billing 頁面加值。這和 claude.ai 的訂閱是分開計費的。</li>
+    <li>在 API Keys 頁面建立一把金鑰，複製起來（<code>sk-ant-</code> 開頭）。</li>
+    <li>在雷虎練唱台右上角按「設定」，貼到「Anthropic API 金鑰」，按「儲存」。</li>
+  </ol>
+  <p>金鑰只存在你自己電腦的安裝資料夾裡（<code>config.json</code>），不會上傳到其他地方。不要把這個檔案分享給別人。</p>
+  <h3>用量與餘額</h3>
+  <p>每次呼叫後會顯示這次用了多少 token 與大約的金額；右上角的 Claude 標籤會顯示這次開啟程式以來的花費，點它可以看到最近幾次的明細與累計。</p>
+  <p>Anthropic 沒有提供查詢帳戶餘額的 API，所以「剩餘餘額」需要你先到 Console 的 Billing 頁面看一次，填進設定裡的「目前 API 餘額」。之後程式會自動扣掉在這裡的花費，顯示估計的剩餘金額。若在別的地方也用了同一把金鑰，數字就會不準，再重新填一次即可。</p>
+  <p>參考：對齊一首歌的歌詞大約用 2,000–6,000 token，使用預設的 Claude Sonnet 5.5 約 US$0.005–0.02。</p>
+
+  <h2 id="settings">設定</h2>
+  <div class="tw"><table>
+    <tr><th>項目</th><th>說明</th></tr>
+    <tr><td>Claude 模型</td><td>預設 <code>claude-sonnet-5-5</code>。可改成 <code>claude-haiku-5-5</code>（較便宜）或 <code>claude-opus-5-5</code>（較強、較貴）</td></tr>
+    <tr><td>歌詞辨識模型</td><td>large-v3-turbo 是速度和準確度的平衡；large-v3 最準但最慢；small 最快</td></tr>
+    <tr><td>歌詞語言</td><td>預設中文。英文、日文、韓文歌請改成對應語言或「自動判斷」</td></tr>
+    <tr><td>轉成台灣繁體用字</td><td>辨識出的中文自動轉成台灣慣用字詞</td></tr>
+    <tr><td>音高模型</td><td>自動：有顯示卡用精準模型，沒有用快速模型</td></tr>
+  </table></div>
+  <p>改了辨識相關的設定後，在歌曲庫選「重新處理」才會套用到已匯入的歌。</p>
+
+  <h2 id="faq">常見問題</h2>
+  <h3>分離後主唱還是有伴奏的聲音</h3>
+  <p>AI 分離無法做到百分之百乾淨，混音比較厚的歌會有殘留。可以在設定把人聲分離模型換成 <code>model_bs_roformer_ep_317_sdr_12.9755.ckpt</code>（目前最準，但比較慢，第一次使用會下載），再對那首歌「重新處理 → 全部重做」。</p>
+  <h3>旋律線斷斷續續</h3>
+  <p>氣音、和聲很重或伴奏殘留多的段落，音高比較難判斷，會出現空白。這不影響播放和評分的其他段落。</p>
+  <h3>YouTube 下載失敗</h3>
+  <p>YouTube 常改版，程式失敗時會自動更新下載工具再試一次。仍失敗的話，從開始選單執行「雷虎練唱台 修復與更新」。私人影片、會員限定或需要登入的影片無法下載。</p>
+  <h3>麥克風沒有反應</h3>
+  <p>確認 Windows 設定 → 隱私權與安全性 → 麥克風，有允許桌面應用程式使用麥克風；並確認預設錄音裝置是你要用的那支。</p>
+  <h3>出現錯誤視窗、程式卡住或功能不正常</h3>
+  <p>從開始選單執行「雷虎練唱台 修復與更新」。它會關閉程式、檢查並修好套件，再自動重新開啟。問題還在的話，把安裝資料夾裡 <code>logs</code> 資料夾的檔案提供給開發者。</p>
+  <h3>沒有 NVIDIA 顯示卡可以用嗎</h3>
+  <p>可以，所有功能都一樣，只是分離和辨識比較慢：一首 4 分鐘的歌大約 5–15 分鐘（有顯示卡約 1 分鐘）。</p>
+  <h3>歌曲存在哪裡？怎麼備份</h3>
+  <p>在安裝資料夾的 <code>library</code> 資料夾（預設是 <code>%LOCALAPPDATA%\LeihuLiantai\library</code>，可以貼到檔案總管的網址列開啟）。備份這個資料夾即可。</p>
+
+  <h2 id="uninstall">解除安裝</h2>
+  <p>Windows 設定 → 應用程式 → 找到「雷虎練唱台」→ 解除安裝。過程中會問你要不要保留歌曲庫；選「否」就只移除程式，歌曲和錄音會留下來。</p>
+
+  <h2 id="changes">版本紀錄</h2>
+  <h3>1.1</h3>
+  <p><b>功能新增</b></p>
+  <ul>
+    <li>歌曲庫自訂分類（新增、改名、刪除、把歌移到其他分類），匯入時自動放進目前選取的分類</li>
+    <li>歌曲庫關鍵字搜尋：歌名、歌手、歌詞內容</li>
+    <li>線上歌詞比對：匯入時用原文與簡體歌名搜尋 LRCLIB 和網易雲音樂，和辨識結果比對相似度後列出候選讓你選；沒找到就保留辨識結果</li>
+    <li>只有文字的線上歌詞，會依辨識結果的時間自動對齊每一句</li>
+    <li>旋律顯示切換：原聲曲線、音符區塊、兩者疊加</li>
+    <li>選擇錄音用的麥克風，並記住選擇</li>
+    <li>歌詞逐字顯示在旋律上方，可調整字級</li>
+    <li>「調整」模式：拖曳句子標記移動整句、拖曳字調整單字時間、雙擊字修改文字</li>
+    <li>逐句調整開始時間：對準目前播放位置、±0.1 秒微調、直接輸入時間</li>
+    <li>自動分配每個字的時間（依旋律音符）</li>
+    <li>自動判斷清唱／純人聲歌曲</li>
+    <li>下方歌詞可用 A−／A＋ 調整大小</li>
+  </ul>
+  <p><b>功能修改</b></p>
+  <ul>
+    <li>下方歌詞改為三行：上一句、正在唱的、下一句；正在唱的那句會保留到下一句開始，避免時間誤差時跑太快看不到</li>
+    <li>旋律畫面的音域改為依整首歌固定，不再隨播放上下跳動；較高的音不會再超出畫面</li>
+    <li>修正使用 Claude Sonnet 5.5 對齊歌詞時出現的「tool_choice」錯誤</li>
+    <li>用 Claude 對齊後，會自動把每個字放到對應的音上</li>
+    <li>線上歌詞搜尋由單一來源改為 LRCLIB＋網易雲，結果依相似度排序</li>
+    <li>匯出 LRC 時保留逐字時間（Enhanced LRC）</li>
+  </ul>
+  <h3>1.0</h3>
+  <ul>
+    <li>初版：AI 分離主唱／合音／伴奏、旋律分析、歌詞辨識與台灣繁體轉換、升降 KEY 與變速、A–B 循環、麥克風即時音高與錄音評分、YouTube 匯入、Claude 歌詞對齊與練習建議、用量與費用顯示、歌詞匯出（LRC／SRT／TXT）、顯示卡加速、桌面程式與安裝程式</li>
+  </ul>
+
+  <p class="lede" style="margin-top:40px">雷虎練唱台 1.1</p>
+</div>
+<script>
+  // 直接用瀏覽器開啟這份說明時，隱藏「回到程式」的連結
+  if (location.protocol === "file:") document.getElementById("back").hidden = true;
+</script>
+</body>
+</html>

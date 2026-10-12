@@ -1,0 +1,22 @@
+# 雷虎練唱台 1.0（Windows）已驗證可用的套件版本。
+# PyTorch 與 ONNX Runtime 由 installer.py 依顯示卡另外安裝。
+flask==3.1.3
+numpy==2.4.6
+scipy==1.17.1
+soundfile==0.14.0
+librosa==0.11.0
+audioread==3.1.0
+numba==0.68.0
+llvmlite==0.50.0
+pedalboard==0.9.26
+torchcrepe==0.0.24
+faster-whisper==1.2.1
+ctranslate2==4.8.2
+opencc-python-reimplemented==0.1.7
+anthropic==1.13.0
+audio-separator==0.47.0
+onnx2torch-py313==1.6.0
+imageio-ffmpeg==0.6.0
+yt-dlp
+pywebview==6.2.1
+pythonnet==3.2.1

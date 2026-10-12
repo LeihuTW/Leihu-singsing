@@ -1,0 +1,15 @@
+flask>=3.0
+numpy
+scipy
+soundfile>=0.12
+librosa>=0.10,<1.0
+audioread
+pedalboard>=0.9
+torch
+torchcrepe>=0.0.22
+faster-whisper>=1.1
+opencc-python-reimplemented>=0.1.7
+anthropic>=0.40
+audio-separator[cpu]>=0.30
+yt-dlp
+imageio-ffmpeg

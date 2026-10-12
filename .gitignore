@@ -1,0 +1,18 @@
+# 使用者資料（含 API 金鑰、歌曲、用量紀錄），不要上傳
+config.json
+usage.json
+library/
+logs/
+models/
+bin/
+downloads/
+installed.json
+# Python
+__pycache__/
+*.pyc
+.venv/
+python/
+# 安裝檔建置
+installer/payload/
+installer/out/
+*.exe
