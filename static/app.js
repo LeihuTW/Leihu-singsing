@@ -470,6 +470,10 @@ function play() {
   const c = ac(); c.resume();
   stopNodes();
   if (S.t >= S.dur - 0.05) S.t = 0;
+  if (S.autoSkip && S.t < 0.05 && S.loopA == null) {   // 從頭播放時自動跳過前奏
+    const t = introSkipTime();
+    if (t != null && t >= 0.5) S.t = t;
+  }
   const now = c.currentTime + 0.06;
   const pos = S.t / S.speed;
   const srcs = { lead: S.bufs.lead, back: S.bufs.back, inst: S.bufs.inst, guide: S.guide };
@@ -508,6 +512,23 @@ function seek(t) {
   S.dirty = true;
 }
 $("#play").onclick = () => (S.playing ? pause() : play());
+
+/* 跳過前奏：跳到第一句歌詞（沒有歌詞就用第一個旋律音）前 5 秒 */
+function introSkipTime() {
+  const first = S.lines.find(l => l.t != null && l.text && l.text.trim());
+  const t = first ? first.t : (S.notes.length ? S.notes[0].s : null);
+  return t == null ? null : Math.max(0, t - 5);
+}
+$("#skip-intro").onclick = () => {
+  const t = introSkipTime();
+  if (t == null) return toast("找不到第一句歌詞或旋律");
+  if (t < 0.5) return toast("這首歌的前奏不到 5 秒，不用跳");
+  seek(t);
+  if (S.loopA == null) toast(`已跳到 ${fmt(t, 0)}（第一句前 5 秒）`, 2000);
+};
+S.autoSkip = store.get("autoSkip", false);
+$("#auto-skip").checked = S.autoSkip;
+$("#auto-skip").onchange = e => { S.autoSkip = e.target.checked; store.set("autoSkip", S.autoSkip); };
 $("#seek").oninput = e => seek(+e.target.value);
 $("#zoom").oninput = e => { S.zoom = +e.target.value; S.dirty = true; };
 $("#set-a").onclick = () => { S.loopA = cur(); if (S.loopB != null && S.loopB <= S.loopA) S.loopB = null; S.dirty = true; };
@@ -1116,6 +1137,9 @@ async function uploadTake(r) {
     const blob = new Blob(r.chunks, { type: r.mr.mimeType });
     const buf = await ac().decodeAudioData(await blob.arrayBuffer());
     if (buf.duration < 2) return toast("錄音太短，沒有存");
+    const ch = buf.getChannelData(0);
+    let pk = 0; for (let i = 0; i < ch.length; i += 4) { const a = Math.abs(ch[i]); if (a > pk) pk = a; }
+    if (pk < 0.01) toast("這次錄音幾乎沒有聲音：請確認麥克風選對、唱歌時音量表有動，或按「自動調整」", 6000);
     const wav = encodeWav(buf.getChannelData(0), buf.sampleRate);
     const fd = new FormData();
     fd.append("file", new Blob([wav], { type: "audio/wav" }), "take.wav");
@@ -1156,7 +1180,8 @@ function renderTakes(takes) {
     const d = new Date(t.created * 1000);
     const when = `${d.getMonth() + 1}/${d.getDate()} ${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
     el.innerHTML = `<div><div class="sub">${when}・KEY ${t.key > 0 ? "+" : ""}${t.key}・${Math.round(t.speed * 100)}%・${fmt(t.duration || 0, 0)}</div>
-      <div class="sub">${t.acc == null ? "評分中…" : `平均偏差 ${t.mean > 0 ? "+" : ""}${Math.round(t.mean)}¢${t.octave ? `・${t.octave < 0 ? "低" : "高"}八度` : ""}`}</div></div>
+      <div class="sub">${t.acc != null ? `平均偏差 ${t.mean > 0 ? "+" : ""}${Math.round(t.mean)}¢${t.octave ? `・${t.octave < 0 ? "低" : "高"}八度` : ""}`
+        : t.status === "scoring" ? "評分中…" : t.status === "error" ? "評分失敗" : "沒有偵測到歌聲"}</div></div>
       <div class="score">${t.acc == null ? "—" : Math.round(t.acc * 100) + "%"}</div>`;
     el.onclick = () => selectTake(t.id);
     box.appendChild(el);
@@ -1194,7 +1219,16 @@ async function selectTake(id) {
 function renderTakeDetail() {
   const t = S.take, box = $("#take-detail");
   if (!t) { box.innerHTML = ""; return; }
-  if (t.acc == null) { box.innerHTML = `<p class="hint">評分中…</p>`; return; }
+  if (t.acc == null) {
+    // 評分中、失敗，或沒有偵測到歌聲：都要能刪除或重新評分，不會卡住
+    const msg = t.status === "scoring" ? "評分中…（如果一直停在這裡，可以按「重新評分」）"
+      : t.error || "沒有偵測到歌聲：錄音音量太小，或這段沒有唱到。請確認麥克風選對、唱歌時音量表有動。";
+    box.innerHTML = `<p class="hint"></p><div class="row"><button id="rescore" class="ghost">重新評分</button><button id="del-take" class="ghost danger">刪除這次錄音</button></div>`;
+    $("p", box).textContent = msg;
+    $("#rescore").onclick = () => rescoreTake(t.id);
+    bindDelete(t, box);
+    return;
+  }
   const worst = (t.lines || []).slice().sort((a, b) => a.acc - b.acc).slice(0, 3);
   box.innerHTML = `<div class="hint">命中率是落在原唱 ±50 音分內的比例（換音時早晚 0.1 秒內都算對）。已自動對齊 ${t.offset > 0 ? "+" : ""}${t.offset}s 的錄音延遲${t.octave ? "，並換算八度" : ""}。</div>
     ${worst.length ? `<b>最需要練的句子</b>` : ""}
@@ -1218,6 +1252,9 @@ function renderTakeDetail() {
     finally { b.disabled = false; }
   };
   $("#rescore").onclick = () => rescoreTake(t.id);
+  bindDelete(t, box);
+}
+function bindDelete(t, box) {
   const del = $("#del-take");
   del.onclick = async () => {
     if (!del.dataset.armed) { del.dataset.armed = "1"; del.textContent = "確定刪除？"; setTimeout(() => { delete del.dataset.armed; del.textContent = "刪除這次錄音"; }, 3000); return; }

@@ -8,7 +8,7 @@
 </head>
 <body>
 <header class="bar">
-  <span class="logo">雷虎練唱台<small id="ver">1.2.1</small></span>
+  <span class="logo">雷虎練唱台<small id="ver">1.2.2</small></span>
   <nav class="row">
     <button id="nav-lib" class="tab cur">歌曲庫</button>
     <button id="nav-practice" class="tab" disabled>練唱</button>
@@ -72,6 +72,8 @@
       </div>
       <div class="transport">
         <button id="play" class="primary">播放</button>
+        <button id="skip-intro" class="ghost" title="跳到第一句歌詞前 5 秒">跳過前奏</button>
+        <label class="hint" title="從頭播放或錄音時，自動從第一句前 5 秒開始"><input id="auto-skip" type="checkbox"> 自動</label>
         <span id="time" class="num">0:00.0 / 0:00</span>
         <input id="seek" class="seek" type="range" min="0" max="1" step="0.01" value="0" aria-label="播放位置">
         <span class="grp"><label>KEY</label>

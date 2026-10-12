@@ -17,7 +17,7 @@ from flask import Flask, abort, jsonify, request, send_file, send_from_directory
 import claude_api as C
 import pipeline as P
 
-VERSION = "1.2.1"
+VERSION = "1.2.2"
 HOST, PORT = "127.0.0.1", int(os.environ.get("LIANTAI_PORT", "8765"))
 app = Flask(__name__, static_folder=str(P.ROOT / "static"), static_url_path="/static")
 app.config["MAX_CONTENT_LENGTH"] = 1024 * 1024 * 1024
@@ -276,8 +276,23 @@ def add_take(sid):
         "duration": float(request.form.get("duration", 0)),
     }
     (td / f"{tid}.json").write_text(json.dumps(info, ensure_ascii=False), "utf-8")
-    jid = jobs.submit("take", sid, lambda report: P.score_take(d, tid, report), label=tid)
+    jid = jobs.submit("take", sid, lambda report: _score(d, tid, report), label=tid)
     return jsonify(id=tid, job=jid)
+
+
+def _score(d, tid, report):
+    """評分；失敗時把原因寫回錄音資料，畫面才不會一直停在「評分中」。"""
+    try:
+        P.score_take(d, tid, report)
+    except Exception as e:
+        j = d / "takes" / f"{tid}.json"
+        try:
+            info = json.loads(j.read_text("utf-8"))
+            info.update(status="error", error=f"評分失敗：{e}")
+            j.write_text(json.dumps(info, ensure_ascii=False), "utf-8")
+        except Exception:
+            pass
+        raise
 
 
 def _take_paths(sid, tid):
@@ -300,7 +315,7 @@ def rescore_take(sid, tid):
     d, j, w = _take_paths(sid, tid)
     if not (j.exists() and w.exists()):
         abort(404)
-    jid = jobs.find("take", sid, tid) or jobs.submit("take", sid, lambda report: P.score_take(d, tid, report), label=tid)
+    jid = jobs.find("take", sid, tid) or jobs.submit("take", sid, lambda report: _score(d, tid, report), label=tid)
     return jsonify(job=jid)
 
 

@@ -875,6 +875,9 @@ def list_takes(d: Path) -> list[dict]:
         try:
             t = json.loads(p.read_text("utf-8"))
             t.pop("pitch", None)
+            # 評分中途程式被關掉：超過 5 分鐘還在「評分中」就標成失敗，讓使用者可以重新評分或刪除
+            if t.get("status") == "scoring" and time.time() - t.get("created", 0) > 300 and not t.get("_job"):
+                t["status"], t["error"] = "error", "評分沒有完成（可能是程式被關掉），可以按「重新評分」"
             out.append(t)
         except Exception:
             pass
@@ -954,6 +957,15 @@ def score_take(d: Path, take_id: str, report) -> None:
             "n": int(c.size),
         })
 
+    if not cents.size:
+        # 沒有偵測到歌聲：通常是麥克風沒收到音（音量太小、選錯裝置）或這段沒有唱
+        peak = float(np.max(np.abs(y16))) if y16.size else 0.0
+        info.update({"status": "empty", "acc": None, "mean": None, "frames": 0, "algo": TAKE_ALGO,
+                     "error": "沒有偵測到歌聲" + ("：錄音幾乎沒有聲音，請確認麥克風選對、音量表有動" if peak < 0.02
+                                                else "：這段時間原唱沒有旋律，或沒有唱到")})
+        info.pop("pitch", None)
+        (td / f"{take_id}.json").write_text(json.dumps(info, ensure_ascii=False), "utf-8")
+        return
     info.update({
         "offset": round(best_off, 2),
         "acc": round(float(np.mean(np.abs(cents) <= 50)), 3) if cents.size else None,
@@ -1149,7 +1161,7 @@ def similarity(recognized: str, candidate: str) -> float | None:
     return round(sum(x.size for x in m.get_matching_blocks()) / len(a), 3)
 
 
-USER_AGENT = "LeihuLiantai/1.2.1 (+https://github.com/LeihuTW/Leihu-singsing)"   # HTTP 標頭只能用英文字
+USER_AGENT = "LeihuLiantai/1.2.2 (+https://github.com/LeihuTW/Leihu-singsing)"   # HTTP 標頭只能用英文字
 
 
 def _http_json(url: str, headers: dict | None = None, timeout: int = 10):
