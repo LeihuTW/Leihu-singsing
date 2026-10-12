@@ -13,7 +13,7 @@
 
 ## 安裝
 
-到 [Releases](../../releases) 下載 `雷虎練唱台<版本>.exe`，雙擊安裝。安裝程式會自動：
+到 [Releases](../../releases) 下載最新版的 `LeihuLiantai-<版本>-Setup.exe`（雷虎練唱台安裝檔），雙擊安裝。安裝程式會自動：
 
 1. 下載內嵌版 Python 3.11（不影響電腦上原本的 Python）
 2. 偵測顯示卡，安裝對應的 PyTorch（CUDA 12.8／12.6 或 CPU 版）
