@@ -8,7 +8,7 @@
 </head>
 <body>
 <header class="bar">
-  <span class="logo">雷虎練唱台<small id="ver">1.4.2</small></span>
+  <span class="logo">雷虎練唱台<small id="ver">1.4.3</small></span>
   <nav class="row">
     <button id="nav-lib" class="tab cur">歌曲庫</button>
     <button id="nav-practice" class="tab" disabled>練唱</button>
@@ -70,6 +70,8 @@
         <div id="lyr-prev" class="lyr-prev"></div>
         <div id="lyr-now" class="lyr-now"><span class="base"></span><span class="fill" aria-hidden="true"></span></div>
         <div id="lyr-next" class="lyr-next"></div>
+        <div id="lyr-next2" class="lyr-next lyr-more"></div>
+        <div id="lyr-next3" class="lyr-next lyr-more"></div>
       </div>
       <div class="transport">
         <button id="play" class="primary">播放</button>
@@ -90,6 +92,7 @@
           <button id="set-a">A</button><button id="set-b">B</button><button id="clear-ab" class="ghost">取消循環</button>
         </span>
         <span class="grp"><label for="mel-mode">旋律</label>
+          <button id="mel-toggle" class="on" title="關掉旋律只看歌詞（顯示五行）">顯示</button>
           <select id="mel-mode" title="旋律的顯示方式">
             <option value="both">原聲＋區塊</option>
             <option value="curve">原聲曲線</option>
@@ -102,6 +105,7 @@
           <button id="lyr-color" title="唱到哪個字就把哪個字上色；歌詞時間沒對準時可以關掉">逐字上色</button>
           <label for="lyr-size" title="旋律上歌詞的字級">字級</label>
           <input id="lyr-size" type="range" min="12" max="40" step="1" value="18" style="width:80px">
+          <button id="ov-open" title="給 OBS 等直播軟體用的去背歌詞畫面">直播歌詞</button>
         </span>
         <span class="grp"><label for="zoom">視窗</label><input id="zoom" type="range" min="3" max="30" step="1" value="8"></span>
       </div>
@@ -290,6 +294,33 @@
       </div>
     </div>
     <div class="row" style="justify-content:flex-end"><button id="sh-close" class="ghost">關閉</button></div>
+  </div>
+</div>
+
+<div id="overlay-dlg" class="modal" hidden>
+  <div class="sheet" role="dialog" aria-modal="true" aria-labelledby="ov-title">
+    <h1 id="ov-title">直播歌詞（去背）</h1>
+    <p class="hint">只顯示歌詞、背景透明的畫面，會跟著這裡的播放同步。在 OBS 新增「瀏覽器」來源，貼上下面的網址即可；練唱台要保持開著。</p>
+    <div class="ov-opts">
+      <label for="ov-lines">行數</label>
+      <select id="ov-lines"><option value="1">1 行</option><option value="2" selected>2 行</option><option value="3">3 行</option><option value="5">5 行</option></select>
+      <label for="ov-size">字級</label>
+      <span class="row"><input id="ov-size" type="range" min="24" max="120" step="2" value="56"><span id="ov-size-v" class="num hint">56</span></span>
+      <label for="ov-pos">位置</label>
+      <select id="ov-pos"><option value="bottom" selected>下方</option><option value="center">中間</option><option value="top">上方</option></select>
+      <label for="ov-align">對齊</label>
+      <select id="ov-align"><option value="center" selected>置中</option><option value="left">靠左</option></select>
+      <label for="ov-font">字體</label>
+      <select id="ov-font"><option value="kai" selected>楷書（和練唱畫面相同）</option><option value="sans">黑體（微軟正黑體）</option></select>
+      <label for="ov-color">上色</label>
+      <span class="row"><input id="ov-color" type="color" value="#f0a04a"><span class="hint">字的顏色是白色，唱到的字換成這個顏色</span></span>
+      <label for="ov-bg">背景</label>
+      <select id="ov-bg"><option value="none" selected>透明（OBS 瀏覽器來源）</option><option value="green">綠幕（用色度鍵去背）</option><option value="black">黑色</option></select>
+    </div>
+    <label class="field"><span>網址</span><input id="ov-url" type="text" readonly></label>
+    <div class="row"><button id="ov-copy" class="primary">複製網址</button><button id="ov-preview" class="ghost">在瀏覽器開啟預覽</button></div>
+    <span class="hint">OBS 瀏覽器來源建議寬 1920、高 1080。改了字級、行數等設定後，要重新複製網址貼到 OBS。</span>
+    <div class="row" style="justify-content:flex-end"><button id="ov-close" class="ghost">關閉</button></div>
   </div>
 </div>
 

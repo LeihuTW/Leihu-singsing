@@ -299,3 +299,18 @@ a.tab { text-decoration: none; font-size: 14px; }
 .take .pick { width: 18px; height: 18px; flex: none; margin-right: 6px; accent-color: var(--accent); }
 .take.picked { outline: 1px solid var(--bad); }
 .take:has(.pick) { grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; }
+
+/* 1.4.3：關閉旋律時只看歌詞（五行） */
+.lyr-more { display: none; }
+.stage.nomel .roll-wrap, .stage.nomel .split { display: none; }
+.stage.nomel .lyr { border-top: 0; min-height: clamp(320px, 56vh, 640px); display: flex; flex-direction: column; justify-content: center; gap: .35em; padding-top: 28px; padding-bottom: 28px; }
+.stage.nomel .lyr-more { display: block; }
+.stage.nomel .lyr-prev { font-size: calc(20px * var(--ls)); }
+.stage.nomel .lyr-now { font-size: calc(clamp(30px, 4.4vw, 52px) * var(--ls)); align-self: center; }
+.stage.nomel .lyr-next { font-size: calc(22px * var(--ls)); }
+#lyr-next3 { opacity: .7; }
+#mel-mode:disabled { opacity: .5; }
+/* 直播歌詞設定 */
+.ov-opts { display: grid; grid-template-columns: auto 1fr; gap: 8px 12px; align-items: center; }
+.ov-opts label { font-size: 13px; color: var(--muted); }
+#ov-color { width: 44px; height: 28px; padding: 0; border: 1px solid var(--line); border-radius: 6px; background: none; }

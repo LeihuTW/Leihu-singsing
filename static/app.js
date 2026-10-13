@@ -814,6 +814,19 @@ S.lyrSize = store.get("lyrSize", 18);
 S.lyrScale = store.get("lyrScale", 1);
 $("#mel-mode").value = S.melMode;
 $("#mel-mode").onchange = e => { S.melMode = e.target.value; store.set("melMode", S.melMode); S.dirty = true; };
+/* 1.4.3：旋律顯示開關。關掉時只顯示歌詞，並增加到五行 */
+S.showMel = store.get("showMel", true);
+function setShowMel(on) {
+  S.showMel = on; store.set("showMel", on);
+  $(".stage").classList.toggle("nomel", !on);
+  $("#mel-toggle").classList.toggle("on", on);
+  $("#mel-toggle").textContent = on ? "顯示" : "隱藏";
+  $("#mel-mode").disabled = !on;
+  if (on) window.dispatchEvent(new Event("resize"));   // 畫布重新量尺寸
+  S.dirty = true;
+}
+$("#mel-toggle").onclick = () => setShowMel(!S.showMel);
+setShowMel(S.showMel);
 $("#lyr-size").value = S.lyrSize;
 $("#lyr-size").oninput = e => { S.lyrSize = +e.target.value; store.set("lyrSize", S.lyrSize); if (!S.showLyr) { S.showLyr = true; store.set("showLyr", true); syncLyrButtons(); } S.dirty = true; };
 function applyLyrScale() { $("#lyr").style.setProperty("--ls", S.lyrScale); store.set("lyrScale", S.lyrScale); }
@@ -835,8 +848,8 @@ S.charColor = store.get("charColor", true);
 const syncColorBtn = () => { $("#lyr-color").classList.toggle("on", S.charColor); $("#lyr").classList.toggle("nocolor", !S.charColor); S.dirty = true; };
 $("#lyr-color").onclick = () => { S.charColor = !S.charColor; store.set("charColor", S.charColor); syncColorBtn(); toast(S.charColor ? "已開啟逐字上色" : "已關閉逐字上色：只標出正在唱的那一句", 2000); };
 syncColorBtn();
-$("#lyr-show").onclick = () => { S.showLyr = !S.showLyr; if (!S.showLyr) S.editLyr = false; store.set("showLyr", S.showLyr); syncLyrButtons(); };
-$("#lyr-edit").onclick = () => { S.editLyr = !S.editLyr; if (S.editLyr) { S.showLyr = true; store.set("showLyr", true); if (S.playing) pause(); } syncLyrButtons(); };
+$("#lyr-show").onclick = () => { S.showLyr = !S.showLyr; if (S.showLyr && !S.showMel) setShowMel(true); if (!S.showLyr) S.editLyr = false; store.set("showLyr", S.showLyr); syncLyrButtons(); };
+$("#lyr-edit").onclick = () => { S.editLyr = !S.editLyr; if (S.editLyr) { if (!S.showMel) setShowMel(true); S.showLyr = true; store.set("showLyr", true); if (S.playing) pause(); } syncLyrButtons(); };
 syncLyrButtons();
 
 /* 逐句調整開始時間 */
@@ -1823,11 +1836,61 @@ function updateLyrics(t) {
     p = k === 0 ? 0 : clamp((k - 1 + clamp((t - prevT) / Math.max(0.05, nextT - prevT), 0, 1)) / n, 0, 1);
   }
   el.style.setProperty("--p", (S.charColor ? p * 100 : 0).toFixed(1) + "%");
-  for (const [id, l] of [["#lyr-prev", prev], ["#lyr-next", next]]) {
+  const more = S.showMel ? [] : [["#lyr-next2", S.lines[i + 2] || null], ["#lyr-next3", S.lines[i + 3] || null]];
+  for (const [id, l] of [["#lyr-prev", prev], ["#lyr-next", next], ...more]) {
     const node = $(id), tx = l ? l.text : (id === "#lyr-next" && !now && S.lines[0] ? S.lines[0].text : "");
     if (node._t !== tx) { node.textContent = tx; node._t = tx; }
   }
 }
+
+/* 1.4.3：直播歌詞（/overlay）同步。把目前的歌、歌詞和播放時間送給本機伺服器，直播畫面再來讀 */
+const OV = { last: 0, sent: null, lines: "", busy: false };
+function overlaySync() {
+  const now = performance.now();
+  const active = !$("#view-practice").hidden && S.song;
+  const t = active ? cur() : 0;
+  const st = { sid: active ? S.song.id : null, playing: !!(active && S.playing), rate: S.speed || 1, color: !!S.charColor };
+  const prev = OV.sent;
+  const changed = !prev || prev.sid !== st.sid || prev.playing !== st.playing || prev.rate !== st.rate || prev.color !== st.color
+    || Math.abs(t - (prev.t + (prev.playing ? (now - prev.at) / 1000 * prev.rate : 0))) > 0.25;
+  if (OV.busy || (!changed && now - OV.last < (st.playing ? 2000 : 5000))) return;
+  const body = { ...st, t, title: active ? S.song.title : "" };
+  if (active) {
+    const lines = JSON.stringify(S.lines.map(l => ({ t: l.t, end: l.end, text: l.text, c: (l.chars || []).map(c => c.t) })));
+    if (lines !== OV.lines) { body.lines = JSON.parse(lines); OV.lines = lines; }
+  } else OV.lines = "";
+  OV.busy = true; OV.last = now; OV.sent = { ...st, t, at: now };
+  fetch("/api/overlay", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) })
+    .catch(() => { OV.lines = ""; }).finally(() => { OV.busy = false; });
+}
+
+/* 直播歌詞設定視窗 */
+const OVO = store.get("overlayOpts", { lines: "2", size: 56, pos: "bottom", align: "center", font: "kai", color: "#f0a04a", bg: "none" });
+function overlayUrl() {
+  const q = new URLSearchParams({ lines: OVO.lines, size: OVO.size, pos: OVO.pos, align: OVO.align, font: OVO.font || "kai", color: OVO.color.replace("#", ""), bg: OVO.bg });
+  return `${location.origin}/overlay?${q}`;
+}
+function syncOverlayDlg() {
+  for (const k of ["lines", "size", "pos", "align", "font", "color", "bg"]) $("#ov-" + k).value = OVO[k] || $("#ov-" + k).value;
+  $("#ov-size-v").textContent = OVO.size;
+  $("#ov-url").value = overlayUrl();
+}
+for (const k of ["lines", "size", "pos", "align", "font", "color", "bg"]) {
+  $("#ov-" + k).addEventListener("input", e => { OVO[k] = k === "size" ? +e.target.value : e.target.value; store.set("overlayOpts", OVO); syncOverlayDlg(); });
+}
+$("#ov-open").onclick = () => { syncOverlayDlg(); $("#overlay-dlg").hidden = false; };
+$("#ov-close").onclick = () => { $("#overlay-dlg").hidden = true; };
+$("#overlay-dlg").addEventListener("click", e => { if (e.target.id === "overlay-dlg") $("#ov-close").click(); });
+$("#ov-copy").onclick = async () => {
+  const url = overlayUrl();
+  try { await navigator.clipboard.writeText(url); }
+  catch { const i = $("#ov-url"); i.focus(); i.select(); document.execCommand("copy"); }
+  toast("已複製網址，到 OBS 新增「瀏覽器」來源貼上即可", 2500);
+};
+$("#ov-preview").onclick = async () => {
+  try { await api("/api/open-overlay", { json: { query: overlayUrl().split("?")[1] } }); }
+  catch (e) { toast(e.message); }
+};
 
 let lastTimeText = "";
 function frame() {
@@ -1838,10 +1901,12 @@ function frame() {
     S.dirty = true;
   }
   micFrame();
+  overlaySync();
   if (S.dirty && !$("#view-practice").hidden) {
     S.dirty = false;
     const t = cur();
-    draw(); updateLyrics(t); highlightTiming(t);
+    if (S.showMel) draw();
+    updateLyrics(t); highlightTiming(t);
     const tt = `${fmt(t)} / ${fmt(S.dur || 0, 0)}`;
     if (tt !== lastTimeText) { $("#time").textContent = tt; lastTimeText = tt; }
     if (document.activeElement !== $("#seek")) $("#seek").value = String(t);

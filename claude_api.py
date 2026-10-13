@@ -125,9 +125,21 @@ def _call(kwargs: dict, purpose: str, song: str):
 
 
 def ask_text(prompt: str, max_tokens: int, purpose: str, song: str = "") -> tuple[str, dict]:
+    """回傳文字。回覆被長度上限截斷時，自動用更大的上限重問一次（模型可能先花掉一部分在思考）。"""
     msg, entry = _call({"max_tokens": max_tokens, "messages": [{"role": "user", "content": prompt}]},
                        purpose, song)
+    if getattr(msg, "stop_reason", "") == "max_tokens":
+        log_raw(purpose, msg)
+        msg, e2 = _call({"max_tokens": max_tokens * 4, "messages": [{"role": "user", "content": prompt}]},
+                        purpose, song)
+        entry = {**e2,
+                 "input_tokens": entry["input_tokens"] + e2["input_tokens"],
+                 "output_tokens": entry["output_tokens"] + e2["output_tokens"],
+                 "cost_usd": None if entry["cost_usd"] is None or e2["cost_usd"] is None
+                 else round(entry["cost_usd"] + e2["cost_usd"], 6)}
     text = "".join(b.text for b in msg.content if getattr(b, "type", "") == "text").strip()
+    if getattr(msg, "stop_reason", "") == "max_tokens":
+        text += "……\n（回覆太長被截斷，可以再按一次重新分析）"
     return text, entry
 
 

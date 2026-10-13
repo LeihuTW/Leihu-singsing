@@ -18,7 +18,7 @@ import claude_api as C
 import pipeline as P
 import share as SH
 
-VERSION = "1.4.2"
+VERSION = "1.4.3"
 HOST, PORT = "127.0.0.1", int(os.environ.get("LIANTAI_PORT", "8765"))
 app = Flask(__name__, static_folder=str(P.ROOT / "static"), static_url_path="/static")
 app.config["MAX_CONTENT_LENGTH"] = 1024 * 1024 * 1024
@@ -553,7 +553,7 @@ def claude_coach(sid):
         "請用台灣繁體中文，寫 200 字以內的練習建議：先講整體傾向，再挑最需要練的 2–3 句，"
         "說明可能原因（例如起音偏低、高音撐不住、尾音下墜）和具體練法。不要用條列以外的格式，不要客套。"
     )
-    text, usage = C.ask_text(prompt, 1200, "coach", title)
+    text, usage = C.ask_text(prompt, 3000, "coach", title)
     t["coach"] = text
     j.write_text(json.dumps(t, ensure_ascii=False), "utf-8")
     return jsonify(text=text, usage=usage)
@@ -714,6 +714,57 @@ EXTERNAL_URLS = ("https://www.twitch.tv/leihustore", "https://github.com/LeihuTW
                  # 分享錄音：各平台的發文／上傳頁
                  "https://www.facebook.com", "https://www.instagram.com", "https://x.com/compose/post",
                  "https://www.threads.com")
+
+
+# 1.4.3：直播歌詞（去背）。練唱畫面把目前狀態送來，/overlay 頁面再來讀
+OVERLAY = {"sid": None, "title": "", "t": 0.0, "playing": False, "rate": 1.0, "color": True,
+           "lines": [], "ver": 0, "at": 0.0}
+_ov_lock = threading.Lock()
+
+
+@app.get("/overlay")
+def overlay_page():
+    return send_from_directory(app.static_folder, "overlay.html", max_age=0)
+
+
+@app.post("/api/overlay")
+def overlay_set():
+    d = request.get_json(force=True) or {}
+    with _ov_lock:
+        if d.get("sid") != OVERLAY["sid"] and "lines" not in d:
+            OVERLAY["lines"] = []
+        if "lines" in d:
+            OVERLAY["lines"] = d["lines"] if isinstance(d["lines"], list) else []
+        if "lines" in d or d.get("sid") != OVERLAY["sid"]:
+            OVERLAY["ver"] += 1
+        OVERLAY.update(sid=d.get("sid"), title=str(d.get("title") or ""), t=float(d.get("t") or 0),
+                       playing=bool(d.get("playing")), rate=float(d.get("rate") or 1),
+                       color=bool(d.get("color", True)), at=time.time())
+    return jsonify(ok=True)
+
+
+@app.get("/api/overlay")
+def overlay_get():
+    with _ov_lock:
+        o = dict(OVERLAY)
+    t = o["t"] + ((time.time() - o["at"]) * o["rate"] if o["playing"] else 0)
+    out = {"sid": o["sid"], "title": o["title"], "t": t, "playing": o["playing"], "rate": o["rate"],
+           "color": o["color"], "ver": o["ver"]}
+    if request.args.get("ver") != str(o["ver"]):
+        out["lines"] = o["lines"]
+    return jsonify(out)
+
+
+@app.post("/api/open-overlay")
+def open_overlay():
+    """用預設瀏覽器開啟直播歌詞預覽（只允許本機的 /overlay）。"""
+    q = (request.get_json(force=True) or {}).get("query", "")
+    import re
+    import webbrowser
+    if not re.fullmatch(r"[A-Za-z0-9=&%._-]*", q):
+        raise P.UserError("網址格式不正確")
+    webbrowser.open(f"http://{HOST}:{PORT}/overlay?{q}")
+    return jsonify(ok=True)
 
 
 @app.post("/api/open-url")
