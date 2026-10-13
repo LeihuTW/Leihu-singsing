@@ -529,6 +529,14 @@ def track_pitch(y16: np.ndarray, cfg: dict | None = None, strict: bool = False) 
         f0 = f[0].cpu().numpy()
         per = p[0].cpu().numpy()
         voiced = per > (0.6 if strict else 0.45)
+        if not strict:
+            # 原唱：把「確定有聲音」的段落往前後延伸到中等把握的影格（氣音、咬字、尾音），減少旋律斷斷續續
+            weak = per > 0.22
+            for _ in range(25):   # 最多延伸 0.25 秒
+                grow = weak & ~voiced & (np.roll(voiced, 1) | np.roll(voiced, -1))
+                if not grow.any():
+                    break
+                voiced = voiced | grow
     else:
         f0, voiced, _ = librosa.pyin(y16, fmin=65, fmax=1100, sr=PITCH_SR,
                                      frame_length=1024, hop_length=HOP)
@@ -545,7 +553,109 @@ def track_pitch(y16: np.ndarray, cfg: dict | None = None, strict: bool = False) 
     if strict:
         midi[midi < 36] = np.nan   # 低於 C2 不可能是歌聲
         midi = trim_glides(midi)
-    return clean_pitch(midi)
+        return clean_pitch(midi)
+    return fix_octaves(bridge_gaps(clean_pitch(midi)), rms, y16)
+
+
+def bridge_gaps(midi: np.ndarray, max_gap: int = 12, tol: float = 1.0) -> np.ndarray:
+    """前後音高接近（1 個半音內）而且只斷了很短（0.12 秒內）的地方直接連起來。"""
+    out = midi.copy()
+    n, i = len(out), 0
+    while i < n:
+        if not np.isnan(out[i]):
+            i += 1
+            continue
+        j = i
+        while j < n and np.isnan(out[j]):
+            j += 1
+        if 0 < i and j < n and j - i <= max_gap and abs(out[i - 1] - out[j]) <= tol:
+            out[i:j] = np.linspace(out[i - 1], out[j], j - i + 2)[1:-1]
+        i = j
+    return out
+
+
+def octave_low_score(y16: np.ndarray, a: int, b: int, low_midi: float) -> float | None:
+    """看這段聲音的泛音：低八度那個音是不是真的存在。
+
+    回傳（第 1＋3 泛音）÷（第 2＋4 泛音）。真的是低音時第 1、3 泛音明顯（約 0.4 以上）；
+    其實是高八度時，低音位置幾乎沒能量（約 0.1 以下）。"""
+    s0, s1 = a * HOP_S * PITCH_SR, b * HOP_S * PITCH_SR
+    seg = y16[int(s0):int(s1)]
+    if len(seg) < 400:
+        return None
+    S = np.abs(np.fft.rfft(seg * np.hanning(len(seg)), n=1 << 15))
+    fr = np.fft.rfftfreq(1 << 15, 1 / PITCH_SR)
+    f = 440.0 * 2 ** ((low_midi - 69) / 12)
+    h = [float(S[(fr > k * f * 0.97) & (fr < k * f * 1.03)].max(initial=0.0)) for k in (1, 2, 3, 4)]
+    if h[1] + h[3] <= 0:
+        return None
+    return (h[0] + h[2]) / (h[1] + h[3])
+
+
+def fix_octaves(midi: np.ndarray, rms: np.ndarray | None = None, y16: np.ndarray | None = None,
+                ctx_s: float = 2.0) -> np.ndarray:
+    """修正整段被判成高／低一個八度的音（常見在句尾漸弱的尾音）。
+
+    找出和周圍（前後 2 秒，或緊接在前面的長音）差了將近一個八度的短音或弱音，
+    再用泛音確認：低八度的音確實存在才往下移，確定是高音就保留；
+    泛音看不出來時，只有「比周圍明顯小聲」或「句尾跟在長音後面的短尾音」才移。"""
+    out = midi.copy()
+    n = len(out)
+    level = rms[:n] if rms is not None and len(rms) >= n else None
+    runs, i = [], 0
+    while i < n:
+        if np.isnan(out[i]):
+            i += 1
+            continue
+        j = i
+        while j < n and not np.isnan(out[j]):
+            j += 1
+        runs.append([i, j])
+        i = j
+    if len(runs) < 3:
+        return out
+    win = int(ctx_s / HOP_S)
+    done = set()          # 每段最多移一次，避免第二輪又被移回去
+    for _ in range(2):    # 修一次後周圍的參考也會變準，再看一次
+        meds = [float(np.median(out[a:b])) for a, b in runs]
+        for k, (a, b) in enumerate(runs):
+            if k in done or (b - a) > 60:
+                continue
+            near = [q for q, (c, d) in enumerate(runs) if q != k and d > a - win and c < b + win]
+            wts = [runs[q][1] - runs[q][0] for q in near]
+            if sum(wts) < 30:
+                continue
+            vals = [meds[q] for q in near]
+            order = np.argsort(vals)
+            cum = np.cumsum(np.array(wts)[order])
+            ctx = float(np.array(vals)[order][np.searchsorted(cum, cum[-1] / 2)])   # 依長度加權的中位數
+            diff = meds[k] - ctx
+            tail = False
+            if k > 0:
+                # 句尾的短尾音：跟緊接在前面（0.5 秒內）、比較長的那個音比
+                pa, pb = runs[k - 1]
+                pd = meds[k] - meds[k - 1]
+                if a - pb <= 50 and (pb - pa) > 2 * (b - a) and (b - a) <= 30 and 10 <= abs(pd) <= 14:
+                    diff, tail = pd, True
+            if not 10 <= abs(diff) <= 14:
+                continue
+            weak = False
+            if level is not None and near:
+                ctx_lvl = float(np.median(np.concatenate([level[runs[q][0]:runs[q][1]] for q in near])))
+                weak = float(np.median(level[a:b])) < 0.5 * ctx_lvl
+            low = meds[k] - 12 if diff > 0 else meds[k]   # 兩個候選音裡比較低的那個
+            score = octave_low_score(y16, a, b, low) if y16 is not None else None
+            if score is not None and diff > 0 and score <= 0.12:
+                continue      # 低音位置沒有能量：真的是高音
+            if score is not None and diff < 0 and score >= 0.35:
+                continue      # 低音確實存在：真的是低音
+            sure = score is not None and ((diff > 0 and score >= 0.35) or (diff < 0 and score <= 0.12))
+            if sure or weak or tail:
+                shift = 12 * np.sign(diff)
+                out[a:b] -= shift
+                meds[k] -= shift
+                done.add(k)
+    return out
 
 
 def trim_glides(midi: np.ndarray, slope: float = 0.9, k: int = 3) -> np.ndarray:
@@ -664,6 +774,9 @@ def segment_notes(f0: np.ndarray) -> list[list[float]]:
     return notes
 
 
+PITCH_ALGO = 2   # 1.4.2：旋律分析改良（補斷點、修八度）；舊的歌可以重新分析旋律
+
+
 def step_pitch(d: Path, cfg: dict, report) -> None:
     report("分析主唱旋律", 0.55)
     y16 = read_audio(d / "lead.wav", sr=PITCH_SR, mono=True)
@@ -677,6 +790,7 @@ def step_pitch(d: Path, cfg: dict, report) -> None:
     (d / "pitch.json").write_text(json.dumps(data, separators=(",", ":")), "utf-8")
     meta = read_meta(d)
     meta["steps"]["pitch"] = True
+    meta["pitch_algo"] = PITCH_ALGO
     write_meta(d, meta)
 
 
@@ -1293,7 +1407,7 @@ def similarity(recognized: str, candidate: str) -> float | None:
     return round(sum(x.size for x in m.get_matching_blocks()) / len(a), 3)
 
 
-USER_AGENT = "LeihuLiantai/1.4.1 (+https://github.com/LeihuTW/Leihu-singsing)"   # HTTP 標頭只能用英文字
+USER_AGENT = "LeihuLiantai/1.4.2 (+https://github.com/LeihuTW/Leihu-singsing)"   # HTTP 標頭只能用英文字
 
 
 def _http_json(url: str, headers: dict | None = None, timeout: int = 10):

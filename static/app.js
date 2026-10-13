@@ -164,6 +164,7 @@ function renderSongs() {
     if (st.separate) chips.push(`<span class="chip ${s.separation === "uvr" ? "ok" : "warn"}">${s.separation === "uvr" ? "AI 分軌" : "聲像分軌"}</span>`);
     if (s.acapella) chips.push(`<span class="chip acap">清唱</span>`);
     chips.push(`<span class="chip ${st.pitch ? "ok" : ""}">${st.pitch ? "旋律" : "旋律未完成"}</span>`);
+    if (st.pitch && !(s.pitch_algo >= 2)) chips.push(`<button class="chip warn chip-btn" data-a="repitch" title="用 1.4.2 改良的方式重新分析旋律（約 1 分鐘，不影響歌詞與錄音）">更新旋律分析</button>`);
     chips.push(`<span class="chip ${st.lyrics ? "ok" : ""}">${st.lyrics ? "歌詞" : "無歌詞"}</span>`);
     if (s.lyrics_pending) chips.push(`<span class="chip warn">有線上歌詞可選</span>`);
     if (s.takes) chips.push(`<span>${s.takes} 次錄音</span>`);
@@ -195,6 +196,8 @@ function renderSongs() {
       catch (e) { toast(e.message); }
     };
     $('[data-a="open"]', el).onclick = () => openSong(s.id);
+    const rp = $('[data-a="repitch"]', el);
+    if (rp) rp.onclick = () => repitch(s.id);
     $('[data-a="rename"]', el).onclick = async () => {
       const t = $(".t", el);
       const inp = document.createElement("input");
@@ -356,6 +359,12 @@ async function renderUsage() {
 }
 
 /* ------------------------------------------------------------ 開啟歌曲 */
+/* 用新版方式只重新分析旋律（歌詞、錄音不受影響） */
+async function repitch(id) {
+  try { await api(`/api/songs/${id}/process`, { json: { steps: ["pitch"] } }); toast("已加入處理佇列，完成後重新開啟這首歌即可看到新的旋律"); pollJobs(); }
+  catch (e) { toast(e.message); }
+}
+
 async function openSong(id) {
   pause();
   stopTap();
@@ -376,7 +385,9 @@ async function openSong(id) {
   computeRange();
   $("#p-title").textContent = song.title;
   $("#p-chips").innerHTML = `<span class="chip ${song.separation === "uvr" ? "ok" : "warn"}">${song.separation === "uvr" ? "AI 分軌" : "聲像分軌"}</span>`
-    + (song.acapella ? `<span class="chip acap">清唱／純人聲</span>` : "");
+    + (song.acapella ? `<span class="chip acap">清唱／純人聲</span>` : "")
+    + (song.steps?.pitch && !(song.pitch_algo >= 2) ? `<button class="chip warn chip-btn" id="p-repitch" title="這首歌的旋律是舊版分析的，重新分析可以補上斷掉的旋律、修正句尾忽然跳高的音">更新旋律分析</button>` : "");
+  if ($("#p-repitch")) $("#p-repitch").onclick = () => repitch(id);
   $("#ls-results").innerHTML = ""; $("#ls-msg").textContent = ""; $("#ls-q").value = "";
   S.editLyr = false; syncLyrButtons();
   checkCandidates(id);
