@@ -18,6 +18,7 @@ import soundfile as sf
 import pipeline as P
 
 W, H, FPS = 1080, 1920, 30          # 直式 9:16
+BRAND = "雷虎練唱工具"                # 分享出去的影片、成績卡上顯示的名稱
 REVERB = {"none": 0.0, "light": 0.12, "medium": 0.22, "hall": 0.32}
 
 
@@ -60,49 +61,92 @@ def polish_vocal(v: np.ndarray, sr: int, reverb: str) -> np.ndarray:
     return Pedalboard(fx)(v.astype(np.float32), sr)
 
 
-def mix_take(d: Path, tid: str, opts: dict) -> tuple[np.ndarray, int, dict]:
-    """回傳 (立體聲混音, 取樣率, 時間資訊)。"""
-    info = load_take(d, tid)
+def _stems(d: Path, info: dict):
     key, speed = variant_needed(d, info)
-    vd = P.variant_dir(d, key, speed)
     if not P.variant_ready(d, key, speed):
         raise P.UserError("需要先準備錄音時的 KEY／速度版本")
+    vd = P.variant_dir(d, key, speed)
     back, sr = sf.read(str(vd / "back.wav"), dtype="float32", always_2d=True)
     inst, _ = sf.read(str(vd / "inst.wav"), dtype="float32", always_2d=True)
     back, inst = back.T, inst.T
     if back.shape[0] == 1:
         back, inst = np.repeat(back, 2, 0), np.repeat(inst, 2, 0)
+    return back, inst, sr, key, speed
+
+
+def vocal_track(d: Path, tid: str, opts: dict, sr: int, length: int) -> np.ndarray:
+    """把錄音處理好（美化、殘響、標準化音量），放到伴奏時間軸上錄音的位置，回傳和伴奏一樣長的單聲道人聲。"""
+    info = load_take(d, tid)
+    speed = float(info.get("speed", 1.0))
     voc, vsr = sf.read(str(d / "takes" / f"{tid}.wav"), dtype="float32", always_2d=True)
     voc = _resample(voc.mean(axis=1), vsr, sr)
-
-    # 錄音開始的位置（伴奏檔的時間 = 歌曲時間 ÷ 速度）
-    v0 = (float(info.get("start", 0)) + float(info.get("offset", 0))) / speed
-    n = len(voc)
-    i0 = int(round(v0 * sr))
-    seg = np.zeros((2, n), dtype=np.float32)
-    a, b = max(0, i0), min(back.shape[1], i0 + n)
+    v = polish_vocal(voc[None, :], sr, opts.get("reverb", "light"))[0] if opts.get("polish", True) else voc
+    peak = float(np.percentile(np.abs(v), 99.9)) or 1.0
+    v = v * (0.5 / peak)
+    i0 = int(round((float(info.get("start", 0)) + float(info.get("offset", 0))) / speed * sr))
+    out = np.zeros(length, dtype=np.float32)
+    a, b = max(0, i0), min(length, i0 + len(v))
     if b > a:
-        g_back, g_inst = _db(opts.get("back_db", 0)), _db(opts.get("inst_db", 0))
-        seg[:, a - i0:b - i0] = back[:, a:b] * g_back + inst[:, a:b] * g_inst
+        out[a:b] = v[a - i0:b - i0]
+    return out
 
-    vocal = polish_vocal(voc[None, :], sr, opts.get("reverb", "light")) if opts.get("polish", True) else voc[None, :]
-    if vocal.shape[0] == 1:
-        vocal = np.repeat(vocal, 2, 0)
-    # 人聲音量：先把錄音標準化到差不多的響度，再套使用者的微調
-    peak = float(np.percentile(np.abs(vocal), 99.9)) or 1.0
-    vocal = vocal * (0.5 / peak) * _db(opts.get("vocal_db", 0))
-    out = seg + vocal[:, :n]
 
-    # 頭尾淡入淡出，最後加限幅避免爆音
+def suggest_balance(d: Path, tid: str, opts: dict | None = None) -> dict:
+    """自動平衡：讓歌聲比伴奏大約大 3 dB（流行歌常見的比例），合音比伴奏小一點。
+
+    只看你有唱的段落來比較響度，回傳建議的 vocal_db／back_db／inst_db。"""
+    info = load_take(d, tid)
+    back, inst, sr, _, _ = _stems(d, info)
+    vocal = vocal_track(d, tid, opts or {"polish": True, "reverb": "light"}, sr, back.shape[1])
+    hop = sr // 20
+    n = len(vocal) // hop * hop
+
+    def rms(x):   # 每 50 ms 的響度
+        return np.sqrt(np.mean(x[:n].reshape(-1, hop) ** 2, axis=1) + 1e-12)
+    rv = rms(vocal)
+    sing = rv > max(rv.max() * 0.05, 1e-4)
+    if sing.sum() < 20:
+        return {"vocal_db": 0.0, "back_db": -3.0, "inst_db": 0.0}
+    back_db = -3.0
+    bed = back.mean(axis=0) * 10 ** (back_db / 20) + inst.mean(axis=0)
+    lv = 20 * np.log10(np.median(rv[sing]))
+    lb = 20 * np.log10(np.median(rms(bed)[sing]))
+    vocal_db = (lb + 3.0) - lv
+    inst_db = 0.0
+    if vocal_db > 12:            # 歌聲已經拉到最大還不夠：改成把伴奏調小
+        inst_db, back_db = max(-12.0, 12 - vocal_db), max(-15.0, back_db + 12 - vocal_db)
+        vocal_db = 12.0
+    elif vocal_db < -12:
+        vocal_db = -12.0
+    r = lambda x: round(float(x) * 2) / 2   # 對齊拉桿的 0.5 dB 刻度
+    return {"vocal_db": r(vocal_db), "back_db": r(back_db), "inst_db": r(inst_db)}
+
+
+def mix_take(d: Path, tid: str, opts: dict) -> tuple[np.ndarray, int, dict]:
+    """回傳 (立體聲混音, 取樣率, 時間資訊)。opts["range"]："full" 整首歌（預設）／"take" 只有錄音的段落。"""
+    info = load_take(d, tid)
+    back, inst, sr, key, speed = _stems(d, info)
+    total = back.shape[1]
+    vocal = vocal_track(d, tid, opts, sr, total) * _db(opts.get("vocal_db", 0))
+    out = back * _db(opts.get("back_db", 0)) + inst * _db(opts.get("inst_db", 0)) + vocal[None, :]
+
+    if opts.get("range") == "take":
+        voc_len = sf.info(str(d / "takes" / f"{tid}.wav")).duration
+        v0 = (float(info.get("start", 0)) + float(info.get("offset", 0))) / speed
+        a, b = max(0, int(v0 * sr)), min(total, int((v0 + voc_len) * sr))
+        out, start = out[:, a:b], a / sr
+    else:
+        start = 0.0
+    n = out.shape[1]
     fi, fo = int(0.05 * sr), int(min(1.5, n / sr / 4) * sr)
     out[:, :fi] *= np.linspace(0, 1, fi, dtype=np.float32)
     out[:, n - fo:] *= np.linspace(1, 0, fo, dtype=np.float32)
     try:
         from pedalboard import Limiter
-        out = Limiter(threshold_db=-1.0, release_ms=80)(out, sr)
+        out = Limiter(threshold_db=-1.0, release_ms=80)(np.ascontiguousarray(out, dtype=np.float32), sr)
     except ImportError:
         out = np.clip(out, -0.98, 0.98)
-    timing = {"song_t0": v0 * speed, "speed": speed, "key": key, "dur": n / sr}
+    timing = {"song_t0": start * speed, "speed": speed, "key": key, "dur": n / sr}
     return out.astype(np.float32), sr, timing
 
 
@@ -216,7 +260,7 @@ class VideoPainter:
         if self.acc is not None:
             sub += f"・音準命中 {round(self.acc * 100)}%"
         dr.text((W / 2, 200), sub, font=self.f_sub, fill=_hex(self.MUTED), anchor="mm")
-        dr.text((W / 2, H - 70), "雷虎練唱台", font=_font(28), fill=_hex(self.MUTED, 200), anchor="mm")
+        dr.text((W / 2, H - 70), BRAND, font=_font(28), fill=_hex(self.MUTED, 200), anchor="mm")
         return img
 
     def _y(self, m: float) -> float:
@@ -427,7 +471,7 @@ def export_scorecard(d: Path, info: dict, title: str, out: Path) -> Path:
             y += 50
             dr.text((x0, y), fit(l["text"], _font(28), CW - 360), font=_font(28), fill=_hex(MUTED), anchor="lm")
             dr.text((x1, y), f"{round(l['acc'] * 100)}%", font=_font(28, True), fill=_hex(MEL), anchor="rm")
-    dr.text((CW / 2, CH - 50), "雷虎練唱台", font=_font(28), fill=_hex(MUTED, 220), anchor="mm")
+    dr.text((CW / 2, CH - 50), BRAND, font=_font(28), fill=_hex(MUTED, 220), anchor="mm")
     img.save(out, "PNG", optimize=True)
     return out
 

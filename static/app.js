@@ -1270,20 +1270,56 @@ async function refreshTakes(selectId) {
   renderTakes(song.takes);
   if (selectId) selectTake(selectId);
 }
+/* 錄音批次刪除（1.4.1） */
+const TK = { on: false, picked: new Set() };
+function syncTakeTools() {
+  $("#takes-bar").hidden = !S.takes || S.takes.length < 2;
+  $("#tk-select").hidden = TK.on; $("#tk-tools").hidden = !TK.on;
+  $("#tk-del").disabled = !TK.picked.size;
+  $("#tk-del").textContent = TK.picked.size ? `刪除選取的 ${TK.picked.size} 筆` : "刪除選取的錄音";
+  $("#tk-all").textContent = TK.picked.size === (S.takes || []).length ? "全不選" : "全選";
+}
+$("#tk-select").onclick = () => { TK.on = true; TK.picked.clear(); renderTakes(S.takes); };
+$("#tk-cancel").onclick = () => { TK.on = false; TK.picked.clear(); renderTakes(S.takes); };
+$("#tk-all").onclick = () => {
+  if (TK.picked.size === S.takes.length) TK.picked.clear(); else S.takes.forEach(t => TK.picked.add(t.id));
+  renderTakes(S.takes);
+};
+$("#tk-del").onclick = async () => {
+  const b = $("#tk-del");
+  if (!b.dataset.armed) { b.dataset.armed = "1"; b.textContent = `確定刪除 ${TK.picked.size} 筆？`; setTimeout(() => { delete b.dataset.armed; syncTakeTools(); }, 3000); return; }
+  delete b.dataset.armed;
+  try {
+    const ids = [...TK.picked];
+    await api(`/api/songs/${S.song.id}/takes/delete`, { json: { ids } });
+    if (S.take && ids.includes(S.take.id)) { S.take = null; S.takeBuf = null; $("#take-detail").innerHTML = ""; }
+    TK.on = false; TK.picked.clear();
+    toast(`已刪除 ${ids.length} 筆錄音`);
+    refreshTakes();
+  } catch (e) { toast(e.message); }
+};
 function renderTakes(takes) {
   S.takes = takes || [];
+  for (const id of [...TK.picked]) if (!S.takes.some(t => t.id === id)) TK.picked.delete(id);
+  syncTakeTools();
   const box = $("#takes"); box.innerHTML = "";
   if (!S.takes.length) { box.innerHTML = `<p class="hint">還沒有錄音。開啟麥克風後按「錄一次」，唱完按停止就會自動評分。</p>`; return; }
   for (const t of S.takes) {
     const el = document.createElement("div");
-    el.className = "take" + (S.take && S.take.id === t.id ? " sel" : "");
+    el.className = "take" + (S.take && S.take.id === t.id && !TK.on ? " sel" : "") + (TK.picked.has(t.id) ? " picked" : "");
     const d = new Date(t.created * 1000);
     const when = `${d.getMonth() + 1}/${d.getDate()} ${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
     el.innerHTML = `<div><div class="sub">${when}・KEY ${t.key > 0 ? "+" : ""}${t.key}・${Math.round(t.speed * 100)}%・${fmt(t.duration || 0, 0)}</div>
       <div class="sub">${t.acc != null ? `平均偏差 ${t.mean > 0 ? "+" : ""}${Math.round(t.mean)}¢${t.octave ? `・${t.octave < 0 ? "低" : "高"}八度` : ""}`
         : t.status === "scoring" ? "評分中…" : t.status === "error" ? "評分失敗" : "沒有偵測到歌聲"}</div></div>
       <div class="score">${t.acc == null ? "—" : Math.round(t.acc * 100) + "%"}</div>`;
-    el.onclick = () => selectTake(t.id);
+    if (TK.on) {   // 選取模式：點一下勾選／取消
+      const cb = document.createElement("input");
+      cb.type = "checkbox"; cb.className = "pick"; cb.checked = TK.picked.has(t.id);
+      cb.setAttribute("aria-label", "選取這筆錄音");
+      el.prepend(cb);
+      el.onclick = () => { TK.picked.has(t.id) ? TK.picked.delete(t.id) : TK.picked.add(t.id); renderTakes(S.takes); };
+    } else el.onclick = () => selectTake(t.id);
     box.appendChild(el);
   }
 }
@@ -1368,59 +1404,135 @@ function bindDelete(t, box) {
 }
 
 /* ------------------------------------------------------------ 匯出／分享錄音（1.4） */
-const SH = { take: null };
+const SH = { take: null, bufs: {}, nodes: null, playing: false, t0: 0, pos: 0, start: 0, req: 0 };
+const BRAND = "雷虎練唱工具";
 const shOpts = () => ({
   vocal_db: +$("#sh-vocal").value, back_db: +$("#sh-back").value, inst_db: +$("#sh-inst").value,
-  polish: $("#sh-polish").checked, reverb: $("#sh-reverb").value,
+  polish: $("#sh-polish").checked, reverb: $("#sh-reverb").value, range: $("#sh-range").value,
   formats: $$('input[name="sh-fmt"]:checked').map(i => i.value),
 });
+const dbGain = v => (v <= -40 ? 0 : Math.pow(10, v / 20));
 function shLabel(id) {
   const v = +$("#" + id).value;
   $("#" + id + "-v").textContent = v <= -40 ? "靜音" : (v > 0 ? "+" : "") + v + " dB";
 }
-["sh-vocal", "sh-back", "sh-inst"].forEach(id => {
-  const saved = store.get("share:" + id, null);
-  if (saved != null) $("#" + id).value = saved;
-  shLabel(id);
-  $("#" + id).addEventListener("input", () => { shLabel(id); store.set("share:" + id, +$("#" + id).value); });
-});
+function shApplyGains() {   // 拉桿一動，試聽中的聲音就跟著變
+  ["sh-vocal", "sh-back", "sh-inst"].forEach(shLabel);
+  if (!SH.nodes) return;
+  const now = ac().currentTime;
+  SH.nodes.vocal.gain.setTargetAtTime(dbGain(+$("#sh-vocal").value), now, 0.03);
+  SH.nodes.back.gain.setTargetAtTime(dbGain(+$("#sh-back").value), now, 0.03);
+  SH.nodes.inst.gain.setTargetAtTime(dbGain(+$("#sh-inst").value), now, 0.03);
+}
+["sh-vocal", "sh-back", "sh-inst"].forEach(id => $("#" + id).addEventListener("input", shApplyGains));
 $("#sh-reverb").value = store.get("share:reverb", "light");
-$("#sh-reverb").onchange = e => store.set("share:reverb", e.target.value);
-function openShare(t) {
-  SH.take = t;
-  $("#share").hidden = false;
-  $("#sh-done").hidden = true; $("#sh-msg").textContent = ""; $("#sh-pv-msg").textContent = "";
-  $("#sh-audio").hidden = true; $("#sh-audio").pause();
-  const title = S.song ? S.song.title : "";
-  $("#sh-caption").value = `我用雷虎練唱台練唱了〈${title}〉${t.acc != null ? `，音準命中 ${Math.round(t.acc * 100)}%` : ""}！\n#雷虎練唱台 #練唱 #唱歌`;
+$("#sh-reverb").onchange = e => { store.set("share:reverb", e.target.value); shPrepare(false); };
+$("#sh-polish").onchange = () => shPrepare(false);
+$("#sh-auto").onclick = () => shPrepare(true);
+function setBalance(b) {
+  if (!b) return;
+  $("#sh-vocal").value = b.vocal_db; $("#sh-back").value = b.back_db; $("#sh-inst").value = b.inst_db;
+  shApplyGains();
 }
-async function shCall(kind) {
-  // 匯出要用錄音當時的 KEY／速度版本；還沒準備好就先產生
-  for (let i = 0; i < 2; i++) {
-    const r = await api(`/api/songs/${S.song.id}/takes/${SH.take.id}/${kind}`, { json: shOpts() });
-    if (!r.need_job) return r;
-    const msg = kind === "preview" ? $("#sh-pv-msg") : $("#sh-msg");
-    await waitJob(r.need_job, j => (msg.textContent = `先準備錄音時的 KEY ${fmtKey(SH.take.key)}／${Math.round(SH.take.speed * 100)}% 版本：${Math.round(j.progress * 100)}%`));
-  }
-  throw new Error("準備伴奏失敗，請再試一次");
+async function fetchBuf(url) {
+  const r = await fetch(url);
+  if (!r.ok) throw new Error("讀不到音訊");
+  return ac().decodeAudioData(await r.arrayBuffer());
 }
-$("#sh-preview").onclick = async () => {
-  const b = $("#sh-preview"), msg = $("#sh-pv-msg"), au = $("#sh-audio");
-  b.disabled = true; msg.textContent = "混音中…";
+async function shPrepare(withBalance) {
+  const req = ++SH.req, msg = $("#sh-pv-msg");
+  const wasPlaying = SH.playing; shStop();
+  $("#sh-play").disabled = true; $("#sh-pos").disabled = true;
+  msg.textContent = withBalance ? "計算建議音量、準備試聽中…" : "套用人聲效果中…";
   try {
-    pause();
-    const r = await shCall("preview");
-    au.src = r.url; au.hidden = false; await au.play().catch(() => {});
-    msg.textContent = "這是實際匯出的聲音；調整音量後再按一次試聽";
-  } catch (e) { msg.textContent = e.message; }
-  finally { b.disabled = false; }
-};
+    let r;
+    for (let i = 0; i < 3; i++) {
+      r = await api(`/api/songs/${S.song.id}/takes/${SH.take.id}/mixprep${withBalance ? "?balance=1" : ""}`, { json: shOpts() });
+      if (!r.need_job) break;
+      await waitJob(r.need_job, j => (msg.textContent = `先準備錄音時的 KEY ${fmtKey(SH.take.key)}／${Math.round(SH.take.speed * 100)}% 版本：${Math.round(j.progress * 100)}%`));
+    }
+    if (req !== SH.req) return;
+    if (withBalance) setBalance(r.balance);
+    // 合音、伴奏：和練唱畫面是同一個 KEY／速度就直接共用，不必重新載入
+    const same = S.key === r.key && Math.abs(S.speed - r.speed) < 1e-3 && S.bufs.back;
+    const key = `${r.key}:${r.speed}`;
+    if (SH.bufs.key !== key) {
+      SH.bufs = { key, back: same ? S.bufs.back : await fetchBuf(r.back), inst: same ? S.bufs.inst : await fetchBuf(r.inst) };
+    }
+    SH.bufs.vocal = await fetchBuf(r.vocal);
+    if (req !== SH.req) return;
+    SH.start = r.start;
+    const dur = SH.bufs.inst.duration;
+    $("#sh-pos").max = String(dur);
+    if (!SH.pos) SH.pos = Math.max(0, r.start - 2);   // 從你開始唱的前 2 秒開始試聽
+    $("#sh-pos").value = String(SH.pos);
+    $("#sh-play").disabled = false; $("#sh-pos").disabled = false;
+    msg.textContent = "邊聽邊拖拉桿，音量會即時改變；人聲美化和殘響切換後會重新處理幾秒";
+    shTime();
+    if (wasPlaying) shPlay();
+  } catch (e) { if (req === SH.req) msg.textContent = e.message; }
+}
+function shPlay() {
+  const c = ac(); c.resume(); shStop();
+  const lim = c.createDynamicsCompressor();   // 和匯出時一樣加限幅
+  lim.threshold.value = -1; lim.knee.value = 0; lim.ratio.value = 20; lim.attack.value = 0.003; lim.release.value = 0.08;
+  lim.connect(c.destination);
+  const nodes = {};
+  for (const k of ["vocal", "back", "inst"]) {
+    const src = c.createBufferSource(); src.buffer = SH.bufs[k];
+    const g = c.createGain(); src.connect(g); g.connect(lim);
+    src.start(c.currentTime + 0.05, SH.pos);
+    nodes[k] = g; nodes[k + "Src"] = src;
+  }
+  nodes.lim = lim;
+  SH.nodes = nodes; shApplyGains();
+  SH.playing = true; SH.t0 = c.currentTime + 0.05 - SH.pos;
+  $("#sh-play").textContent = "❚❚ 暫停";
+  pause();   // 練唱畫面的播放先停掉
+  requestAnimationFrame(shTick);
+}
+function shStop() {
+  if (SH.nodes) {
+    SH.pos = Math.min(+$("#sh-pos").max || 0, Math.max(0, ac().currentTime - SH.t0));
+    for (const k of ["vocal", "back", "inst"]) { try { SH.nodes[k + "Src"].stop(); } catch {} }
+    SH.nodes.lim.disconnect();
+  }
+  SH.nodes = null; SH.playing = false;
+  $("#sh-play").textContent = "▶ 試聽";
+}
+function shTime() {
+  const t = SH.playing ? ac().currentTime - SH.t0 : SH.pos;
+  $("#sh-time").textContent = `${fmt(t, 0)} / ${fmt(+$("#sh-pos").max || 0, 0)}`;
+  return t;
+}
+function shTick() {
+  if (!SH.playing) return;
+  const t = shTime();
+  $("#sh-pos").value = String(t);
+  if (t >= (+$("#sh-pos").max || 0)) { shStop(); SH.pos = 0; return; }
+  requestAnimationFrame(shTick);
+}
+$("#sh-play").onclick = () => (SH.playing ? shStop() : shPlay());
+$("#sh-pos").addEventListener("input", e => { SH.pos = +e.target.value; if (SH.playing) shPlay(); else shTime(); });
+function openShare(t) {
+  SH.take = t; SH.pos = 0;
+  $("#share").hidden = false;
+  $("#sh-done").hidden = true; $("#sh-msg").textContent = "";
+  const title = S.song ? S.song.title : "";
+  $("#sh-caption").value = `我用${BRAND}練唱了〈${title}〉${t.acc != null ? `，音準命中 ${Math.round(t.acc * 100)}%` : ""}！\n#${BRAND} #練唱 #唱歌`;
+  shPrepare(true);
+}
 $("#sh-go").onclick = async () => {
   const b = $("#sh-go"), msg = $("#sh-msg");
   if (!shOpts().formats.length) return toast("至少選一種格式");
   b.disabled = true; msg.textContent = "準備中…"; $("#sh-done").hidden = true;
   try {
-    const r = await shCall("export");
+    let r;
+    for (let i = 0; i < 3; i++) {
+      r = await api(`/api/songs/${S.song.id}/takes/${SH.take.id}/export`, { json: shOpts() });
+      if (!r.need_job) break;
+      await waitJob(r.need_job, j => (msg.textContent = `先準備伴奏：${Math.round(j.progress * 100)}%`));
+    }
     await waitJob(r.job, j => (msg.textContent = `${j.step}（${Math.round(j.progress * 100)}%）`));
     msg.textContent = "匯出完成，檔案在「下載\\雷虎練唱台」";
     const box = $("#sh-files"); box.innerHTML = "";
@@ -1444,7 +1556,7 @@ $$("[data-share]").forEach(btn => (btn.onclick = () => {
   if (files.length) files[files.length - 1].click();   // 同時打開檔案位置，方便拖進網頁
   api("/api/open-url", { json: { url: btn.dataset.share } }).catch(() => window.open(btn.dataset.share, "_blank"));
 }));
-$("#sh-close").onclick = () => { $("#share").hidden = true; $("#sh-audio").pause(); };
+$("#sh-close").onclick = () => { shStop(); SH.req++; $("#share").hidden = true; };
 $("#share").addEventListener("click", e => { if (e.target.id === "share") $("#sh-close").click(); });
 
 /* ------------------------------------------------------------ 繪圖 */

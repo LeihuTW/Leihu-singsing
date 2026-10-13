@@ -8,7 +8,7 @@
 </head>
 <body>
 <header class="bar">
-  <span class="logo">雷虎練唱台<small id="ver">1.4</small></span>
+  <span class="logo">雷虎練唱台<small id="ver">1.4.1</small></span>
   <nav class="row">
     <button id="nav-lib" class="tab cur">歌曲庫</button>
     <button id="nav-practice" class="tab" disabled>練唱</button>
@@ -146,6 +146,10 @@
           <span id="mic-warn" class="hint"></span>
         </div>
         <div id="key-hint" class="key-hint" hidden><span></span><button class="primary" hidden></button></div>
+        <div id="takes-bar" class="row takes-bar" hidden>
+          <button id="tk-select" class="ghost">選取多筆</button>
+          <span id="tk-tools" hidden><button id="tk-all" class="ghost">全選</button><button id="tk-del" class="ghost danger" disabled>刪除選取的錄音</button><button id="tk-cancel" class="ghost">取消</button></span>
+        </div>
         <div id="takes" class="takes"></div>
         <div id="take-detail" class="detail"></div>
       </div>
@@ -240,19 +244,28 @@
 <div id="share" class="modal" hidden>
   <div class="sheet share-sheet" role="dialog" aria-modal="true" aria-labelledby="share-title">
     <h1 id="share-title">匯出／分享這次演唱</h1>
-    <p class="hint">把你的歌聲和合音、伴奏混在一起（不含原唱與導引音），用的是錄音當時的 KEY 和速度。</p>
+    <p class="hint">把你的歌聲和合音、伴奏混在一起（不含原唱與導引音），用的是錄音當時的 KEY 和速度。音量已自動平衡成建議值，可以邊聽邊調。</p>
     <div class="share-mix">
-      <label for="sh-vocal">你的歌聲</label><input id="sh-vocal" type="range" min="-12" max="12" step="0.5" value="0"><span id="sh-vocal-v" class="num">0 dB</span>
+      <label for="sh-vocal">你的歌聲</label><input id="sh-vocal" type="range" min="-24" max="12" step="0.5" value="0"><span id="sh-vocal-v" class="num">0 dB</span>
       <label for="sh-back">合音</label><input id="sh-back" type="range" min="-40" max="6" step="0.5" value="0"><span id="sh-back-v" class="num">0 dB</span>
-      <label for="sh-inst">伴奏</label><input id="sh-inst" type="range" min="-40" max="6" step="0.5" value="-2"><span id="sh-inst-v" class="num">-2 dB</span>
+      <label for="sh-inst">伴奏</label><input id="sh-inst" type="range" min="-40" max="6" step="0.5" value="0"><span id="sh-inst-v" class="num">0 dB</span>
     </div>
     <div class="row">
       <label class="hint"><input id="sh-polish" type="checkbox" checked> 人聲美化（去低頻雜音、讓音量平均）</label>
       <label for="sh-reverb" class="hint">殘響</label>
       <select id="sh-reverb"><option value="none">不加</option><option value="light" selected>輕</option><option value="medium">中</option><option value="hall">大廳</option></select>
+      <button id="sh-auto" class="ghost" title="依你的歌聲和伴奏的響度重新計算">恢復建議音量</button>
     </div>
-    <div class="row"><button id="sh-preview">▶ 試聽混音</button><span id="sh-pv-msg" class="hint"></span></div>
-    <audio id="sh-audio" controls hidden></audio>
+    <div class="sh-player">
+      <button id="sh-play" disabled>▶ 試聽</button>
+      <input id="sh-pos" type="range" min="0" max="1" step="0.1" value="0" aria-label="試聽位置" disabled>
+      <span id="sh-time" class="num hint">0:00</span>
+    </div>
+    <span id="sh-pv-msg" class="hint">準備試聽中…</span>
+    <div class="row">
+      <label for="sh-range" class="hint">匯出範圍</label>
+      <select id="sh-range"><option value="full" selected>整首歌</option><option value="take">只有錄音的段落</option></select>
+    </div>
     <div class="field"><span>匯出格式（可複選）</span>
       <div class="row">
         <label><input type="checkbox" name="sh-fmt" value="mp3" checked> MP3 音訊</label>

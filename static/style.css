@@ -291,3 +291,11 @@ a.tab { text-decoration: none; font-size: 14px; }
 .share-btns button { min-width: 96px; }
 .share-sheet { width: min(640px, 100%); }
 #sh-caption { min-height: 72px; font-family: inherit; font-size: 14px; }
+.sh-player { display: flex; gap: 10px; align-items: center; }
+#sh-pos { flex: 1; min-width: 0; }
+#sh-time { width: 96px; text-align: right; }
+/* 1.4.1：錄音批次刪除 */
+.takes-bar { justify-content: flex-end; }
+.take .pick { width: 18px; height: 18px; flex: none; margin-right: 6px; accent-color: var(--accent); }
+.take.picked { outline: 1px solid var(--bad); }
+.take:has(.pick) { grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; }
