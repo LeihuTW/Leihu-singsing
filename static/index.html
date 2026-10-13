@@ -8,7 +8,7 @@
 </head>
 <body>
 <header class="bar">
-  <span class="logo">雷虎練唱台<small id="ver">1.3.1</small></span>
+  <span class="logo">雷虎練唱台<small id="ver">1.4</small></span>
   <nav class="row">
     <button id="nav-lib" class="tab cur">歌曲庫</button>
     <button id="nav-practice" class="tab" disabled>練唱</button>
@@ -236,6 +236,49 @@
     </div>
   </section>
 </main>
+
+<div id="share" class="modal" hidden>
+  <div class="sheet share-sheet" role="dialog" aria-modal="true" aria-labelledby="share-title">
+    <h1 id="share-title">匯出／分享這次演唱</h1>
+    <p class="hint">把你的歌聲和合音、伴奏混在一起（不含原唱與導引音），用的是錄音當時的 KEY 和速度。</p>
+    <div class="share-mix">
+      <label for="sh-vocal">你的歌聲</label><input id="sh-vocal" type="range" min="-12" max="12" step="0.5" value="0"><span id="sh-vocal-v" class="num">0 dB</span>
+      <label for="sh-back">合音</label><input id="sh-back" type="range" min="-40" max="6" step="0.5" value="0"><span id="sh-back-v" class="num">0 dB</span>
+      <label for="sh-inst">伴奏</label><input id="sh-inst" type="range" min="-40" max="6" step="0.5" value="-2"><span id="sh-inst-v" class="num">-2 dB</span>
+    </div>
+    <div class="row">
+      <label class="hint"><input id="sh-polish" type="checkbox" checked> 人聲美化（去低頻雜音、讓音量平均）</label>
+      <label for="sh-reverb" class="hint">殘響</label>
+      <select id="sh-reverb"><option value="none">不加</option><option value="light" selected>輕</option><option value="medium">中</option><option value="hall">大廳</option></select>
+    </div>
+    <div class="row"><button id="sh-preview">▶ 試聽混音</button><span id="sh-pv-msg" class="hint"></span></div>
+    <audio id="sh-audio" controls hidden></audio>
+    <div class="field"><span>匯出格式（可複選）</span>
+      <div class="row">
+        <label><input type="checkbox" name="sh-fmt" value="mp3" checked> MP3 音訊</label>
+        <label><input type="checkbox" name="sh-fmt" value="wav"> WAV 無損音訊</label>
+        <label><input type="checkbox" name="sh-fmt" value="mp4" checked> 直式影片 9:16（旋律線條＋歌詞）</label>
+        <label><input type="checkbox" name="sh-fmt" value="png" checked> 成績卡圖片（分數＋旋律對照）</label>
+      </div>
+    </div>
+    <div class="row"><button id="sh-go" class="primary">匯出</button><span id="sh-msg" class="hint"></span></div>
+    <div id="sh-done" class="share-done" hidden>
+      <div id="sh-files"></div>
+      <div class="field"><span>貼文文字（可以修改後複製）</span><textarea id="sh-caption" rows="3"></textarea>
+        <div class="row"><button id="sh-copy" class="ghost">複製文字</button></div></div>
+      <div class="field"><span>發佈：按下會開啟平台的網頁，把剛匯出的檔案拖進去、貼上文字即可</span>
+        <div class="row share-btns">
+          <button data-share="https://www.facebook.com">Facebook</button>
+          <button data-share="https://www.instagram.com">Instagram</button>
+          <button data-share="https://x.com/compose/post">X</button>
+          <button data-share="https://www.threads.com">Threads</button>
+        </div>
+        <span class="hint">IG、Threads、FB 的 Reels 建議用直式影片；只想分享聲音可以用 MP3；成績卡圖片適合一般貼文和限時動態。平台可能會因為伴奏的版權把影片靜音或限制觀看。</span>
+      </div>
+    </div>
+    <div class="row" style="justify-content:flex-end"><button id="sh-close" class="ghost">關閉</button></div>
+  </div>
+</div>
 
 <div id="settings" class="modal" hidden>
   <div class="sheet" role="dialog" aria-modal="true" aria-labelledby="set-title">

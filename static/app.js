@@ -1335,7 +1335,7 @@ function renderTakeDetail() {
   box.innerHTML = khHtml + `<div class="hint">命中率是落在原唱 ±50 音分內的比例（換音時早晚 0.1 秒內都算對）。已自動對齊 ${t.offset > 0 ? "+" : ""}${t.offset}s 的錄音延遲${t.octave ? "，並換算八度" : ""}。</div>
     ${worst.length ? `<b>最需要練的句子</b>` : ""}
     <div class="wl"></div>
-    <div class="row"><button id="coach">請 Claude 給練習建議</button><button id="rescore" class="ghost">重新評分</button><button id="del-take" class="ghost danger">刪除這次錄音</button></div>
+    <div class="row"><button id="share-take" class="primary">匯出／分享這次演唱</button><button id="coach">請 Claude 給練習建議</button><button id="rescore" class="ghost">重新評分</button><button id="del-take" class="ghost danger">刪除這次錄音</button></div>
     <div class="coach" ${t.coach ? "" : "hidden"}></div>`;
   const wl = $(".wl", box);
   for (const l of worst) {
@@ -1354,6 +1354,7 @@ function renderTakeDetail() {
     finally { b.disabled = false; }
   };
   $("#rescore").onclick = () => rescoreTake(t.id);
+  $("#share-take").onclick = () => openShare(t);
   if ($("#take-key")) $("#take-key").onclick = () => { changeVariant(kh.suggest, S.speed); toast(`已改成 KEY ${fmtKey(kh.suggest)}`); };
   bindDelete(t, box);
 }
@@ -1365,6 +1366,86 @@ function bindDelete(t, box) {
     S.take = null; S.takeBuf = null; box.innerHTML = ""; refreshTakes();
   };
 }
+
+/* ------------------------------------------------------------ 匯出／分享錄音（1.4） */
+const SH = { take: null };
+const shOpts = () => ({
+  vocal_db: +$("#sh-vocal").value, back_db: +$("#sh-back").value, inst_db: +$("#sh-inst").value,
+  polish: $("#sh-polish").checked, reverb: $("#sh-reverb").value,
+  formats: $$('input[name="sh-fmt"]:checked').map(i => i.value),
+});
+function shLabel(id) {
+  const v = +$("#" + id).value;
+  $("#" + id + "-v").textContent = v <= -40 ? "靜音" : (v > 0 ? "+" : "") + v + " dB";
+}
+["sh-vocal", "sh-back", "sh-inst"].forEach(id => {
+  const saved = store.get("share:" + id, null);
+  if (saved != null) $("#" + id).value = saved;
+  shLabel(id);
+  $("#" + id).addEventListener("input", () => { shLabel(id); store.set("share:" + id, +$("#" + id).value); });
+});
+$("#sh-reverb").value = store.get("share:reverb", "light");
+$("#sh-reverb").onchange = e => store.set("share:reverb", e.target.value);
+function openShare(t) {
+  SH.take = t;
+  $("#share").hidden = false;
+  $("#sh-done").hidden = true; $("#sh-msg").textContent = ""; $("#sh-pv-msg").textContent = "";
+  $("#sh-audio").hidden = true; $("#sh-audio").pause();
+  const title = S.song ? S.song.title : "";
+  $("#sh-caption").value = `我用雷虎練唱台練唱了〈${title}〉${t.acc != null ? `，音準命中 ${Math.round(t.acc * 100)}%` : ""}！\n#雷虎練唱台 #練唱 #唱歌`;
+}
+async function shCall(kind) {
+  // 匯出要用錄音當時的 KEY／速度版本；還沒準備好就先產生
+  for (let i = 0; i < 2; i++) {
+    const r = await api(`/api/songs/${S.song.id}/takes/${SH.take.id}/${kind}`, { json: shOpts() });
+    if (!r.need_job) return r;
+    const msg = kind === "preview" ? $("#sh-pv-msg") : $("#sh-msg");
+    await waitJob(r.need_job, j => (msg.textContent = `先準備錄音時的 KEY ${fmtKey(SH.take.key)}／${Math.round(SH.take.speed * 100)}% 版本：${Math.round(j.progress * 100)}%`));
+  }
+  throw new Error("準備伴奏失敗，請再試一次");
+}
+$("#sh-preview").onclick = async () => {
+  const b = $("#sh-preview"), msg = $("#sh-pv-msg"), au = $("#sh-audio");
+  b.disabled = true; msg.textContent = "混音中…";
+  try {
+    pause();
+    const r = await shCall("preview");
+    au.src = r.url; au.hidden = false; await au.play().catch(() => {});
+    msg.textContent = "這是實際匯出的聲音；調整音量後再按一次試聽";
+  } catch (e) { msg.textContent = e.message; }
+  finally { b.disabled = false; }
+};
+$("#sh-go").onclick = async () => {
+  const b = $("#sh-go"), msg = $("#sh-msg");
+  if (!shOpts().formats.length) return toast("至少選一種格式");
+  b.disabled = true; msg.textContent = "準備中…"; $("#sh-done").hidden = true;
+  try {
+    const r = await shCall("export");
+    await waitJob(r.job, j => (msg.textContent = `${j.step}（${Math.round(j.progress * 100)}%）`));
+    msg.textContent = "匯出完成，檔案在「下載\\雷虎練唱台」";
+    const box = $("#sh-files"); box.innerHTML = "";
+    for (const f of r.files) {
+      const row = document.createElement("div"); row.className = "file";
+      row.innerHTML = `<button class="ghost">顯示檔案</button><span></span>`;
+      $("span", row).textContent = f.split(/[\\/]/).pop();
+      $("button", row).onclick = () => api("/api/reveal", { json: { path: f } }).catch(e => toast(e.message));
+      box.appendChild(row);
+    }
+    $("#sh-done").hidden = false;
+  } catch (e) { msg.textContent = e.message; }
+  finally { b.disabled = false; }
+};
+$("#sh-copy").onclick = async () => {
+  try { await navigator.clipboard.writeText($("#sh-caption").value); toast("已複製貼文文字"); }
+  catch { $("#sh-caption").select(); document.execCommand("copy"); toast("已複製貼文文字"); }
+};
+$$("[data-share]").forEach(btn => (btn.onclick = () => {
+  const files = $$("#sh-files .file button");
+  if (files.length) files[files.length - 1].click();   // 同時打開檔案位置，方便拖進網頁
+  api("/api/open-url", { json: { url: btn.dataset.share } }).catch(() => window.open(btn.dataset.share, "_blank"));
+}));
+$("#sh-close").onclick = () => { $("#share").hidden = true; $("#sh-audio").pause(); };
+$("#share").addEventListener("click", e => { if (e.target.id === "share") $("#sh-close").click(); });
 
 /* ------------------------------------------------------------ 繪圖 */
 const cv = $("#roll");

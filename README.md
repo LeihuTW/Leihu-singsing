@@ -7,6 +7,7 @@
 - **辨識歌詞**並對上時間，中文轉成台灣繁體；也會到 LRCLIB、網易雲、酷狗搜尋歌詞，與辨識結果比對後讓你選一版；也可以匯入 LRC／SRT／TXT 歌詞檔
 - **升降 KEY、調整速度**練唱（用所有 CPU 核心轉換）；唱的時候會依你的音域**建議適合的 KEY**
 - 開麥克風時即時顯示你的音高，有音量表、增益與自動調整、防爆音；錄音後在本機**自動評分**，標出最需要練的句子
+- 把你的錄音和合音、伴奏混音後**匯出 MP3／WAV、直式影片（旋律線條＋歌詞）或成績卡圖片**，一鍵開啟 FB、IG、X、Threads 分享
 - 歌曲庫可自訂分類（例如中文歌、日文歌）並用關鍵字搜尋
 
 歌曲處理都在本機完成（有 NVIDIA 顯示卡時用 GPU 加速）。只有兩個功能會連網使用 Claude，而且需要自己的 Anthropic API 金鑰：「Claude 精準對齊歌詞」和「練習建議」。
@@ -42,6 +43,7 @@ sh installer/build.sh
 | `desktop.py` | 桌面視窗（pywebview），伺服器在另一個行程執行 |
 | `pipeline.py` | 分軌、音高、歌詞辨識、線上歌詞搜尋、歌曲庫 |
 | `claude_api.py` | 呼叫 Claude 並記錄 token 用量與費用 |
+| `share.py` | 錄音混音、匯出音訊、直式影片與成績卡 |
 | `installer.py` | 安裝時偵測顯示卡、安裝套件、下載模型 |
 | `setup/install.ps1` | 安裝檔呼叫的 PowerShell 安裝腳本 |
 | `installer/leihu.nsi` | NSIS 安裝檔腳本 |

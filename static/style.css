@@ -279,3 +279,15 @@ a.tab { text-decoration: none; font-size: 14px; }
 .first-line { display: flex; flex-direction: column; gap: 6px; margin-bottom: 8px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; }
 #fl-time { width: 90px; font-family: var(--mono, monospace); }
 .first-line .ghost { padding: 3px 8px; }
+
+/* 1.4：匯出／分享錄音 */
+.share-sheet { max-width: 640px; }
+.share-mix { display: grid; grid-template-columns: 80px 1fr 64px; gap: 8px 10px; align-items: center; margin: 10px 0; }
+.share-mix .num { text-align: right; color: var(--muted); font-size: 13px; }
+#sh-audio { width: 100%; margin: 6px 0; }
+.share-done { border-top: 1px solid var(--line); margin-top: 10px; padding-top: 10px; }
+.share-done .file { display: flex; gap: 8px; align-items: center; margin: 4px 0; font-size: 13px; word-break: break-all; }
+#sh-caption { width: 100%; }
+.share-btns button { min-width: 96px; }
+.share-sheet { width: min(640px, 100%); }
+#sh-caption { min-height: 72px; font-family: inherit; font-size: 14px; }

@@ -16,8 +16,9 @@ from flask import Flask, abort, jsonify, request, send_file, send_from_directory
 
 import claude_api as C
 import pipeline as P
+import share as SH
 
-VERSION = "1.3.1"
+VERSION = "1.4"
 HOST, PORT = "127.0.0.1", int(os.environ.get("LIANTAI_PORT", "8765"))
 app = Flask(__name__, static_folder=str(P.ROOT / "static"), static_url_path="/static")
 app.config["MAX_CONTENT_LENGTH"] = 1024 * 1024 * 1024
@@ -323,6 +324,68 @@ def rescore_take(sid, tid):
     return jsonify(job=jid)
 
 
+# ---------------------------------------------------------------- 匯出／分享錄音（1.4）
+
+def _share_opts():
+    b = request.get_json(force=True) or {}
+    def num(k, lo, hi):
+        try:
+            return max(lo, min(hi, float(b.get(k, 0))))
+        except (TypeError, ValueError):
+            return 0.0
+    return {"vocal_db": num("vocal_db", -40, 12), "back_db": num("back_db", -40, 6), "inst_db": num("inst_db", -40, 6),
+            "reverb": b.get("reverb") if b.get("reverb") in SH.REVERB else "light", "polish": bool(b.get("polish", True)),
+            "formats": [f for f in (b.get("formats") or ["mp3"]) if f in ("mp3", "wav", "mp4", "png")] or ["mp3"]}
+
+
+def _need_variant(d, sid, tid):
+    """匯出要用錄音當時的 KEY／速度版本；還沒有就先排隊產生。"""
+    info = SH.load_take(d, tid)
+    key, speed = SH.variant_needed(d, info)
+    if P.variant_ready(d, key, speed):
+        return None
+    label = f"{key}:{speed}"
+    return vjobs.find("variant", sid, label) or vjobs.submit(
+        "variant", sid, lambda report: P.step_variant(d, key, speed, report), label=label)
+
+
+@app.post("/api/songs/<sid>/takes/<tid>/preview")
+def take_preview(sid, tid):
+    d, j, w = _take_paths(sid, tid)
+    need = _need_variant(d, sid, tid)
+    if need:
+        return jsonify(need_job=need)
+    y, sr, _ = SH.mix_take(d, tid, _share_opts())
+    P.write_wav(d / "takes" / f"{tid}.preview.wav", y, sr)
+    return jsonify(url=f"/api/songs/{sid}/takes/{tid}/preview.wav?t={int(time.time() * 1000)}")
+
+
+@app.get("/api/songs/<sid>/takes/<tid>/preview.wav")
+def take_preview_file(sid, tid):
+    d, _, _ = _take_paths(sid, tid)
+    p = d / "takes" / f"{tid}.preview.wav"
+    if not p.exists():
+        abort(404)
+    return send_file(p, mimetype="audio/wav", max_age=0)
+
+
+@app.post("/api/songs/<sid>/takes/<tid>/export")
+def take_export(sid, tid):
+    d, _, _ = _take_paths(sid, tid)
+    opts = _share_opts()
+    if opts["formats"] != ["png"]:   # 只匯出成績卡不需要伴奏
+        need = _need_variant(d, sid, tid)
+        if need:
+            return jsonify(need_job=need)
+    SH.load_take(d, tid)
+    title = P.read_meta(d).get("title", "我的演唱")
+    base = P.downloads_dir() / P.APP_NAME / f"{_safe_name(title)[:50]}_我的演唱_{tid[:13]}"
+    files = ([str(base.with_name(base.name + "_成績卡.png"))] if "png" in opts["formats"] else []) + \
+        [str(base.with_suffix("." + f)) for f in ("wav", "mp3", "mp4") if f in opts["formats"]]
+    jid = jobs.submit("export", sid, lambda report: SH.export_take(d, tid, opts, base, report), label=tid)
+    return jsonify(job=jid, files=files)
+
+
 @app.get("/api/songs/<sid>/takes/<tid>/audio")
 def take_audio(sid, tid):
     _, _, w = _take_paths(sid, tid)
@@ -336,6 +399,7 @@ def delete_take(sid, tid):
     _, j, w = _take_paths(sid, tid)
     j.unlink(missing_ok=True)
     w.unlink(missing_ok=True)
+    w.with_suffix(".preview.wav").unlink(missing_ok=True)
     return jsonify(ok=True)
 
 
@@ -590,7 +654,10 @@ def export_lyrics(sid):
     return jsonify(path=str(path))
 
 
-EXTERNAL_URLS = ("https://www.twitch.tv/leihustore", "https://github.com/LeihuTW/Leihu-singsing")
+EXTERNAL_URLS = ("https://www.twitch.tv/leihustore", "https://github.com/LeihuTW/Leihu-singsing",
+                 # 分享錄音：各平台的發文／上傳頁
+                 "https://www.facebook.com", "https://www.instagram.com", "https://x.com/compose/post",
+                 "https://www.threads.com")
 
 
 @app.post("/api/open-url")
