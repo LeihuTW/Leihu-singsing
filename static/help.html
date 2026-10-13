@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>雷虎練唱台 1.4.3 使用說明</title>
+<title>雷虎練唱台 1.4.4 使用說明</title>
 <style>
 /* 和程式本體同一套色彩：冷色控台底、琥珀色是原唱旋律、藍色是你的聲音 */
 :root {
@@ -51,7 +51,7 @@ th { color: var(--muted); font-weight: 600; font-size: 13px; }
 <body>
 <div class="wrap">
   <div class="top"><a href="/" id="back">← 回到雷虎練唱台</a></div>
-  <h1>雷虎練唱台 <span class="ver">1.4.3</span></h1>
+  <h1>雷虎練唱台 <span class="ver">1.4.4</span></h1>
 
   <section id="copyright" class="note legal" aria-labelledby="copyright-h">
     <h2 id="copyright-h">版權與使用聲明</h2>
@@ -85,7 +85,7 @@ th { color: var(--muted); font-weight: 600; font-size: 13px; }
 
   <h2 id="install">安裝</h2>
   <ol>
-    <li>雙擊 <code>雷虎練唱台1.4.3.exe</code>（從 GitHub 下載的檔名是 <code>LeihuLiantai-1.4.3-Setup.exe</code>）。已經裝過舊版的，直接安裝新版即可，歌曲庫和設定會保留。</li>
+    <li>雙擊 <code>雷虎練唱台1.4.4.exe</code>（從 GitHub 下載的檔名是 <code>LeihuLiantai-1.4.4-Setup.exe</code>）。已經裝過舊版的，直接安裝新版即可，歌曲庫和設定會保留。</li>
     <li>如果出現藍色的「Windows 已保護您的電腦」，按「其他資訊」，再按「仍要執行」。這是因為安裝程式沒有付費的數位簽章，不是病毒警告。</li>
     <li>選安裝位置（預設即可，不需要系統管理員權限），按「安裝」。</li>
     <li>如果這台電腦裝過雷虎練唱台，會先詢問：
@@ -262,6 +262,8 @@ th { color: var(--muted); font-weight: 600; font-size: 13px; }
   <p>1.2 已修正 1.1 會一直出現這個訊息的問題。如果還是出現，確認網路能開啟網頁；防火牆或防毒軟體可能擋住了程式連網。詳細原因記錄在 <code>logs\lyrics.log</code>。</p>
   <h3>練唱時旋律區太小或歌詞太擠</h3>
   <p>拖曳旋律和歌詞中間的分隔條，就能調整兩邊的高度比例；雙擊分隔條還原預設。</p>
+  <h3>出現「no kernel image is available」或「顯示卡和 PyTorch 版本不相容」</h3>
+  <p>顯示卡比較舊（GTX 10 系列以前），和安裝的顯示卡加速版本不相容。程式會自動改用 CPU 繼續處理（比較慢）。執行開始選單的「雷虎練唱台 修復與更新」，會改裝支援這張顯示卡的版本，之後就能用顯示卡加速。</p>
   <h3>沒有 NVIDIA 顯示卡可以用嗎</h3>
   <p>可以，所有功能都一樣，只是分離和辨識比較慢：一首 4 分鐘的歌大約 5–15 分鐘（有顯示卡約 1 分鐘）。</p>
   <h3>歌曲存在哪裡？怎麼備份</h3>
@@ -271,6 +273,12 @@ th { color: var(--muted); font-weight: 600; font-size: 13px; }
   <p>Windows 設定 → 應用程式 → 找到「雷虎練唱台」→ 解除安裝。過程中會問你要不要保留歌曲庫；選「否」就只移除程式，歌曲和錄音會留下來。</p>
 
   <h2 id="changes">版本紀錄</h2>
+  <h3>1.4.4</h3>
+  <p><b>功能修改</b></p>
+  <ul>
+    <li>處理失敗的訊息可以按「✕」關閉；同一首歌重試成功後，舊的失敗訊息會自動消失</li>
+    <li>修正較舊的 NVIDIA 顯示卡（GTX 10 系列以前）分析旋律時出現「no kernel image is available」：程式會自動改用 CPU，安裝與「修復與更新」會改裝相容的顯示卡加速版</li>
+  </ul>
   <h3>1.4.3</h3>
   <p><b>功能新增</b></p>
   <ul>
@@ -405,7 +413,7 @@ th { color: var(--muted); font-weight: 600; font-size: 13px; }
     <li>初版：AI 分離主唱／合音／伴奏、旋律分析、歌詞辨識與台灣繁體轉換、升降 KEY 與變速、A–B 循環、麥克風即時音高與錄音評分、YouTube 匯入、Claude 歌詞對齊與練習建議、用量與費用顯示、歌詞匯出（LRC／SRT／TXT）、顯示卡加速、桌面程式與安裝程式</li>
   </ul>
 
-  <p class="lede" style="margin-top:40px">雷虎練唱台 1.4.3</p>
+  <p class="lede" style="margin-top:40px">雷虎練唱台 1.4.4</p>
 </div>
 <script>
   // 直接用瀏覽器開啟這份說明時，隱藏「回到程式」的連結

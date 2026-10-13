@@ -92,10 +92,11 @@ main { padding: 20px; max-width: 1280px; margin: 0 auto; }
 }
 .drop.over { border-color: var(--accent); color: var(--ink); background: var(--shade); }
 .jobs { display: grid; gap: 8px; margin-bottom: 16px; }
-.job { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 4px 12px; padding: 10px 12px; background: var(--panel); border: 1px solid var(--line); border-radius: 9px; }
+.job { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 4px 12px; padding: 10px 12px; background: var(--panel); border: 1px solid var(--line); border-radius: 9px; }
 .job .meter { grid-column: 1 / -1; height: 4px; background: var(--lane-k); border-radius: 2px; overflow: hidden; }
 .job .meter i { display: block; height: 100%; background: var(--accent); transition: width .4s; }
 .job.error { border-color: var(--bad); }
+.job .job-x { padding: 0 8px; line-height: 1.4; color: var(--muted); }
 .job .err { grid-column: 1 / -1; color: var(--bad); font-size: 13px; }
 
 .songs { border-top: 1px solid var(--line); }

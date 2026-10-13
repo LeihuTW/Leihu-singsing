@@ -274,6 +274,7 @@ document.addEventListener("drop", e => {
 /* ------------------------------------------------------------ 背景工作 */
 const jobSeen = {};
 let jobTimer = null;
+const jobHidden = new Set();   // 使用者按掉的失敗訊息
 async function pollJobs() {
   clearTimeout(jobTimer);
   let st;
@@ -283,6 +284,9 @@ async function pollJobs() {
   const box = $("#jobs");
   box.innerHTML = "";
   let busy = false, finished = false;
+  // 同一首歌後來又有新的工作（例如重試成功）時，舊的失敗訊息就不用再顯示
+  const newest = {};
+  for (const j of st.jobs) newest[j.song] = Math.max(newest[j.song] || 0, j.created || 0);
   for (const j of st.jobs) {
     if (j.status === "queued" || j.status === "running") busy = true;
     if (j.status === "done" && jobSeen[j.id] && jobSeen[j.id] !== "done") {
@@ -290,11 +294,15 @@ async function pollJobs() {
       if (j.kind === "take" && S.song && j.song === S.song.id) refreshTakes(j.label);
     }
     jobSeen[j.id] = j.status;
-    if (j.kind !== "process" || j.status === "done") continue;
+    if (j.kind !== "process" || j.status === "done" || j.status === "cancelled") continue;
+    if (j.status === "error" && (jobHidden.has(j.id) || (newest[j.song] || 0) > (j.created || 0))) continue;
     const el = document.createElement("div");
     el.className = "job" + (j.status === "error" ? " error" : "");
-    el.innerHTML = `<span class="lbl"></span><span class="num">${Math.round(j.progress * 100)}%</span>
+    el.innerHTML = `<span class="lbl"></span><span class="num">${j.status === "error" ? "" : Math.round(j.progress * 100) + "%"}</span>
+      ${j.status === "error" ? `<button class="ghost job-x" title="關閉這則訊息" aria-label="關閉這則訊息">✕</button>` : ""}
       <div class="meter"><i style="width:${Math.round(j.progress * 100)}%"></i></div>${j.error ? `<div class="err"></div>` : ""}`;
+    const x = $(".job-x", el);
+    if (x) x.onclick = () => { jobHidden.add(j.id); el.remove(); };
     $(".lbl", el).textContent = `${songTitle(j.song)}：${j.status === "queued" ? "排隊中" : j.step}`;
     if (j.error) $(".err", el).textContent = j.error;
     box.appendChild(el);
@@ -2022,7 +2030,9 @@ async function openSettings(focusUsage) {
   $("#cfg-pitch").value = cfg.pitch_model;
   const m = st.modules;
   const items = [["uvr", "AI 人聲分離"], ["crepe", "CREPE 音高"], ["whisper", "Whisper 歌詞辨識"], ["pedalboard", "高品質移調"], ["opencc", "台灣繁體轉換"], ["anthropic", "Claude 連線"], ["cuda", "顯示卡加速"]];
-  $("#mods").innerHTML = items.map(([k, l]) => `<span class="chip ${m[k] ? "ok" : ""}">${m[k] ? "✓" : "✕"} ${l}</span>`).join("");
+  $("#mods").innerHTML = items.map(([k, l]) => `<span class="chip ${m[k] ? "ok" : ""}">${m[k] ? "✓" : "✕"} ${l}</span>`).join("")
+    + (st.cuda_note ? `<div class="hint" id="cuda-note"></div>` : "");
+  if (st.cuda_note) $("#cuda-note").textContent = st.cuda_note;
   $("#settings").hidden = false;
 }
 async function saveSettings(extra = {}) {

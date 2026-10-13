@@ -98,12 +98,41 @@ def module_status() -> dict:
     }
 
 
+_CUDA_OK = None
+CUDA_NOTE = ""
+
+
 def _cuda() -> bool:
+    return cuda_ok()
+
+
+def cuda_ok() -> bool:
+    """顯示卡能不能真的跑 PyTorch。
+
+    torch.cuda.is_available() 只代表「有卡、有驅動」；如果裝的 PyTorch 不支援這張卡的架構
+    （例如 GTX 10 系列配上 CUDA 12.8 版），實際運算時才會出現「no kernel image is available」。
+    所以實際跑一個小運算確認，失敗就改用 CPU。結果只算一次。"""
+    global _CUDA_OK, CUDA_NOTE
+    if _CUDA_OK is not None:
+        return _CUDA_OK
     try:
         import torch
-        return bool(torch.cuda.is_available())
-    except Exception:
-        return False
+        if not torch.cuda.is_available():
+            _CUDA_OK = False
+            return False
+        x = torch.ones(64, device="cuda:0")
+        _CUDA_OK = float((x * 2).sum().item()) == 128.0
+    except Exception as e:
+        _CUDA_OK = False
+        try:
+            import torch
+            name = torch.cuda.get_device_name(0)
+        except Exception:
+            name = "顯示卡"
+        CUDA_NOTE = (f"{name} 和目前安裝的 PyTorch 版本不相容，已改用 CPU 處理（比較慢）。"
+                     "執行開始選單的「雷虎練唱台 修復與更新」可改裝相容的版本。")
+        print(f"[cuda] 顯示卡無法使用，改用 CPU：{type(e).__name__}: {str(e)[:300]}", flush=True)
+    return _CUDA_OK
 
 
 # ---------------------------------------------------------------- 檔案
@@ -515,7 +544,7 @@ def track_pitch(y16: np.ndarray, cfg: dict | None = None, strict: bool = False) 
     if module_status()["crepe"]:
         import torch
         import torchcrepe
-        dev = "cuda:0" if torch.cuda.is_available() else "cpu"
+        dev = "cuda:0" if cuda_ok() else "cpu"
         model = cfg.get("pitch_model", "auto")
         if model not in ("full", "tiny"):
             model = "full" if dev != "cpu" else "tiny"   # CPU 跑 full 太慢
@@ -1407,7 +1436,7 @@ def similarity(recognized: str, candidate: str) -> float | None:
     return round(sum(x.size for x in m.get_matching_blocks()) / len(a), 3)
 
 
-USER_AGENT = "LeihuLiantai/1.4.3 (+https://github.com/LeihuTW/Leihu-singsing)"   # HTTP 標頭只能用英文字
+USER_AGENT = "LeihuLiantai/1.4.4 (+https://github.com/LeihuTW/Leihu-singsing)"   # HTTP 標頭只能用英文字
 
 
 def _http_json(url: str, headers: dict | None = None, timeout: int = 10):

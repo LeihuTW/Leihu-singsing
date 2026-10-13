@@ -18,7 +18,7 @@ import claude_api as C
 import pipeline as P
 import share as SH
 
-VERSION = "1.4.3"
+VERSION = "1.4.4"
 HOST, PORT = "127.0.0.1", int(os.environ.get("LIANTAI_PORT", "8765"))
 app = Flask(__name__, static_folder=str(P.ROOT / "static"), static_url_path="/static")
 app.config["MAX_CONTENT_LENGTH"] = 1024 * 1024 * 1024
@@ -41,7 +41,8 @@ def index():
 @app.get("/api/status")
 def status():
     cfg = P.load_config()
-    return jsonify(version=VERSION, root=str(P.ROOT), modules=P.module_status(),
+    mods = P.module_status()
+    return jsonify(version=VERSION, root=str(P.ROOT), modules=mods, cuda_note=P.CUDA_NOTE,
                    claude_ready=bool(cfg.get("anthropic_api_key") or os.environ.get("ANTHROPIC_API_KEY")),
                    session_cost=C.summary()["session"]["cost_usd"],
                    jobs=jobs.active() + vjobs.active())

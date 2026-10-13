@@ -189,7 +189,7 @@ def detect_gpu() -> tuple[str, str]:
     forced = next((a.split("=", 1)[1] for a in sys.argv if a.startswith("--gpu=")), "")
     if forced in ("cu128", "cu126", "cpu"):
         return forced, f"依指定安裝 {forced} 版"
-    gpu, cuda, driver = "", None, None
+    gpu, cuda, driver, cap = "", None, None, None
     for exe in _smi_candidates():
         try:
             r = subprocess.run([exe, "--query-gpu=name,driver_version", "--format=csv,noheader"],
@@ -211,6 +211,16 @@ def detect_gpu() -> tuple[str, str]:
         m = re.search(r"CUDA Version:\s*(\d+)\.(\d+)", full)
         if m:
             cuda = (int(m.group(1)), int(m.group(2)))
+        if gpu and cap is None:
+            try:   # 顯示卡架構（例如 6.1＝GTX 10 系列、8.6＝RTX 30 系列、12.0＝RTX 50 系列）；舊驅動不支援這個欄位
+                rc = subprocess.run([exe, "--query-gpu=compute_cap", "--format=csv,noheader"], capture_output=True,
+                                    text=True, encoding="utf-8", errors="replace", timeout=30)
+                mc = re.match(r"\s*(\d+)\.(\d+)", rc.stdout or "")
+                if rc.returncode == 0 and mc:
+                    cap = (int(mc.group(1)), int(mc.group(2)))
+                LOG.write(f"compute_cap: rc={rc.returncode} {rc.stdout.strip()}\n")
+            except Exception as e:
+                LOG.write(f"compute_cap: {type(e).__name__}: {e}\n")
         if gpu or cuda:
             break
     if not gpu:   # 找不到 nvidia-smi 或它執行失敗：改看 Windows 的顯示卡清單
@@ -219,7 +229,16 @@ def detect_gpu() -> tuple[str, str]:
         return "cpu", "沒有偵測到 NVIDIA 顯示卡，安裝 CPU 版（處理會比較慢）"
     if cuda is None and driver:
         cuda = _driver_to_cuda(driver)
-    say(f"  偵測到 {gpu}（驅動 {driver or '版本不明'}，支援 CUDA {'%d.%d' % cuda if cuda else '不明'}）")
+    say(f"  偵測到 {gpu}（驅動 {driver or '版本不明'}，支援 CUDA {'%d.%d' % cuda if cuda else '不明'}"
+        f"{'，架構 %d.%d' % cap if cap else ''}）")
+    if cap is not None and cap < (5, 0):
+        return "cpu", f"{gpu} 太舊，PyTorch 已不支援，安裝 CPU 版（處理會比較慢）"
+    if cap is not None and cap < (7, 5):
+        # GTX 10 系列以前（Pascal、Maxwell、Volta）：CUDA 12.8 版的 PyTorch 已不支援，只能用 12.6 版
+        if cuda is None or cuda >= (12, 6):
+            return "cu126", f"{gpu}，安裝顯示卡加速版（CUDA 12.6，支援較舊的顯示卡）"
+        return "cpu", (f"{gpu} 的驅動程式太舊（支援到 CUDA {cuda[0]}.{cuda[1]}），先安裝 CPU 版。"
+                       "更新顯示卡驅動後執行「修復與更新」即可改用顯示卡")
     if cuda is None:   # 有 NVIDIA 卡但讀不到版本：裝相容性較好的 12.6 版，安裝後再確認能不能用
         return "cu126", f"{gpu}：讀不到驅動版本，先安裝 CUDA 12.6 版"
     if cuda >= (12, 8):
@@ -319,6 +338,26 @@ def _wheel_links(tag: str) -> list[tuple[str, str, str]]:
 def torch_ok() -> bool:
     ok, out = probe("import torch, torchvision, torchaudio; print(torch.__version__)", timeout=180)
     return ok
+
+
+GPU_TEST = ("import torch; assert torch.cuda.is_available(), 'CUDA 無法使用'; "
+            "x = torch.ones(64, device='cuda'); print(torch.cuda.get_device_name(0), float((x * 2).sum()))")
+
+
+def check_gpu_kernels(tag: str) -> str:
+    """實際在顯示卡上跑一個小運算。這張卡不被這個版本支援（no kernel image）時，改裝 12.6 版，再不行就改 CPU 版。"""
+    while tag != "cpu":
+        ok, out = probe(GPU_TEST)
+        if ok:
+            say(f"  ✓ 顯示卡運算測試通過（{out}）")
+            return tag
+        nxt = "cu126" if tag == "cu128" else "cpu"
+        say(f"  ! 顯示卡運算測試失敗（{out[:160]}），改裝{'CUDA 12.6 版' if nxt == 'cu126' else ' CPU 版'}…")
+        pip("uninstall", "-y", *TORCH)
+        if not install_torch(nxt):
+            return tag
+        tag = nxt
+    return tag
 
 
 def install_torch(tag: str) -> bool:
@@ -577,6 +616,7 @@ def main() -> int:
         return 1
     if tag == "cu128" and "+cu126" in installed_versions().get("torch", ""):
         tag = "cu126"
+    tag = check_gpu_kernels(tag)
     stage(3, total, "安裝其他套件", 45, 70)
     if not install_packages(tag):
         say("\n套件安裝失敗。請確認網路連線後重新執行。")
