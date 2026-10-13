@@ -43,14 +43,25 @@ const ac = () => (ctx ||= new (window.AudioContext || window.webkitAudioContext)
 function show(view) {
   $("#view-lib").hidden = view !== "lib";
   $("#view-practice").hidden = view !== "practice";
+  $("#view-about").hidden = view !== "about";
   $("#nav-lib").classList.toggle("cur", view === "lib");
   $("#nav-practice").classList.toggle("cur", view === "practice");
+  $("#nav-about").classList.toggle("cur", view === "about");
+  if (view === "about") pause();
   if (view === "lib") { pause(); loadSongs(); }
   S.dirty = true;
 }
 $("#nav-lib").onclick = () => show("lib");
 $("#back").onclick = () => show("lib");
 $("#nav-practice").onclick = () => S.song && show("practice");
+$("#nav-about").onclick = () => show("about");
+// 外部網站連結用系統的瀏覽器開啟（桌面程式視窗裡不能直接開別的網站）
+document.addEventListener("click", e => {
+  const a = e.target.closest("a[data-ext]");
+  if (!a) return;
+  e.preventDefault();
+  api("/api/open-url", { json: { url: a.href } }).catch(() => window.open(a.href, "_blank"));
+});
 
 /* ------------------------------------------------------------ 歌曲庫 */
 /* 歌曲庫：分類（自訂）＋關鍵字搜尋 */
@@ -358,7 +369,7 @@ async function openSong(id) {
   $("#lrc").value = lyr.lrc;
   setLines(lyr.lrc);
   const saved = store.get(`song:${id}`, {});
-  S.key = saved.key || 0; S.speed = saved.speed || 1;
+  S.key = clamp(saved.key || 0, -6, 6); S.speed = saved.speed || 1;
   if (saved.vol) Object.assign(S.vol, saved.vol);
   S.t = 0; S.loopA = S.loopB = null; S.live = []; S.take = null; S.takeBuf = null;
   keyHintReset();
@@ -550,8 +561,8 @@ async function changeVariant(key, speed) {
   const wasPlaying = S.playing;
   const songT = cur();
   pause();
-  if (S.key !== clamp(key, -12, 12)) keyHintReset();
-  S.key = clamp(key, -12, 12); S.speed = speed;
+  if (S.key !== clamp(key, -6, 6)) keyHintReset();
+  S.key = clamp(key, -6, 6); S.speed = speed;
   $("#key-sel").value = String(S.key);
   $("#speed").value = String(S.speed);
   saveSongPrefs();
@@ -563,10 +574,10 @@ async function changeVariant(key, speed) {
 // KEY 下拉選單：-12～+12，選了才轉換，一次到位
 (() => {
   const sel = $("#key-sel");
-  for (let k = 12; k >= -12; k--) {
+  for (let k = 6; k >= -6; k--) {   // ±6 就涵蓋所有調；再多就等於換八度，評分本來就不計八度差
     const o = document.createElement("option");
     o.value = String(k);
-    o.textContent = k === 0 ? "0（原調）" : (k > 0 ? "+" : "−") + Math.abs(k) + (Math.abs(k) === 12 ? (k > 0 ? "（高八度）" : "（低八度）") : "");
+    o.textContent = k === 0 ? "0（原調）" : (k > 0 ? "+" : "−") + Math.abs(k);
     sel.appendChild(o);
   }
   sel.onchange = () => changeVariant(+sel.value, S.speed);
@@ -830,7 +841,37 @@ function shiftLine(l, nt) {
   if (l.chars) l.chars.forEach(u => (u.t = Math.round((u.t + d) * 100) / 100));
   setLineEnds(); commitLines(false); $("#timing-box").dataset.dirty = "1";
 }
+/* 第一句開始時間：整份歌詞一起平移（1.3.1） */
+function shiftAllLyrics(firstT) {
+  if (!S.lines.length) return toast("還沒有含時間的歌詞");
+  const d = Math.round((Math.max(0, firstT) - S.lines[0].t) * 100) / 100;
+  if (!d) return;
+  for (const l of S.lines) {
+    l.t = Math.max(0, Math.round((l.t + d) * 100) / 100);
+    if (l.chars) l.chars.forEach(u => (u.t = Math.max(0, Math.round((u.t + d) * 100) / 100)));
+  }
+  setLineEnds(); commitLines(true);
+  toast(`全部歌詞${d > 0 ? "延後" : "提前"} ${Math.abs(d).toFixed(2)} 秒，第一句從 ${fmt(S.lines[0].t, 2)} 開始`, 2500);
+}
+function syncFirstLine() {
+  const el = $("#fl-time");
+  if (document.activeElement !== el) el.value = S.lines.length ? fmt(S.lines[0].t, 2) : "";
+}
+function parseTime(v) {
+  const m = String(v).trim().match(/^(?:(\d+):)?(\d+(?:\.\d+)?)$/);
+  return m ? (+(m[1] || 0)) * 60 + +m[2] : NaN;
+}
+$("#fl-now").onclick = () => shiftAllLyrics(cur());
+$$("[data-fl]").forEach(b => (b.onclick = () => S.lines.length && shiftAllLyrics(S.lines[0].t + +b.dataset.fl)));
+$("#fl-time").addEventListener("change", e => {
+  const t = parseTime(e.target.value);
+  if (isNaN(t)) { toast("時間格式像 0:12.50"); syncFirstLine(); return; }
+  shiftAllLyrics(t);
+});
+$("#fl-time").addEventListener("keydown", e => { if (e.key === "Enter") e.target.blur(); });
+
 function renderTiming() {
+  syncFirstLine();
   const box = $("#timing");
   if (!box || $("#timing-box").open === false && box.childElementCount) { /* 收合時不必重繪 */ }
   box.innerHTML = "";
@@ -1152,7 +1193,7 @@ function keyHintCalc(arr) {
   const cnt = {}; for (const b of arr) cnt[b] = (cnt[b] || 0) + 1;
   let shift = 0, best = 0; for (const [b, c] of Object.entries(cnt)) if (c > best) { best = c; shift = +b; }
   const share = best / arr.length;
-  return { shift: Math.abs(shift) >= 2 && share >= 0.3 ? shift : 0, share, suggest: clamp(S.key + shift, -12, 12) };
+  return { shift: Math.abs(shift) >= 2 && share >= 0.3 ? shift : 0, share, suggest: wrapKey(S.key + shift) };
 }
 function renderKeyHint(h) {
   const box = $("#key-hint"), txt = $("span", box), btn = $("button", box);
@@ -1168,6 +1209,7 @@ function renderKeyHint(h) {
   btn.textContent = `改用 KEY ${fmtKey(h.suggest)}`;
   btn.onclick = () => { if (S.rec) stopRecording(); changeVariant(h.suggest, S.speed); keyHintReset(); toast(`已改成 KEY ${fmtKey(h.suggest)}，再唱一次試試`); };
 }
+const wrapKey = k => ((((k + 6) % 12) + 12) % 12) - 6;   // 超過 ±6 換成另一個八度的同一個調
 const fmtKey = k => (k > 0 ? "+" : k < 0 ? "−" : "") + Math.abs(k);
 
 /* 錄音 */

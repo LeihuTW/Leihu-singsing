@@ -17,7 +17,7 @@ from flask import Flask, abort, jsonify, request, send_file, send_from_directory
 import claude_api as C
 import pipeline as P
 
-VERSION = "1.3"
+VERSION = "1.3.1"
 HOST, PORT = "127.0.0.1", int(os.environ.get("LIANTAI_PORT", "8765"))
 app = Flask(__name__, static_folder=str(P.ROOT / "static"), static_url_path="/static")
 app.config["MAX_CONTENT_LENGTH"] = 1024 * 1024 * 1024
@@ -208,8 +208,8 @@ def _key_speed():
         speed = float(request.args.get("speed", request.json.get("speed", 1) if request.is_json else 1))
     except (TypeError, ValueError):
         raise P.UserError("KEY 或速度格式不正確")
-    if not -12 <= key <= 12 or not 0.5 <= speed <= 1.5:
-        raise P.UserError("KEY 範圍是 ±12，速度範圍是 50%–150%")
+    if not -6 <= key <= 6 or not 0.5 <= speed <= 1.5:
+        raise P.UserError("KEY 範圍是 ±6，速度範圍是 50%–150%")
     return key, round(speed, 2)
 
 
@@ -588,6 +588,20 @@ def export_lyrics(sid):
     path = folder / f"{_safe_name(meta.get('title', '歌詞'))}.{fmt}"
     path.write_text(out, encoding="utf-8-sig" if fmt in ("txt", "srt") else "utf-8")
     return jsonify(path=str(path))
+
+
+EXTERNAL_URLS = ("https://www.twitch.tv/leihustore", "https://github.com/LeihuTW/Leihu-singsing")
+
+
+@app.post("/api/open-url")
+def open_url():
+    """用系統預設瀏覽器開啟開發者頁面（只允許固定的幾個網址）。"""
+    url = (request.get_json(force=True) or {}).get("url", "").rstrip("/")
+    if url not in EXTERNAL_URLS:
+        raise P.UserError("不允許開啟這個網址")
+    import webbrowser
+    webbrowser.open(url)
+    return jsonify(ok=True)
 
 
 @app.post("/api/reveal")

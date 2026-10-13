@@ -3,16 +3,17 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>雷虎練唱台 1.1</title>
+<title>雷虎練唱台</title>
 <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
 <header class="bar">
-  <span class="logo">雷虎練唱台<small id="ver">1.3</small></span>
+  <span class="logo">雷虎練唱台<small id="ver">1.3.1</small></span>
   <nav class="row">
     <button id="nav-lib" class="tab cur">歌曲庫</button>
     <button id="nav-practice" class="tab" disabled>練唱</button>
     <a id="nav-help" class="tab" href="/static/help.html">說明</a>
+    <button id="nav-about" class="tab">關於開發者</button>
   </nav>
   <span class="spacer"></span>
   <button id="claude-chip" class="chip" title="查看 Claude 用量">Claude：未設定</button>
@@ -157,6 +158,18 @@
           <div id="cand-list" class="ls-results"></div>
           <div class="row"><button id="cand-keep" class="ghost">都不用，保留辨識結果</button></div>
         </div>
+        <div class="first-line">
+          <div class="row">
+            <label for="fl-time" class="hint">第一句開始</label>
+            <input id="fl-time" type="text" inputmode="decimal" placeholder="0:00.00" aria-label="第一句歌詞的開始時間">
+            <button id="fl-now" title="把第一句對到目前的播放位置">對準目前位置</button>
+          </div>
+          <div class="row">
+            <button class="ghost" data-fl="-0.5">−0.5 秒</button><button class="ghost" data-fl="-0.1">−0.1</button>
+            <button class="ghost" data-fl="0.1">+0.1</button><button class="ghost" data-fl="0.5">+0.5 秒</button>
+            <span class="hint">後面每一句（含逐字時間）會一起移動，自動儲存</span>
+          </div>
+        </div>
         <textarea id="lrc" spellcheck="false" aria-label="歌詞（LRC 格式）"></textarea>
         <div class="row">
           <button id="lrc-save">儲存歌詞</button>
@@ -205,6 +218,21 @@
           </div>
         </details>
       </div>
+    </div>
+  </section>
+  <!-- 關於開發者 -->
+  <section id="view-about" class="about" hidden>
+    <div class="about-card">
+      <img src="/static/kenzi.png" alt="雷虎 KENZI 的頭像" class="about-avatar" width="160" height="160">
+      <div>
+        <h2>雷虎</h2>
+        <p>一隻喜歡唱歌的毛毛雷虎，每天 19:00 在 Twitch 進行以歌回為主的直播。</p>
+        <p><a href="https://www.twitch.tv/leihustore" data-ext class="about-link">https://www.twitch.tv/leihustore</a></p>
+      </div>
+    </div>
+    <div class="about-card about-support">
+      <p>如果這個練歌工具有確實幫到您，可以透過 LINEPAY 請雷虎喝杯飲料或延續開發。</p>
+      <img src="/static/linepay.png" alt="LINE Pay 斗內 QR Code" class="about-pay" width="600" height="300">
     </div>
   </section>
 </main>

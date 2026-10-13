@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>雷虎練唱台 1.3 使用說明</title>
+<title>雷虎練唱台 1.3.1 使用說明</title>
 <style>
 /* 和程式本體同一套色彩：冷色控台底、琥珀色是原唱旋律、藍色是你的聲音 */
 :root {
@@ -49,7 +49,7 @@ th { color: var(--muted); font-weight: 600; font-size: 13px; }
 <body>
 <div class="wrap">
   <div class="top"><a href="/" id="back">← 回到雷虎練唱台</a></div>
-  <h1>雷虎練唱台 <span class="ver">1.3</span></h1>
+  <h1>雷虎練唱台 <span class="ver">1.3.1</span></h1>
   <p class="lede">在自己電腦上練歌的工具：把歌曲拆成主唱、合音、伴奏，畫出主唱旋律，辨識歌詞，讓你調 KEY、放慢速度，邊唱邊看自己的音準。所有處理都在電腦上完成，只有兩個選用功能會連網使用 Claude。</p>
 
   <nav class="toc" aria-label="目錄">
@@ -70,7 +70,7 @@ th { color: var(--muted); font-weight: 600; font-size: 13px; }
 
   <h2 id="install">安裝</h2>
   <ol>
-    <li>雙擊 <code>雷虎練唱台1.3.exe</code>（從 GitHub 下載的檔名是 <code>LeihuLiantai-1.3-Setup.exe</code>）。已經裝過舊版的，直接安裝新版即可，歌曲庫和設定會保留。</li>
+    <li>雙擊 <code>雷虎練唱台1.3.1.exe</code>（從 GitHub 下載的檔名是 <code>LeihuLiantai-1.3.1-Setup.exe</code>）。已經裝過舊版的，直接安裝新版即可，歌曲庫和設定會保留。</li>
     <li>如果出現藍色的「Windows 已保護您的電腦」，按「其他資訊」，再按「仍要執行」。這是因為安裝程式沒有付費的數位簽章，不是病毒警告。</li>
     <li>選安裝位置（預設即可，不需要系統管理員權限），按「安裝」。</li>
     <li>如果這台電腦裝過雷虎練唱台，會先詢問：
@@ -116,7 +116,7 @@ th { color: var(--muted); font-weight: 600; font-size: 13px; }
     <tr><th>功能</th><th>用法</th></tr>
     <tr><td>播放／暫停</td><td>「播放」按鈕或 <kbd>空白鍵</kbd></td></tr>
     <tr><td>前後跳轉</td><td><kbd>←</kbd> <kbd>→</kbd> 各 3 秒；或直接點卷軸上的位置</td></tr>
-    <tr><td>KEY</td><td>下拉選單直接選 −12～+12（半音），一次到位。第一次換到某個 KEY 要先轉換（會用電腦所有 CPU 核心一起算，一首 4 分鐘的歌通常十幾秒到半分鐘），之後會記住，再切換就是立刻。轉換中又換別的 KEY，前一個會自動取消</td></tr>
+    <tr><td>KEY</td><td>下拉選單直接選 −6～+6（半音），一次到位；±6 已涵蓋所有調，再多等於換八度。第一次換到某個 KEY 要先轉換（會用電腦所有 CPU 核心一起算，一首 4 分鐘的歌通常十幾秒到半分鐘），之後會記住，再切換就是立刻。轉換中又換別的 KEY，前一個會自動取消</td></tr>
     <tr><td>速度</td><td>70%–110%，放慢時音高不變；和 KEY 一樣第一次要轉換，之後會記住</td></tr>
     <tr><td>A／B 循環</td><td>在句子開頭按 A、結尾按 B，就會反覆播放這一段。「取消循環」恢復正常</td></tr>
     <tr><td>逐字上色</td><td>唱到哪個字就把哪個字上色（下方歌詞和旋律上的字）。歌詞時間沒對準時看起來會很怪，可以按一下關掉，只標出正在唱的那一句</td></tr>
@@ -149,6 +149,7 @@ th { color: var(--muted); font-weight: 600; font-size: 13px; }
   <h2 id="lyrics">歌詞</h2>
   <p>歌詞是 LRC 格式，每行前面的 <code>[分:秒]</code> 是這句開始的時間。自動辨識難免有錯字，可以用下面幾種方式修正：</p>
   <ul>
+    <li><b>第一句開始時間</b>：整首歌詞都早了或晚了一點時（例如你的版本前奏比較長），在歌詞面板最上方調整「第一句開始」：播放到第一句開口的地方按「對準目前位置」，或用 ±0.1／±0.5 秒微調，也可以直接輸入時間。後面每一句和逐字時間都會一起移動，並自動儲存。</li>
     <li><b>直接修改</b>：在文字框改好後按「儲存歌詞」。</li>
     <li><b>匯入歌詞檔</b>：按「匯入歌詞檔」選 LRC、SRT 或 TXT 檔。有時間的直接使用；純文字（每行一句）會依自動辨識的時間對上每一句。UTF-8、Big5（繁體）、GBK（簡體）編碼都能讀，簡體會自動轉成台灣繁體。</li>
     <li><b>跟拍打點</b>：先把正確歌詞貼進文字框（每行一句，不用時間），按「跟拍打點」，播放時每唱到新的一句就按 <kbd>空白鍵</kbd>。</li>
@@ -226,6 +227,15 @@ th { color: var(--muted); font-weight: 600; font-size: 13px; }
   <p>Windows 設定 → 應用程式 → 找到「雷虎練唱台」→ 解除安裝。過程中會問你要不要保留歌曲庫；選「否」就只移除程式，歌曲和錄音會留下來。</p>
 
   <h2 id="changes">版本紀錄</h2>
+  <h3>1.3.1</h3>
+  <p><b>功能新增</b></p>
+  <ul>
+    <li>歌詞面板新增「第一句開始」：對準目前播放位置、±0.1／±0.5 秒微調或直接輸入時間，後面所有歌詞（含逐字時間）一起移動</li>
+  </ul>
+  <p><b>功能修改</b></p>
+  <ul>
+    <li>升降 KEY 範圍改為 ±6（建議 KEY 也會換算到 ±6 以內）</li>
+  </ul>
   <h3>1.3</h3>
   <p><b>功能新增</b></p>
   <ul>
@@ -315,7 +325,7 @@ th { color: var(--muted); font-weight: 600; font-size: 13px; }
     <li>初版：AI 分離主唱／合音／伴奏、旋律分析、歌詞辨識與台灣繁體轉換、升降 KEY 與變速、A–B 循環、麥克風即時音高與錄音評分、YouTube 匯入、Claude 歌詞對齊與練習建議、用量與費用顯示、歌詞匯出（LRC／SRT／TXT）、顯示卡加速、桌面程式與安裝程式</li>
   </ul>
 
-  <p class="lede" style="margin-top:40px">雷虎練唱台 1.3</p>
+  <p class="lede" style="margin-top:40px">雷虎練唱台 1.3.1</p>
 </div>
 <script>
   // 直接用瀏覽器開啟這份說明時，隱藏「回到程式」的連結

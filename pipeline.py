@@ -974,7 +974,7 @@ def suggest_key(dd: np.ndarray, key: int) -> dict | None:
     # 只差 0～1 個半音多半是音準問題；差 2 個以上而且有一定比例的音都這樣，才建議換 KEY
     if abs(shift) < 2 or share < 0.3:
         return {"shift": 0, "share": round(share, 2), "suggest": key}
-    return {"shift": shift, "share": round(share, 2), "suggest": max(-12, min(12, key + shift))}
+    return {"shift": shift, "share": round(share, 2), "suggest": (key + shift + 6) % 12 - 6}   # 保持在 ±6
 
 
 TAKE_ALGO = 4   # 錄音分析方式的版本；舊版分析的錄音會自動重新評分
@@ -1293,7 +1293,7 @@ def similarity(recognized: str, candidate: str) -> float | None:
     return round(sum(x.size for x in m.get_matching_blocks()) / len(a), 3)
 
 
-USER_AGENT = "LeihuLiantai/1.3 (+https://github.com/LeihuTW/Leihu-singsing)"   # HTTP 標頭只能用英文字
+USER_AGENT = "LeihuLiantai/1.3.1 (+https://github.com/LeihuTW/Leihu-singsing)"   # HTTP 標頭只能用英文字
 
 
 def _http_json(url: str, headers: dict | None = None, timeout: int = 10):
