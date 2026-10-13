@@ -34,6 +34,8 @@ p, li { max-width: 68ch; }
 ol, ul { padding-left: 1.4em; }
 li { margin: 4px 0; }
 kbd, code { font-family: var(--mono); font-size: 13px; background: var(--code); border-radius: 5px; padding: 1px 6px; }
+.legal h2 { margin: 4px 0 8px; font-size: 18px; border-top: 0; padding-top: 0; }
+.legal ol { margin: 0; padding-left: 1.4em; line-height: 1.8; }
 .note { border-left: 3px solid var(--melody); padding: 8px 14px; background: var(--panel); border-radius: 0 8px 8px 0; margin: 12px 0; }
 .warn { border-left-color: var(--bad); }
 table { border-collapse: collapse; width: 100%; font-size: 14px; }
@@ -50,10 +52,23 @@ th { color: var(--muted); font-weight: 600; font-size: 13px; }
 <div class="wrap">
   <div class="top"><a href="/" id="back">← 回到雷虎練唱台</a></div>
   <h1>雷虎練唱台 <span class="ver">1.3.1</span></h1>
+
+  <section id="copyright" class="note legal" aria-labelledby="copyright-h">
+    <h2 id="copyright-h">版權與使用聲明</h2>
+    <ol>
+      <li>雷虎練唱台 © 2026 雷虎肯茲（Leihustore）。</li>
+      <li>本工具使用 AI 開發，並調度多項 AI 工具協作（人聲分離、音高分析、歌詞辨識等），可能發生不明狀況，例如分析不準確、程式錯誤或當機。</li>
+      <li>本工具免費提供。安裝或使用即視同同意：使用過程中發生的任何狀況與損害（包括資料遺失、檔案損壞、系統問題）由使用者自行承擔，開發者不負損害賠償責任。建議使用前先備份重要資料。</li>
+      <li>可供個人練唱、學習與實況直播使用，包含有訂閱、贊助等收入的實況。</li>
+      <li>禁止將本工具或修改後的版本打包販售，或做成付費商品、付費服務提供。沒有販售行為時，可以自由修改與分享，但須註明來源（雷虎練唱台／雷虎肯茲 Leihustore，<a href="https://github.com/LeihuTW/Leihu-singsing">github.com/LeihuTW/Leihu-singsing</a>）並保留本聲明。</li>
+      <li>匯入的歌曲與歌詞，版權屬於原權利人；直播時播放音樂，仍須遵守平台與著作權規定。</li>
+      <li>本工具使用的開源套件與 AI 模型，各依其授權條款使用。</li>
+    </ol>
+  </section>
   <p class="lede">在自己電腦上練歌的工具：把歌曲拆成主唱、合音、伴奏，畫出主唱旋律，辨識歌詞，讓你調 KEY、放慢速度，邊唱邊看自己的音準。所有處理都在電腦上完成，只有兩個選用功能會連網使用 Claude。</p>
 
   <nav class="toc" aria-label="目錄">
-    <a href="#req">系統需求</a><a href="#install">安裝</a><a href="#import">匯入歌曲</a><a href="#practice">練唱畫面</a>
+    <a href="#copyright">版權與使用聲明</a><a href="#req">系統需求</a><a href="#install">安裝</a><a href="#import">匯入歌曲</a><a href="#practice">練唱畫面</a>
     <a href="#record">錄音評分</a><a href="#lyrics">歌詞</a><a href="#claude">Claude 與費用</a><a href="#settings">設定</a>
     <a href="#faq">常見問題</a><a href="#uninstall">解除安裝</a><a href="#changes">版本紀錄</a>
   </nav>
@@ -330,6 +345,16 @@ th { color: var(--muted); font-weight: 600; font-size: 13px; }
 <script>
   // 直接用瀏覽器開啟這份說明時，隱藏「回到程式」的連結
   if (location.protocol === "file:") document.getElementById("back").hidden = true;
+</script>
+<script>
+// 在雷虎練唱台程式裡看說明時，外部網站用系統的瀏覽器開啟，不要把程式視窗帶走
+if (location.hostname === "127.0.0.1") document.addEventListener("click", e => {
+  const a = e.target.closest('a[href^="http"]');
+  if (!a) return;
+  e.preventDefault();
+  fetch("/api/open-url", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ url: a.href }) })
+    .then(r => { if (!r.ok) window.open(a.href, "_blank"); });
+});
 </script>
 </body>
 </html>

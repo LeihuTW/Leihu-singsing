@@ -21,7 +21,7 @@ VIAddVersionKey /LANG=1028 "ProductName" "${APPNAME}"
 VIAddVersionKey /LANG=1028 "FileDescription" "${APPNAME} ${VERSION} 安裝程式"
 VIAddVersionKey /LANG=1028 "FileVersion" "${VERSION}"
 VIAddVersionKey /LANG=1028 "ProductVersion" "${VERSION}"
-VIAddVersionKey /LANG=1028 "LegalCopyright" "${APPNAME}"
+VIAddVersionKey /LANG=1028 "LegalCopyright" "© 2026 雷虎肯茲 (Leihustore)"
 
 !define MUI_ICON "payload\static\icon.ico"
 !define MUI_UNICON "payload\static\icon.ico"
@@ -35,6 +35,9 @@ VIAddVersionKey /LANG=1028 "LegalCopyright" "${APPNAME}"
 !define MUI_FINISHPAGE_SHOWREADME_TEXT "閱讀使用說明"
 
 !insertmacro MUI_PAGE_WELCOME
+!define MUI_LICENSEPAGE_TEXT_TOP "請閱讀以下聲明。安裝即表示您同意這些內容。"
+!define MUI_LICENSEPAGE_TEXT_BOTTOM "同意以上內容請按「我同意」繼續安裝。"
+!insertmacro MUI_PAGE_LICENSE "license.txt"
 !insertmacro MUI_PAGE_DIRECTORY
 !insertmacro MUI_PAGE_INSTFILES
 !insertmacro MUI_PAGE_FINISH
@@ -123,7 +126,7 @@ Section "Install"
   WriteUninstaller "$INSTDIR\uninstall.exe"
   WriteRegStr HKCU "${REGKEY}" "DisplayName" "${APPNAME}"
   WriteRegStr HKCU "${REGKEY}" "DisplayVersion" "${VERSION}"
-  WriteRegStr HKCU "${REGKEY}" "Publisher" "${APPNAME}"
+  WriteRegStr HKCU "${REGKEY}" "Publisher" "雷虎肯茲 (Leihustore)"
   WriteRegStr HKCU "${REGKEY}" "DisplayIcon" "$INSTDIR\static\icon.ico"
   WriteRegStr HKCU "${REGKEY}" "InstallLocation" "$INSTDIR"
   WriteRegStr HKCU "${REGKEY}" "UninstallString" '"$INSTDIR\uninstall.exe"'

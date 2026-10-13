@@ -1,4 +1,20 @@
-Required Notice: Copyright (c) 2026 雷虎 Leihu
+Required Notice: Copyright (c) 2026 雷虎肯茲 (Leihustore) — 雷虎練唱台 Leihu Liantai — https://github.com/LeihuTW/Leihu-singsing
+
+## 附加許可（Additional Permission）
+
+除了下方 PolyForm Noncommercial License 1.0.0 已允許的非商業用途之外，授權人另外給予以下許可：
+
+1. **實況與有收入的使用**：您可以把本軟體用在任何目的，包含有訂閱、贊助、廣告等收入的實況直播與內容創作。
+2. **修改與分享**：您可以修改本軟體，並免費分享原版或修改後的版本，但必須註明來源（雷虎練唱台／雷虎肯茲 Leihustore，附上 https://github.com/LeihuTW/Leihu-singsing ），並保留這份授權檔與上方的 Required Notice。
+3. **唯一的限制**：不得將本軟體或任何修改後的版本打包販售、收費散布，或做成付費商品、付費服務提供。
+
+English summary: In addition to the noncommercial uses permitted below, the licensor grants permission to use the software for any purpose, including monetized live streaming and content creation, and to modify and redistribute it free of charge with attribution (keeping this file and the Required Notice). Selling the software or any modified version, charging for its distribution, or offering it as a paid product or service is not permitted.
+
+## 免責聲明
+
+本軟體使用 AI 開發，並調度多項 AI 工具協作，可能發生不明狀況。本軟體免費提供，安裝或使用即視同同意：使用過程中發生的任何狀況與損害由使用者自行承擔，開發者不負損害賠償責任（亦見下方條款的 No Liability 一節）。
+
+---
 
 # PolyForm Noncommercial License 1.0.0
 
