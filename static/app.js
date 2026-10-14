@@ -379,6 +379,7 @@ async function pollJobs() {
   let st;
   try { st = await api("/api/status"); } catch { jobTimer = setTimeout(pollJobs, 3000); return; }
   updateClaudeChip(st.claude_ready, st.session_cost);
+  remoteOpen(st.remote);
   if (st.version) { $("#ver").textContent = st.version; document.title = `雷虎練唱台 ${st.version}`; }
   const box = $("#jobs");
   box.innerHTML = "";
@@ -444,6 +445,18 @@ async function pollJobs() {
   ST.hqWas = st.hq ? st.hq.state : null;
   if (finished && !$("#view-lib").hidden) loadSongs();
   jobTimer = setTimeout(pollJobs, busy ? 1000 : 5000);
+}
+/* 遠端開歌（/api/remote/open）：seq 變了就打開那首歌、切到指定 KEY（速度回到 100%） */
+let remoteSeq = null;
+async function remoteOpen(r) {
+  if (!r) return;
+  if (remoteSeq === null) { remoteSeq = r.seq; return; }   // 視窗剛開啟時，不重做之前的請求
+  if (r.seq === remoteSeq) return;
+  remoteSeq = r.seq;
+  if (!r.id) return;
+  store.set(`song:${r.id}`, { ...store.get(`song:${r.id}`, {}), key: r.key, speed: 1 });
+  try { await openSong(r.id); }
+  catch (e) { toast(e.message); }
 }
 const titles = {};
 let titleFetch = 0;

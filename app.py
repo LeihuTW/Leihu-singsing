@@ -48,7 +48,33 @@ def status():
                    hq_model=P.HQ_KARAOKE,
                    claude_ready=bool(cfg.get("anthropic_api_key") or os.environ.get("ANTHROPIC_API_KEY")),
                    session_cost=C.summary()["session"]["cost_usd"],
-                   jobs=jobs.active() + vjobs.active())
+                   jobs=jobs.active() + vjobs.active(), remote=dict(REMOTE))
+
+
+# 遠端開歌：本機的其他程式（例如點歌系統）請練唱畫面打開某首歌並切到指定 KEY。
+# 練唱畫面輪詢 /api/status 時看到 seq 變了就照做。
+REMOTE = {"seq": 0, "id": None, "key": 0}
+_remote_lock = threading.Lock()
+
+
+@app.post("/api/remote/open")
+def remote_open():
+    # 只給本機程式呼叫：瀏覽器裡的網頁送出的請求一定帶 Origin，一律拒絕，
+    # 避免任何網站趁你開著練唱台時切換歌曲
+    if request.headers.get("Origin"):
+        abort(403)
+    body = request.get_json(force=True) or {}
+    sid = body.get("id") or ""
+    P.song_dir(sid)
+    try:
+        key = int(body.get("key", 0))
+    except (TypeError, ValueError):
+        raise P.UserError("KEY 格式不正確")
+    if not -6 <= key <= 6:
+        raise P.UserError("KEY 範圍是 ±6")
+    with _remote_lock:
+        REMOTE.update(seq=REMOTE["seq"] + 1, id=sid, key=key)
+        return jsonify(seq=REMOTE["seq"])
 
 
 @app.get("/api/config")
