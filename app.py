@@ -18,7 +18,7 @@ import claude_api as C
 import pipeline as P
 import share as SH
 
-VERSION = "1.4.4"
+VERSION = "1.4.5"
 HOST, PORT = "127.0.0.1", int(os.environ.get("LIANTAI_PORT", "8765"))
 app = Flask(__name__, static_folder=str(P.ROOT / "static"), static_url_path="/static")
 app.config["MAX_CONTENT_LENGTH"] = 1024 * 1024 * 1024
@@ -131,6 +131,9 @@ def song(sid):
     meta = P.read_meta(d)
     if "acapella" not in meta and (d / "inst.wav").exists() and (d / "lead.wav").exists():
         meta = P.update_meta(d, acapella=P.is_acapella(d))   # 舊歌曲補上清唱判斷
+    if meta.get("lufs") is None and meta.get("steps", {}).get("import"):
+        meta = P.measure_loudness(d)   # 舊歌曲第一次開啟時補量響度（約 1 秒）
+    meta["norm_gain_db"] = P.norm_gain_db(meta)
     meta["takes"] = P.list_takes(d)
     return jsonify(meta)
 
@@ -250,6 +253,15 @@ def debug_stacks():
     for tid, frame in sys._current_frames().items():
         out.append(f"--- {names.get(tid, tid)}\n" + "".join(tb.format_stack(frame)[-12:]))
     return app.response_class("\n".join(out), mimetype="text/plain; charset=utf-8")
+
+
+@app.post("/api/jobs/<jid>/cancel")
+def job_cancel(jid):
+    """停止處理（例如歌詞辨識卡很久）。已經完成的步驟會保留。"""
+    q = jobs if jobs.get(jid) else vjobs
+    if not q.cancel(jid):
+        raise P.UserError("這個工作已經結束了")
+    return jsonify(ok=True)
 
 
 @app.get("/api/jobs/<jid>")

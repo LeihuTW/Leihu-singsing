@@ -33,6 +33,7 @@ LOG = open(ROOT / "logs" / "install.log", "a", encoding="utf-8", buffering=1)
 TORCH = {"torch": "2.11.0", "torchaudio": "2.11.0", "torchvision": "0.26.0"}
 ORT_VERSION = "1.22.0"
 SEP_MODELS = ["UVR-MDX-NET-Inst_HQ_3.onnx", "UVR_MDXNET_KARA_2.onnx"]
+HQ_KARAOKE = "mel_band_roformer_karaoke_aufr33_viperx_sdr_10.1956.ckpt"   # 高品質主唱／合音分離（有顯示卡時使用）
 WHISPER = "large-v3-turbo"
 
 if sys.platform == "win32":
@@ -546,7 +547,7 @@ def model_ok(path: Path) -> bool:
     return ok
 
 
-def prefetch_models() -> None:
+def prefetch_models(tag: str = "cpu") -> None:
     uvr = ROOT / "models" / "uvr"
     uvr.mkdir(parents=True, exist_ok=True)
     missing = []
@@ -573,6 +574,20 @@ def prefetch_models() -> None:
         say(f"  {'✓' if ok else '✗'} 人聲分離模型{'' if ok else '下載失敗，第一次匯入歌曲時會再試：' + out}")
     else:
         say("  ✓ 人聲分離模型已存在")
+    if tag != "cpu":   # 有顯示卡：預先下載高品質主唱分離模型（約 900 MB），第一次匯入歌曲就不用等
+        hq = uvr / HQ_KARAOKE
+        if hq.exists() and hq.stat().st_size > 900_000_000:
+            say("  ✓ 高品質主唱分離模型已存在")
+        else:
+            say("  下載高品質主唱分離模型（約 900 MB）…")
+            stop = _watch(uvr, 913e6, "高品質主唱分離模型", (0.1, 0.2))
+            code = ("import pipeline\nfrom audio_separator.separator import Separator\n"
+                    f"s = Separator(model_file_dir=r'{uvr}', output_dir=r'{ROOT / 'logs'}')\n"
+                    f"s.download_model_and_data(r'{HQ_KARAOKE}')\nprint('ok')")
+            ok, out = probe(code, timeout=3600)
+            stop()
+            ok = ok and hq.exists() and hq.stat().st_size > 900_000_000
+            say(f"  {'✓' if ok else '!'} 高品質主唱分離模型{'' if ok else '下載失敗，第一次用到時會再試：' + out}")
     progress(0.2, "歌詞辨識模型")
     wdir = ROOT / "models" / "whisper"
     say(f"  下載歌詞辨識模型 {WHISPER}（約 1.6 GB，已下載的部分會接著下載）…")
@@ -623,7 +638,7 @@ def main() -> int:
         return 1
     clean_stale()
     stage(4, total, "下載 AI 模型", 70, 94)
-    prefetch_models()
+    prefetch_models(tag)
     stage(5, total, "檢查", 94, 99)
     ok = verify(tag)
     stage(6, total, "完成", 99, 100)

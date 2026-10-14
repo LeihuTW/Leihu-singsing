@@ -8,7 +8,7 @@
 </head>
 <body>
 <header class="bar">
-  <span class="logo">雷虎練唱台<small id="ver">1.4.4</small></span>
+  <span class="logo">雷虎練唱台<small id="ver">1.4.5</small></span>
   <nav class="row">
     <button id="nav-lib" class="tab cur">歌曲庫</button>
     <button id="nav-practice" class="tab" disabled>練唱</button>
@@ -121,6 +121,7 @@
           <button data-preset="solo">只聽主唱</button>
         </div>
         <div id="faders" class="detail"></div>
+        <label class="row hint" title="每首歌的音量差很多時，自動調到差不多大聲（不會改動原始檔）"><input id="norm-vol" type="checkbox" checked> 音量標準化 <span id="norm-db" class="num"></span></label>
         <p class="hint">「練唱」會把主唱調小、打開旋律導引音。移調和變速在本機算好後會存起來，下次切換不用再等。</p>
       </div>
 
@@ -353,7 +354,9 @@
       </select></label>
     <label class="row"><input id="cfg-tw" type="checkbox"> 中文歌詞轉成台灣繁體用字</label>
     <label class="field"><span>人聲分離模型</span><input id="cfg-sep" type="text"></label>
-    <label class="field"><span>主唱／合音分離模型</span><input id="cfg-kara" type="text"></label>
+    <label class="field"><span>主唱／合音分離品質（合音多的歌，高品質的旋律會準很多）</span>
+      <select id="cfg-kq"><option value="auto">自動（有顯示卡用高品質）</option><option value="high">高品質（沒有顯示卡會非常慢）</option><option value="standard">標準（快）</option></select></label>
+    <label class="field"><span>主唱／合音分離模型（標準）</span><input id="cfg-kara" type="text"></label>
     <label class="field"><span>音高模型</span>
       <select id="cfg-pitch"><option value="auto">自動（有顯示卡用 full）</option><option value="full">full（準、CPU 很慢）</option><option value="tiny">tiny（快）</option></select></label>
     <div class="row">

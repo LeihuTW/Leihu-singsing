@@ -126,7 +126,7 @@ def main():
             webbrowser.open(base + "/")
             proc.wait()
             return
-        version = "1.4.4"
+        version = "1.4.5"
         try:
             version = (ROOT / "VERSION").read_text("utf-8").strip() or version
         except OSError:

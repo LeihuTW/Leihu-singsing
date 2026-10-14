@@ -43,6 +43,7 @@ STEMS = ("lead", "back", "inst")
 DEFAULT_CONFIG = {
     "separation_model": "UVR-MDX-NET-Inst_HQ_3.onnx",
     "karaoke_model": "UVR_MDXNET_KARA_2.onnx",
+    "karaoke_quality": "auto",   # auto：有顯示卡用高品質（Roformer）；standard；high
     "whisper_model": "large-v3-turbo",
     "lyrics_language": "zh",
     "convert_to_taiwan": True,
@@ -381,6 +382,88 @@ def fit_length(y: np.ndarray, n: int) -> np.ndarray:
 
 # ---------------------------------------------------------------- 匯入
 
+# ---------------------------------------------------------------- 音量標準化
+# 每首歌的響度差很多（YouTube 抓下來的歌常常一首很大聲、一首很小聲）。
+# 匯入時用 ITU-R BS.1770（和 YouTube、Spotify 相同的響度標準）量出整首歌的響度，
+# 播放時把主唱／合音／伴奏一起調到目標響度。不改動原始檔，關掉「音量標準化」就是原本的音量。
+TARGET_LUFS = -16.0
+
+
+def _biquad(b0, b1, b2, a0, a1, a2):
+    return np.array([b0, b1, b2]) / a0, np.array([a0, a1, a2]) / a0
+
+
+def _k_weight(sr: int):
+    """BS.1770 的 K 加權濾波器（高架＋高通），依取樣率計算係數。"""
+    import math
+    # 第一段：高架濾波器（模擬頭部對高頻的影響）
+    G, Q, fc = 3.999843853973347, 0.7071752369554196, 1681.974450955533
+    A = 10 ** (G / 40)
+    w0 = 2 * math.pi * fc / sr
+    alpha = math.sin(w0) / (2 * Q)
+    sh = _biquad(A * ((A + 1) + (A - 1) * math.cos(w0) + 2 * math.sqrt(A) * alpha),
+                 -2 * A * ((A - 1) + (A + 1) * math.cos(w0)),
+                 A * ((A + 1) + (A - 1) * math.cos(w0) - 2 * math.sqrt(A) * alpha),
+                 (A + 1) - (A - 1) * math.cos(w0) + 2 * math.sqrt(A) * alpha,
+                 2 * ((A - 1) - (A + 1) * math.cos(w0)),
+                 (A + 1) - (A - 1) * math.cos(w0) - 2 * math.sqrt(A) * alpha)
+    # 第二段：高通濾波器（去掉極低頻）
+    Q, fc = 0.5003270373238773, 38.13547087602444
+    w0 = 2 * math.pi * fc / sr
+    alpha = math.sin(w0) / (2 * Q)
+    hp = _biquad((1 + math.cos(w0)) / 2, -(1 + math.cos(w0)), (1 + math.cos(w0)) / 2,
+                 1 + alpha, -2 * math.cos(w0), 1 - alpha)
+    return sh, hp
+
+
+def integrated_loudness(y: np.ndarray, sr: int) -> float | None:
+    """整首歌的響度（LUFS）。y 為 (聲道, 取樣) 或單聲道。太安靜量不到時回傳 None。"""
+    from scipy.signal import lfilter
+    x = np.atleast_2d(np.asarray(y, dtype=np.float64))
+    (b1, a1), (b2, a2) = _k_weight(sr)
+    x = lfilter(b2, a2, lfilter(b1, a1, x, axis=1), axis=1)
+    block, step = int(0.4 * sr), int(0.1 * sr)   # 400 ms 區塊、重疊 75%
+    if x.shape[1] < block:
+        return None
+    n = 1 + (x.shape[1] - block) // step
+    p2 = np.cumsum(np.concatenate([np.zeros((x.shape[0], 1)), x ** 2], axis=1), axis=1)
+    idx = np.arange(n) * step
+    z = (p2[:, idx + block] - p2[:, idx]) / block          # 每個區塊、每個聲道的均方值
+    zsum = z.sum(axis=0)                                    # 左右聲道權重都是 1
+    lk = -0.691 + 10 * np.log10(np.maximum(zsum, 1e-12))
+    keep = lk > -70                                         # 絕對門檻：去掉靜音
+    if not keep.any():
+        return None
+    rel = -0.691 + 10 * np.log10(zsum[keep].mean()) - 10    # 相對門檻：去掉比平均小 10 LU 的段落
+    keep &= lk > rel
+    if not keep.any():
+        return None
+    return round(float(-0.691 + 10 * np.log10(zsum[keep].mean())), 2)
+
+
+def measure_loudness(d: Path) -> dict:
+    """量 mix.wav 的響度與峰值，記在 meta（只算一次）。"""
+    meta = read_meta(d)
+    if meta.get("lufs") is not None or not (d / "mix.wav").exists():
+        return meta
+    try:
+        y = read_audio(d / "mix.wav")
+        lufs = integrated_loudness(y, SR)
+        peak = float(np.max(np.abs(y))) if y.size else 0.0
+        return update_meta(d, lufs=lufs, peak_db=round(20 * np.log10(max(peak, 1e-6)), 2))
+    except Exception:
+        traceback.print_exc()
+        return meta
+
+
+def norm_gain_db(meta: dict) -> float:
+    """播放時要加減幾 dB 才會到目標響度。小聲的歌最多加 10 dB（超過的部分由播放端的限幅器處理）。"""
+    lufs = meta.get("lufs")
+    if lufs is None:
+        return 0.0
+    return round(float(np.clip(TARGET_LUFS - lufs, -15.0, 10.0)), 2)
+
+
 def step_import(d: Path, report) -> None:
     report("讀取音訊", 0.02)
     src = next(d.glob("original.*"))
@@ -393,7 +476,9 @@ def step_import(d: Path, report) -> None:
     write_wav(d / "mix.wav", y)
     steps = read_meta(d).get("steps", {})
     steps["import"] = True
-    update_meta(d, duration=round(y.shape[1] / SR, 3), steps=steps)
+    peak = float(np.max(np.abs(y))) if y.size else 0.0
+    update_meta(d, duration=round(y.shape[1] / SR, 3), steps=steps,
+                lufs=integrated_loudness(y, SR), peak_db=round(20 * np.log10(max(peak, 1e-6)), 2))
 
 
 # ---------------------------------------------------------------- 分離
@@ -426,6 +511,19 @@ def _pick(paths: list[Path], kind: str) -> Path:
     raise RuntimeError(f"分離結果裡找不到 {kind}：{[p.name for p in paths]}")
 
 
+# 主唱／合音分離的高品質模型（Mel-Band Roformer，aufr33／viperx）。
+# 合音多、或有和聲吟唱的歌，標準模型常把合音留在主唱軌，旋律會在兩個聲部之間亂跳；這個模型分得乾淨很多。
+# 用 PyTorch 運算：有顯示卡約幾十秒，只有 CPU 會非常慢（一首歌可能要十幾分鐘），所以「自動」只在顯示卡可用時才用。
+HQ_KARAOKE = "mel_band_roformer_karaoke_aufr33_viperx_sdr_10.1956.ckpt"
+
+
+def karaoke_model(cfg: dict) -> str:
+    q = cfg.get("karaoke_quality", "auto")
+    if q == "high" or (q == "auto" and cuda_ok()):
+        return HQ_KARAOKE
+    return cfg["karaoke_model"]
+
+
 def separate_uvr(d: Path, cfg: dict, report) -> None:
     try:
         import torch  # noqa: F401  先載入 PyTorch 的 CUDA 函式庫，ONNX 會沿用同一份
@@ -447,9 +545,24 @@ def separate_uvr(d: Path, cfg: dict, report) -> None:
     _pick(outs, "vocals").replace(voc)
     inst_p = _pick(outs, "instrumental")
 
-    report("把人聲分成主唱與合音", 0.35)
-    sep.load_model(model_filename=cfg["karaoke_model"])
-    outs2 = [p for p in _outputs(sep.separate(str(voc)), tmp) if p != voc and p != inst_p]
+    kara = karaoke_model(cfg)
+    hq = kara == HQ_KARAOKE
+    report("把人聲分成主唱與合音" + ("（高品質，第一次會下載約 900 MB 模型）" if hq else ""), 0.35)
+    try:
+        sep.load_model(model_filename=kara)
+        outs2 = [p for p in _outputs(sep.separate(str(voc)), tmp) if p != voc and p != inst_p]
+    except Exception as e:
+        if not hq:
+            raise
+        # 高品質模型下載失敗或顯示卡記憶體不夠：改用標準模型，不要整首失敗
+        print(f"[separate] 高品質主唱分離失敗，改用標準模型：{type(e).__name__}: {e}", flush=True)
+        kara = cfg["karaoke_model"]
+        report("把人聲分成主唱與合音（標準）", 0.35)
+        sep.load_model(model_filename=kara)
+        outs2 = [p for p in _outputs(sep.separate(str(voc)), tmp) if p != voc and p != inst_p]
+    meta = read_meta(d)
+    meta["karaoke"] = kara
+    write_meta(d, meta)
     lead_p = _pick(outs2, "vocals")
     back_p = _pick(outs2, "instrumental")
 
@@ -895,6 +1008,17 @@ def to_lrc(lines: list[dict]) -> str:
     return "\n".join(out) + "\n"
 
 
+def _collect_words(segs, dur: float, report) -> list:
+    """逐段取出辨識結果，同時更新進度；使用者按「停止」時在這裡停下。"""
+    words = []
+    for s in segs:
+        done = min(1.0, (s.end or 0) / max(dur, 1))
+        report(f"辨識歌詞 {int(s.end // 60)}:{int(s.end % 60):02d} / {int(dur // 60)}:{int(dur % 60):02d}",
+               0.75 + 0.19 * done)
+        words.extend(s.words or [])
+    return words
+
+
 def step_lyrics(d: Path, cfg: dict, report) -> None:
     if not module_status()["whisper"]:
         raise UserError("沒有安裝 faster-whisper，無法辨識歌詞")
@@ -908,7 +1032,7 @@ def step_lyrics(d: Path, cfg: dict, report) -> None:
             y16, language=lang, vad_filter=True,
             vad_parameters={"min_silence_duration_ms": 500},
             word_timestamps=True, condition_on_previous_text=False, beam_size=5)
-        words = [w for s in segs for w in (s.words or [])]
+        words = _collect_words(segs, len(y16) / PITCH_SR, report)
     except RuntimeError:
         # 例如有顯示卡但缺 CUDA 函式庫：改用 CPU 重跑
         traceback.print_exc()
@@ -917,7 +1041,7 @@ def step_lyrics(d: Path, cfg: dict, report) -> None:
                              compute_type="int8", download_root=str(MODELS / "whisper"))
         segs, info = model.transcribe(y16, language=lang, vad_filter=True,
                                       word_timestamps=True, condition_on_previous_text=False)
-        words = [w for s in segs for w in (s.words or [])]
+        words = _collect_words(segs, len(y16) / PITCH_SR, report)
 
     lines, cur = [], []
 
@@ -1276,6 +1400,21 @@ class Jobs:
                         n += 1
         return n
 
+    def cancel(self, jid: str) -> bool:
+        """使用者按「停止」：排隊中的直接取消；執行中的在下一個檢查點停下。"""
+        with self.lock:
+            j = self.state.get(jid)
+            if not j:
+                return False
+            if j["status"] == "queued":
+                j.update(status="cancelled", step="已取消")
+                return True
+            if j["status"] == "running":
+                j["cancel"] = True
+                j["step"] = "停止中…"
+                return True
+        return False
+
     def position(self, jid: str) -> int:
         """前面還有幾個工作。"""
         with self.lock:
@@ -1333,6 +1472,12 @@ def process_song(song_id: str, steps: list[str]):
                 meta = read_meta(d)
                 meta["notes"] = [x for x in meta.get("notes", []) if "歌詞" not in x]
                 write_meta(d, meta)
+            except JobCancelled:
+                meta = read_meta(d)
+                meta["notes"] = [x for x in meta.get("notes", []) if "歌詞" not in x] + [
+                    "已停止辨識歌詞。可以在練唱畫面貼上或搜尋歌詞，或用「重新處理 → 只重新辨識歌詞」再試一次。"]
+                write_meta(d, meta)
+                raise
             except Exception as e:
                 traceback.print_exc()
                 meta = read_meta(d)
@@ -1341,7 +1486,9 @@ def process_song(song_id: str, steps: list[str]):
                 write_meta(d, meta)
             report("搜尋線上歌詞並與辨識結果比對", 0.95)
             try:
-                find_and_store_candidates(d, cfg)
+                find_and_store_candidates(d, cfg, check=lambda: report("搜尋線上歌詞並與辨識結果比對", 0.95))
+            except JobCancelled:
+                raise
             except Exception:
                 traceback.print_exc()   # 沒有網路或網站不通時，維持辨識結果
     return run
@@ -1436,10 +1583,10 @@ def similarity(recognized: str, candidate: str) -> float | None:
     return round(sum(x.size for x in m.get_matching_blocks()) / len(a), 3)
 
 
-USER_AGENT = "LeihuLiantai/1.4.4 (+https://github.com/LeihuTW/Leihu-singsing)"   # HTTP 標頭只能用英文字
+USER_AGENT = "LeihuLiantai/1.4.5 (+https://github.com/LeihuTW/Leihu-singsing)"   # HTTP 標頭只能用英文字
 
 
-def _http_json(url: str, headers: dict | None = None, timeout: int = 10):
+def _http_json(url: str, headers: dict | None = None, timeout: int = 8):
     import urllib.request
     req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT, **(headers or {})})
     with urllib.request.urlopen(req, timeout=timeout) as r:
@@ -1533,24 +1680,46 @@ def recognized_text(d: Path) -> str:
     return "\n".join(l["text"] for l in parse_lrc(p.read_text("utf-8"))) if p.exists() else ""
 
 
-def find_candidates(d: Path, cfg: dict, query: str = "") -> tuple[list[str], list[dict]]:
+def find_candidates(d: Path, cfg: dict, query: str = "", check=None,
+                    budget: float = 45) -> tuple[list[str], list[dict]]:
     """用歌名（原文與簡體）到 LRCLIB、網易雲和酷狗搜尋，與辨識結果比對後排序。"""
     meta = read_meta(d)
     queries = [query] if query else lyric_queries(meta)
+    from concurrent.futures import ThreadPoolExecutor, wait as fwait
     tried, found, errors = [], {}, []
-    for q in queries:
-        for qq in dict.fromkeys([q, to_simplified(q)]):
-            tried.append(qq)
-            for fn in (search_lrclib, search_netease, search_kugou):
-                try:
-                    for c in fn(qq):
-                        found.setdefault(c["id"], c)
-                except Exception as e:
-                    errors.append(f"{fn.__name__}: {type(e).__name__}")
-                    log_error(f"{fn.__name__}({qq})", e)
-        if len(found) >= 8:
-            break
-    if not found and errors and len(errors) >= len(tried) * 3:
+    sites = [search_lrclib, search_netease, search_kugou]
+    dead = set()                      # 連不上的網站，後面的搜尋就跳過，不要每次都等逾時
+    deadline = time.time() + budget   # 整體時間上限：網站很慢時也不會一直卡在這一步
+    pool = ThreadPoolExecutor(max_workers=3)
+    try:
+        for q in queries:
+            for qq in dict.fromkeys([q, to_simplified(q)]):
+                if time.time() >= deadline:
+                    break
+                tried.append(qq)
+                futs = {pool.submit(fn, qq): fn for fn in sites if fn not in dead}
+                pending = set(futs)
+                while pending and time.time() < deadline:
+                    if check:
+                        check()       # 使用者按「停止」時在這裡停下
+                    _, pending = fwait(pending, timeout=0.5)
+                for f, fn in futs.items():
+                    if f in pending:
+                        errors.append(f"{fn.__name__}: 逾時")
+                        dead.add(fn)
+                        continue
+                    try:
+                        for c in f.result():
+                            found.setdefault(c["id"], c)
+                    except Exception as e:
+                        errors.append(f"{fn.__name__}: {type(e).__name__}")
+                        log_error(f"{fn.__name__}({qq})", e)
+                        dead.add(fn)
+            if len(found) >= 8 or time.time() >= deadline or len(dead) == len(sites):
+                break
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
+    if not found and errors and len(dead) == len(sites):
         raise UserError("無法連到歌詞網站，請確認網路後再試。")
     rec = recognized_text(d)
     dur = meta.get("duration")
@@ -1575,8 +1744,8 @@ def find_candidates(d: Path, cfg: dict, query: str = "") -> tuple[list[str], lis
     return list(dict.fromkeys(tried)), out[:10]
 
 
-def find_and_store_candidates(d: Path, cfg: dict) -> None:
-    _, cands = find_candidates(d, cfg)
+def find_and_store_candidates(d: Path, cfg: dict, check=None) -> None:
+    _, cands = find_candidates(d, cfg, check=check)
     # 至少要有一點像，才請使用者挑選；完全不像的多半是同名的其他歌
     good = [c for c in cands if c["similarity"] is None or c["similarity"] >= 0.25]
     (d / "lyrics_candidates.json").write_text(json.dumps(good, ensure_ascii=False), "utf-8")

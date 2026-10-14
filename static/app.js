@@ -299,10 +299,21 @@ async function pollJobs() {
     const el = document.createElement("div");
     el.className = "job" + (j.status === "error" ? " error" : "");
     el.innerHTML = `<span class="lbl"></span><span class="num">${j.status === "error" ? "" : Math.round(j.progress * 100) + "%"}</span>
-      ${j.status === "error" ? `<button class="ghost job-x" title="關閉這則訊息" aria-label="關閉這則訊息">✕</button>` : ""}
+      ${j.status === "error" ? `<button class="ghost job-x" title="關閉這則訊息" aria-label="關閉這則訊息">✕</button>`
+        : `<button class="ghost job-stop" title="停止處理這首歌；已經完成的步驟會保留">${j.status === "queued" ? "取消" : "停止"}</button>`}
       <div class="meter"><i style="width:${Math.round(j.progress * 100)}%"></i></div>${j.error ? `<div class="err"></div>` : ""}`;
     const x = $(".job-x", el);
     if (x) x.onclick = () => { jobHidden.add(j.id); el.remove(); };
+    const stop = $(".job-stop", el);
+    if (stop) {
+      stop.disabled = /停止中/.test(j.step || "");
+      stop.onclick = async () => {
+        stop.disabled = true;
+        try { await api(`/api/jobs/${j.id}/cancel`, { method: "POST" }); toast(j.status === "queued" ? "已取消" : "正在停止，目前這一小段處理完就會停下", 3000); }
+        catch (e) { toast(e.message); }
+        pollJobs();
+      };
+    }
     $(".lbl", el).textContent = `${songTitle(j.song)}：${j.status === "queued" ? "排隊中" : j.step}`;
     if (j.error) $(".err", el).textContent = j.error;
     box.appendChild(el);
@@ -404,6 +415,7 @@ async function openSong(id) {
   $("#key-sel").value = String(S.key);
   $("#nav-practice").disabled = false;
   renderFaders();
+  syncNormUi();
   renderTakes(song.takes);
   $("#take-detail").innerHTML = "";
   $("#exp-msg").textContent = ""; $("#exp-show").hidden = true; $("#align-cost").textContent = ""; $("#align-state").textContent = "";
@@ -531,11 +543,36 @@ function play() {
   S.startCtx = now; S.playing = true;
   $("#play").textContent = "暫停";
 }
+/* 1.4.5：音量標準化。主唱／合音／伴奏先經過這條「歌曲」線路：依整首歌的響度加減音量，
+   再過一個只在快爆音時才作用的限幅器。導引音和我的錄音不受影響。 */
+S.normVol = store.get("normVol", true);
+function songBus() {
+  const c = ac();
+  if (!S.bus) {
+    const g = c.createGain();
+    const lim = c.createDynamicsCompressor();
+    lim.threshold.value = -1; lim.knee.value = 0; lim.ratio.value = 20;
+    lim.attack.value = 0.002; lim.release.value = 0.15;
+    g.connect(lim).connect(c.destination);
+    S.bus = g;
+  }
+  S.bus.gain.value = Math.pow(10, normGain() / 20);
+  return S.bus;
+}
+function normGain() { return S.normVol && S.song ? (S.song.norm_gain_db || 0) : 0; }
+function syncNormUi() {
+  $("#norm-vol").checked = S.normVol;
+  const db = S.song ? (S.song.norm_gain_db || 0) : 0;
+  $("#norm-db").textContent = S.song && S.song.lufs != null
+    ? `這首 ${S.song.lufs.toFixed(1)} LUFS，${S.normVol ? (db >= 0 ? "+" : "") + db.toFixed(1) + " dB" : "未調整"}` : "";
+  if (S.bus) S.bus.gain.value = Math.pow(10, normGain() / 20);
+}
+$("#norm-vol").onchange = e => { S.normVol = e.target.checked; store.set("normVol", S.normVol); syncNormUi(); };
 function startNode(k, buf, when, pos) {
   const c = ac();
   const src = c.createBufferSource(); src.buffer = buf;
   const g = c.createGain(); g.gain.value = S.vol[k] ?? 1;
-  src.connect(g).connect(c.destination);
+  src.connect(g).connect(["lead", "back", "inst"].includes(k) ? songBus() : c.destination);
   src.start(when, pos);
   S.nodes[k] = { src, g };
 }
@@ -2027,6 +2064,7 @@ async function openSettings(focusUsage) {
   $("#cfg-tw").checked = !!cfg.convert_to_taiwan;
   $("#cfg-sep").value = cfg.separation_model;
   $("#cfg-kara").value = cfg.karaoke_model;
+  $("#cfg-kq").value = cfg.karaoke_quality || "auto";
   $("#cfg-pitch").value = cfg.pitch_model;
   const m = st.modules;
   const items = [["uvr", "AI 人聲分離"], ["crepe", "CREPE 音高"], ["whisper", "Whisper 歌詞辨識"], ["pedalboard", "高品質移調"], ["opencc", "台灣繁體轉換"], ["anthropic", "Claude 連線"], ["cuda", "顯示卡加速"]];
@@ -2041,7 +2079,7 @@ async function saveSettings(extra = {}) {
       anthropic_api_key: $("#cfg-key").value, claude_model: $("#cfg-model").value.trim(),
       whisper_model: $("#cfg-whisper").value, lyrics_language: $("#cfg-lang").value,
       convert_to_taiwan: $("#cfg-tw").checked, separation_model: $("#cfg-sep").value.trim(),
-      karaoke_model: $("#cfg-kara").value.trim(), pitch_model: $("#cfg-pitch").value,
+      karaoke_model: $("#cfg-kara").value.trim(), karaoke_quality: $("#cfg-kq").value, pitch_model: $("#cfg-pitch").value,
       balance_usd: $("#cfg-balance").value.trim().replace(/^US\$|^\$/, ""), ...extra,
     } });
     $("#settings").hidden = true; toast("設定已儲存"); pollJobs();
