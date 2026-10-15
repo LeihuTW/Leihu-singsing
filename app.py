@@ -18,7 +18,7 @@ import claude_api as C
 import pipeline as P
 import share as SH
 
-VERSION = "1.4.5"
+VERSION = "1.4.6"
 HOST, PORT = "127.0.0.1", int(os.environ.get("LIANTAI_PORT", "8765"))
 app = Flask(__name__, static_folder=str(P.ROOT / "static"), static_url_path="/static")
 app.config["MAX_CONTENT_LENGTH"] = 1024 * 1024 * 1024

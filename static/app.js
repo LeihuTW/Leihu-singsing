@@ -36,8 +36,12 @@ const S = {
   takes: [], take: null, takeBuf: null,
   tap: null, dirty: true, loadingAudio: false,
 };
-let ctx = null;
+let ctx = null, micCtx = null;
 const ac = () => (ctx ||= new (window.AudioContext || window.webkitAudioContext)());
+/* 1.4.6：麥克風用另一個獨立的 AudioContext。
+   麥克風和耳機是不同裝置時（例如 USB 麥克風），兩邊的時脈不同步；放在播放音樂的同一個 context 裡，
+   Windows 上會讓音樂週期性斷音、破音。分開之後，麥克風只負責收音、音高和錄音，不會影響音樂播放。 */
+const mc = () => (micCtx ||= new (window.AudioContext || window.webkitAudioContext)());
 
 /* ------------------------------------------------------------ 導覽 */
 function show(view) {
@@ -1146,7 +1150,7 @@ async function startMic() {
       audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false,
                ...(id ? { deviceId: { exact: id } } : {}) },
     });
-    const c = ac(); c.resume();
+    const c = mc(); c.resume();
     const src = c.createMediaStreamSource(stream);
     // 麥克風 → (原始音量表) → 增益 → (音量表、音高) → 限幅器 → 錄音
     const raw = c.createAnalyser(); raw.fftSize = 2048;
@@ -1176,6 +1180,10 @@ function stopMic() {
   if (S.rec) stopRecording();
   S.mic.stream.getTracks().forEach(t => t.stop());
   S.mic.src.disconnect(); S.mic.gain.disconnect(); S.mic.lim.disconnect(); S.mic = null; S.liveNow = null;
+  if (micCtx) {   // 釋放麥克風裝置；稍等一下，讓錄音機把最後一段資料寫完
+    const old = micCtx; micCtx = null;
+    setTimeout(() => old.close().catch(() => {}), 1500);
+  }
   $("#mic-lv").hidden = true;
   $("#mic").textContent = "開啟麥克風"; $("#mic").classList.remove("on");
   $("#rec").disabled = true;
@@ -1186,10 +1194,10 @@ function micFrame() {
   if (++S.mic.tick % 2) return;
   S.mic.an.getFloatTimeDomainData(S.mic.buf);
   micLevel();
-  const m = detect(S.mic.buf, ac().sampleRate);
+  const m = detect(S.mic.buf, mc().sampleRate);
   S.liveNow = m;
   if (S.playing) {
-    const t = cur() - (S.mic.buf.length / 2 / ac().sampleRate) * S.speed;
+    const t = cur() - (S.mic.buf.length / 2 / mc().sampleRate) * S.speed;
     S.live.push({ t, m });
     if (m != null) keyHintAdd(m, refAt(t));
     if (S.live.length > 4000) S.live.splice(0, 1000);
@@ -1203,7 +1211,7 @@ const toDb = v => (v > 1e-5 ? 20 * Math.log10(v) : -120);
 function syncGainUi() {
   $("#mic-gain").value = Math.round(S.micGain * 100);
   $("#mic-gain-v").textContent = Math.round(S.micGain * 100) + "%";
-  if (S.mic) S.mic.gain.gain.setTargetAtTime(S.micGain, ac().currentTime, 0.02);
+  if (S.mic) S.mic.gain.gain.setTargetAtTime(S.micGain, mc().currentTime, 0.02);
 }
 function setMicGain(g) { S.micGain = clamp(g, 0.1, 3); store.set("micGain", S.micGain); syncGainUi(); }
 $("#mic-gain").oninput = e => setMicGain(e.target.value / 100);
