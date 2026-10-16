@@ -18,7 +18,7 @@ import claude_api as C
 import pipeline as P
 import share as SH
 
-VERSION = "1.4.6"
+VERSION = "1.4.7"
 HOST, PORT = "127.0.0.1", int(os.environ.get("LIANTAI_PORT", "8765"))
 app = Flask(__name__, static_folder=str(P.ROOT / "static"), static_url_path="/static")
 app.config["MAX_CONTENT_LENGTH"] = 1024 * 1024 * 1024
@@ -42,7 +42,10 @@ def index():
 def status():
     cfg = P.load_config()
     mods = P.module_status()
-    return jsonify(version=VERSION, root=str(P.ROOT), modules=mods, cuda_note=P.CUDA_NOTE,
+    q = cfg.get("karaoke_quality", "auto")
+    hq = P.hq_status() if (q == "high" or (q == "auto" and mods.get("cuda"))) else None
+    return jsonify(version=VERSION, root=str(P.ROOT), modules=mods, cuda_note=P.CUDA_NOTE, hq=hq,
+                   hq_model=P.HQ_KARAOKE,
                    claude_ready=bool(cfg.get("anthropic_api_key") or os.environ.get("ANTHROPIC_API_KEY")),
                    session_cost=C.summary()["session"]["cost_usd"],
                    jobs=jobs.active() + vjobs.active())
@@ -153,6 +156,9 @@ def rename(sid):
         if cat and cat not in P.load_categories():
             raise P.UserError("找不到這個分類")
         changes["category"] = cat
+    if "lyrics_language" in body:   # 這首歌的辨識語言；null＝依設定
+        v = body.get("lyrics_language")
+        changes["lyrics_language"] = v if v in ("", "zh", "ja", "en", "ko", "yue") else None
     return jsonify(P.update_meta(d, **changes))
 
 
@@ -185,10 +191,31 @@ def pitch(sid):
 @app.get("/api/songs/<sid>/lyrics")
 def get_lyrics(sid):
     d = P.song_dir(sid)
-    p = d / "lyrics.lrc"
-    auto = d / "lyrics_auto.lrc"
-    return jsonify(lrc=p.read_text("utf-8") if p.exists() else "",
-                   auto=auto.read_text("utf-8") if auto.exists() else "")
+    rd = lambda n: (d / n).read_text("utf-8") if (d / n).exists() else ""
+    meta = P.read_meta(d)
+    return jsonify(lrc=rd("lyrics.lrc"), auto=rd("lyrics_auto.lrc"), online=rd("lyrics_online.lrc"),
+                   source=meta.get("lyrics_source"), online_info=meta.get("lyrics_online"),
+                   unreliable=not P.recognition_reliable(meta),
+                   reasons=(meta.get("lyrics_quality") or {}).get("reasons", []),
+                   language=meta.get("language"), song_language=meta.get("lyrics_language"))
+
+
+@app.post("/api/songs/<sid>/lyrics/use")
+def use_lyrics(sid):
+    """切換目前使用的歌詞：辨識結果或線上歌詞（兩份各自保存，切換不會互相覆蓋）。"""
+    d = P.song_dir(sid)
+    which = (request.get_json(force=True) or {}).get("which")
+    src = {"auto": "lyrics_auto.lrc", "online": "lyrics_online.lrc"}.get(which)
+    if not src or not (d / src).exists():
+        raise P.UserError("沒有這份歌詞")
+    lrc = (d / src).read_text("utf-8")
+    (d / "lyrics.lrc").write_text(lrc, "utf-8")
+    meta = P.read_meta(d)
+    meta["lyrics_source"] = "online" if which == "online" else "whisper"
+    meta["lyrics_pending"] = False
+    meta["steps"]["lyrics"] = True
+    P.write_meta(d, meta)
+    return jsonify(lrc=lrc, source=meta["lyrics_source"])
 
 
 @app.put("/api/songs/<sid>/lyrics")
@@ -198,7 +225,10 @@ def put_lyrics(sid):
     (d / "lyrics.lrc").write_text(lrc, "utf-8")
     meta = P.read_meta(d)
     meta["steps"]["lyrics"] = bool(lrc.strip())
-    meta["lyrics_source"] = "manual"
+    if meta.get("lyrics_source") == "online" and lrc.strip():
+        (d / "lyrics_online.lrc").write_text(lrc, "utf-8")   # 調整線上歌詞的時間：存回線上歌詞那一份
+    else:
+        meta["lyrics_source"] = "manual"
     if lrc.strip():
         meta["notes"] = [x for x in meta.get("notes", []) if "歌詞辨識沒有完成" not in x]
     P.write_meta(d, meta)

@@ -315,3 +315,7 @@ a.tab { text-decoration: none; font-size: 14px; }
 .ov-opts { display: grid; grid-template-columns: auto 1fr; gap: 8px 12px; align-items: center; }
 .ov-opts label { font-size: 13px; color: var(--muted); }
 #ov-color { width: 44px; height: 28px; padding: 0; border: 1px solid var(--line); border-radius: 6px; background: none; }
+/* 1.4.7：歌詞來源切換、辨識不可靠的提示 */
+.lyr-src { gap: 6px; font-size: 13px; }
+.lyr-src select { padding: 2px 6px; }
+.warn-box { border-color: var(--bad); }

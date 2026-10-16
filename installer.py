@@ -574,20 +574,6 @@ def prefetch_models(tag: str = "cpu") -> None:
         say(f"  {'✓' if ok else '✗'} 人聲分離模型{'' if ok else '下載失敗，第一次匯入歌曲時會再試：' + out}")
     else:
         say("  ✓ 人聲分離模型已存在")
-    if tag != "cpu":   # 有顯示卡：預先下載高品質主唱分離模型（約 900 MB），第一次匯入歌曲就不用等
-        hq = uvr / HQ_KARAOKE
-        if hq.exists() and hq.stat().st_size > 900_000_000:
-            say("  ✓ 高品質主唱分離模型已存在")
-        else:
-            say("  下載高品質主唱分離模型（約 900 MB）…")
-            stop = _watch(uvr, 913e6, "高品質主唱分離模型", (0.1, 0.2))
-            code = ("import pipeline\nfrom audio_separator.separator import Separator\n"
-                    f"s = Separator(model_file_dir=r'{uvr}', output_dir=r'{ROOT / 'logs'}')\n"
-                    f"s.download_model_and_data(r'{HQ_KARAOKE}')\nprint('ok')")
-            ok, out = probe(code, timeout=3600)
-            stop()
-            ok = ok and hq.exists() and hq.stat().st_size > 900_000_000
-            say(f"  {'✓' if ok else '!'} 高品質主唱分離模型{'' if ok else '下載失敗，第一次用到時會再試：' + out}")
     progress(0.2, "歌詞辨識模型")
     wdir = ROOT / "models" / "whisper"
     say(f"  下載歌詞辨識模型 {WHISPER}（約 1.6 GB，已下載的部分會接著下載）…")

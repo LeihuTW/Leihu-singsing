@@ -168,8 +168,12 @@ function renderSongs() {
     if (st.separate) chips.push(`<span class="chip ${s.separation === "uvr" ? "ok" : "warn"}">${s.separation === "uvr" ? "AI 分軌" : "聲像分軌"}</span>`);
     if (s.acapella) chips.push(`<span class="chip acap">清唱</span>`);
     chips.push(`<span class="chip ${st.pitch ? "ok" : ""}">${st.pitch ? "旋律" : "旋律未完成"}</span>`);
+    if (st.separate && s.separation === "uvr" && ST.hq && ST.hq.state === "ready" && (s.karaoke || "") !== ST.hqModel)
+      chips.push(`<button class="chip warn chip-btn" data-a="hqsep" title="用高品質模型重新分離主唱與合音，並重新分析旋律（歌詞不變）">用高品質重新分軌</button>`);
     if (st.pitch && !(s.pitch_algo >= 2)) chips.push(`<button class="chip warn chip-btn" data-a="repitch" title="用 1.4.2 改良的方式重新分析旋律（約 1 分鐘，不影響歌詞與錄音）">更新旋律分析</button>`);
-    chips.push(`<span class="chip ${st.lyrics ? "ok" : ""}">${st.lyrics ? "歌詞" : "無歌詞"}</span>`);
+    if (s.lyrics_unreliable && !["online", "import", "manual", "claude"].includes(s.lyrics_source))
+      chips.push(`<span class="chip warn" title="自動辨識不夠準確，已先留白">建議找線上歌詞</span>`);
+    else chips.push(`<span class="chip ${st.lyrics ? "ok" : ""}">${st.lyrics ? "歌詞" : "無歌詞"}</span>`);
     if (s.lyrics_pending) chips.push(`<span class="chip warn">有線上歌詞可選</span>`);
     if (s.takes) chips.push(`<span>${s.takes} 次錄音</span>`);
     if (s.best != null) chips.push(`<span>最佳 <b class="num">${Math.round(s.best * 100)}%</b></span>`);
@@ -200,6 +204,11 @@ function renderSongs() {
       catch (e) { toast(e.message); }
     };
     $('[data-a="open"]', el).onclick = () => openSong(s.id);
+    const hs = $('[data-a="hqsep"]', el);
+    if (hs) hs.onclick = async () => {
+      try { await api(`/api/songs/${s.id}/process`, { json: { steps: ["separate", "pitch"] } }); toast("已加入處理佇列"); pollJobs(); }
+      catch (e) { toast(e.message); }
+    };
     const rp = $('[data-a="repitch"]', el);
     if (rp) rp.onclick = () => repitch(s.id);
     $('[data-a="rename"]', el).onclick = async () => {
@@ -279,6 +288,7 @@ document.addEventListener("drop", e => {
 const jobSeen = {};
 let jobTimer = null;
 const jobHidden = new Set();   // 使用者按掉的失敗訊息
+const ST = {};                  // 伺服器狀態（高品質模型等）
 async function pollJobs() {
   clearTimeout(jobTimer);
   let st;
@@ -322,6 +332,26 @@ async function pollJobs() {
     if (j.error) $(".err", el).textContent = j.error;
     box.appendChild(el);
   }
+  // 高品質主唱分離模型在背景下載時，顯示下載進度
+  ST.hq = st.hq; ST.hqModel = st.hq_model;
+  if (st.hq && (st.hq.state === "downloading" || st.hq.state === "error")) {
+    const el = document.createElement("div");
+    const mb = v => Math.round(v / 1e6);
+    const p = st.hq.total ? st.hq.got / st.hq.total : 0;
+    el.className = "job" + (st.hq.state === "error" ? " error" : "");
+    el.innerHTML = `<span class="lbl"></span><span class="num">${Math.round(p * 100)}%</span><span></span>
+      <div class="meter"><i style="width:${Math.round(p * 100)}%"></i></div><div class="err"></div>`;
+    $(".lbl", el).textContent = st.hq.state === "error" ? "高品質主唱分離模型下載失敗，下次處理歌曲時會再試"
+      : `背景下載高品質主唱分離模型 ${mb(st.hq.got)} / ${mb(st.hq.total)} MB（期間的歌會先用標準模型）`;
+    $(".err", el).textContent = st.hq.state === "error" ? st.hq.error : "";
+    box.appendChild(el);
+    busy = true;
+  }
+  if (ST.hqWas === "downloading" && st.hq && st.hq.state === "ready" && !$("#view-lib").hidden) {
+    toast("高品質主唱分離模型下載完成，之後匯入的歌會自動使用", 4000); loadSongs();
+  }
+  if (ST.hqWas === undefined && st.hq && st.hq.state === "ready" && LIB.songs) renderSongs();
+  ST.hqWas = st.hq ? st.hq.state : null;
   if (finished && !$("#view-lib").hidden) loadSongs();
   jobTimer = setTimeout(pollJobs, busy ? 1000 : 5000);
 }
@@ -398,6 +428,7 @@ async function openSong(id) {
   S.pitch = { hop: pitch.hop, midi: Float32Array.from(pitch.midi, v => (v == null ? NaN : v)) };
   S.notes = pitch.notes.map(([s, e, m]) => ({ s, e, m }));
   S.autoLrc = lyr.auto;
+  applyLyrState(lyr);
   $("#lrc").value = lyr.lrc;
   setLines(lyr.lrc);
   const saved = store.get(`song:${id}`, {});
@@ -802,19 +833,64 @@ let saveTimer = null;
 function saveLyricsSoon() {
   clearTimeout(saveTimer);
   saveTimer = setTimeout(async () => {
-    try { await api(`/api/songs/${S.song.id}/lyrics`, { method: "PUT", json: { lrc: $("#lrc").value } }); toast("歌詞已儲存", 1500); }
+    try { await api(`/api/songs/${S.song.id}/lyrics`, { method: "PUT", json: { lrc: $("#lrc").value } }); reloadLyrState().catch(() => {}); toast("歌詞已儲存", 1500); }
     catch (e) { toast(e.message); }
   }, 700);
 }
 $("#lrc").oninput = e => setLines(e.target.value);
 $("#timing-box").addEventListener("toggle", () => { if ($("#timing-box").open) renderTiming(); });
 $("#lrc-save").onclick = async () => {
-  try { await api(`/api/songs/${S.song.id}/lyrics`, { method: "PUT", json: { lrc: $("#lrc").value } }); toast("歌詞已儲存"); }
+  try { await api(`/api/songs/${S.song.id}/lyrics`, { method: "PUT", json: { lrc: $("#lrc").value } }); reloadLyrState().catch(() => {}); toast("歌詞已儲存"); }
   catch (e) { toast(e.message); }
 };
-$("#lrc-auto").onclick = () => {
-  if (!S.autoLrc) return toast("這首歌沒有自動辨識的歌詞");
-  $("#lrc").value = S.autoLrc; setLines(S.autoLrc); toast("已還原，按「儲存歌詞」才會保存");
+/* 1.4.7：辨識結果和線上歌詞各自保存，可以切換；辨識不可靠時留白並建議找線上歌詞 */
+const SRC_NAMES = { whisper: "自動辨識結果", online: "線上歌詞", import: "匯入的歌詞檔", manual: "手動編輯的歌詞", claude: "Claude 對齊的歌詞" };
+function applyLyrState(lyr) {
+  S.lyr = lyr;
+  const empty = !(lyr.lrc || "").trim();
+  let name = SRC_NAMES[lyr.source] || (empty ? "（沒有歌詞）" : "歌詞");
+  if (lyr.source === "online" && lyr.online_info) name += `（${[lyr.online_info.track, lyr.online_info.artist].filter(Boolean).join(" - ")}）`;
+  $("#lyr-src-name").textContent = name;
+  $("#use-auto").hidden = !lyr.auto || lyr.source === "whisper";
+  $("#use-auto").textContent = lyr.unreliable ? "改用辨識結果（不準確）" : "改用辨識結果";
+  $("#use-online").hidden = !lyr.online || lyr.source === "online";
+  $("#lyr-warn").hidden = !(lyr.unreliable && empty);
+  $("#lyr-warn-why").textContent = (lyr.reasons || []).length ? `原因：${lyr.reasons.join("、")}。建議用線上歌詞或匯入歌詞檔。` : "";
+  $("#lyr-lang").value = lyr.song_language == null ? "__cfg" : lyr.song_language;
+  $("#cand-hint").textContent = lyr.unreliable || !lyr.auto
+    ? "辨識結果不可靠，依歌名和歌曲長度排序；選有「時間軸」的版本最省事。"
+    : "相似度是和自動辨識結果比對的程度，越高越可能是同一首歌、同一個版本。";
+}
+async function reloadLyrState() {
+  const lyr = await api(`/api/songs/${S.song.id}/lyrics`);
+  S.autoLrc = lyr.auto; applyLyrState(lyr);
+  return lyr;
+}
+async function useLyrics(which) {
+  try {
+    const r = await api(`/api/songs/${S.song.id}/lyrics/use`, { json: { which } });
+    $("#lrc").value = r.lrc; setLines(r.lrc);
+    await reloadLyrState();
+    toast(which === "online" ? "已改用線上歌詞" : "已改用辨識結果", 2000);
+  } catch (e) { toast(e.message); }
+}
+$("#use-auto").onclick = () => useLyrics("auto");
+$("#use-online").onclick = () => useLyrics("online");
+$("#lyr-warn-show").onclick = () => useLyrics("auto");
+$("#lyr-warn-import").onclick = () => $("#lrc-import").click();
+$("#lyr-warn-search").onclick = () => {
+  $("#ls-box").open = true;
+  $("#ls-box").scrollIntoView({ behavior: "smooth", block: "center" });
+  searchLyrics("");
+};
+$("#lyr-lang").onchange = async e => {
+  const v = e.target.value;
+  try { await api(`/api/songs/${S.song.id}`, { method: "PATCH", json: { lyrics_language: v === "__cfg" ? null : v } }); toast("已設定這首歌的辨識語言，按「重新辨識歌詞」套用", 2500); }
+  catch (err) { toast(err.message); }
+};
+$("#lyr-redo").onclick = async () => {
+  try { await api(`/api/songs/${S.song.id}/process`, { json: { steps: ["lyrics"] } }); toast("已加入處理佇列，完成後重新開啟這首歌"); pollJobs(); }
+  catch (e) { toast(e.message); }
 };
 
 /* 匯入歌詞檔（LRC／SRT／TXT），自動判斷 UTF-8、Big5、GBK 編碼 */
@@ -834,7 +910,7 @@ $("#lrc-file").onchange = async e => {
   try {
     const r = await api(`/api/songs/${S.song.id}/lyrics/import`, { json: { text, name: f.name } });
     $("#lrc").value = r.lrc; setLines(r.lrc); S.dirty = true;
-    $("#cand-box").hidden = true;
+    $("#cand-box").hidden = true; reloadLyrState().catch(() => {});
     toast(`已匯入「${f.name}」：${r.how}`, 5000);
   } catch (err) { toast(err.message); }
 };
@@ -992,7 +1068,7 @@ function renderCandidates(box, results) {
     const sim = it.similarity;
     const simCls = sim == null ? "lo" : sim >= 0.6 ? "hi" : sim >= 0.35 ? "mid" : "lo";
     el.innerHTML = `<div class="h"><b></b><span class="hint"></span>
-        <span class="sim ${simCls}">${sim == null ? "無法比對" : "相似度 " + Math.round(sim * 100) + "%"}</span>
+        ${sim == null ? "" : `<span class="sim ${simCls}">相似度 ${Math.round(sim * 100)}%</span>`}
         ${it.synced ? '<span class="chip ok">有時間軸</span>' : '<span class="chip">純文字</span>'}</div>
       <div class="pv"></div><div class="row"><span class="hint src"></span><button class="primary">使用這版</button></div>`;
     $("b", el).textContent = it.track || "（未命名）";
@@ -1009,6 +1085,7 @@ async function applyCandidate(it) {
     const r = await api(`/api/songs/${S.song.id}/lyrics/apply`, { json: { candidate: it } });
     $("#lrc").value = r.lrc; setLines(r.lrc);
     $("#cand-box").hidden = true;
+    reloadLyrState().catch(() => {});
     $("#ref-lyrics").value = (it.plain || "").split(/\r?\n/).map(x => x.trim()).filter(Boolean).join("\n");
     toast(`已套用「${it.track}」，${r.how}。時間不準可以用「逐句調整」或 Claude 對齊`, 5000);
     $("#timing-box").open = true;
@@ -1021,12 +1098,12 @@ async function checkCandidates(id) {
     if (!S.song || S.song.id !== id || !r.pending || !r.results.length) return;
     renderCandidates($("#cand-list"), r.results);
     $("#cand-box").hidden = false;
-    toast("找到線上歌詞，在右下的歌詞面板選一版使用，或保留辨識結果", 5000);
+    toast("找到線上歌詞，在右下的歌詞面板選一版使用", 5000);
   } catch {}
 }
 $("#cand-keep").onclick = async () => {
   try { await api(`/api/songs/${S.song.id}/lyrics/keep`, { json: {} }); } catch {}
-  $("#cand-box").hidden = true; toast("保留辨識結果");
+  $("#cand-box").hidden = true; toast("已略過線上歌詞，之後仍可在「搜尋線上歌詞」找");
 };
 async function searchLyrics(q) {
   const msg = $("#ls-msg"), box = $("#ls-results");
@@ -1035,7 +1112,7 @@ async function searchLyrics(q) {
     const r = await api(`/api/songs/${S.song.id}/lyrics/search?q=${encodeURIComponent(q || "")}`);
     if (!q) $("#ls-q").value = r.query;
     if (!r.results.length) { msg.textContent = `找不到「${r.queries.join("」、「")}」的歌詞，可以改用歌名＋歌手再搜尋。`; return; }
-    msg.textContent = `找到 ${r.results.length} 筆，依和辨識結果的相似度排序：`;
+    msg.textContent = `找到 ${r.results.length} 筆${S.lyr && !S.lyr.unreliable && S.lyr.auto ? "，依歌名、長度和辨識結果的相似度排序" : "，依歌名和歌曲長度排序"}：`;
     renderCandidates(box, r.results);
   } catch (e) { msg.textContent = e.message; }
 }

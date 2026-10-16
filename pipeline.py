@@ -45,7 +45,7 @@ DEFAULT_CONFIG = {
     "karaoke_model": "UVR_MDXNET_KARA_2.onnx",
     "karaoke_quality": "auto",   # auto：有顯示卡用高品質（Roformer）；standard；high
     "whisper_model": "large-v3-turbo",
-    "lyrics_language": "zh",
+    "lyrics_language": "",   # 空字串＝自動判斷
     "convert_to_taiwan": True,
     "pitch_model": "auto",
     "claude_model": "claude-sonnet-5-5",
@@ -517,10 +517,98 @@ def _pick(paths: list[Path], kind: str) -> Path:
 HQ_KARAOKE = "mel_band_roformer_karaoke_aufr33_viperx_sdr_10.1956.ckpt"
 
 
+HQ_FILES = {   # 檔名 → (大小, 下載網址…)；第一個網址失敗就換下一個
+    HQ_KARAOKE: (913096801, [
+        "https://github.com/TRvlvr/model_repo/releases/download/all_public_uvr_models/" + HQ_KARAOKE,
+        "https://github.com/nomadkaraoke/python-audio-separator/releases/download/model-configs/" + HQ_KARAOKE]),
+    "mel_band_roformer_karaoke_aufr33_viperx_sdr_10.1956_config.yaml": (None, [
+        "https://github.com/nomadkaraoke/python-audio-separator/releases/download/model-configs/"
+        "mel_band_roformer_karaoke_aufr33_viperx_sdr_10.1956_config.yaml"]),
+}
+HQ_DL = {"state": "idle", "got": 0, "total": HQ_FILES[HQ_KARAOKE][0], "error": ""}
+_hq_lock = threading.Lock()
+
+
+def hq_ready() -> bool:
+    """高品質模型已經完整下載（大小完全正確才算，避免下載到一半的檔案被當成可用）。"""
+    uvr = MODELS / "uvr"
+    for name, (size, _) in HQ_FILES.items():
+        p = uvr / name
+        if not p.exists() or (size and p.stat().st_size != size) or p.stat().st_size == 0:
+            return False
+    return True
+
+
+def _download(urls: list[str], dst: Path, size: int | None) -> None:
+    """下載到 .part 檔，可續傳；完成且大小正確才改成正式檔名。"""
+    import urllib.request
+    part = dst.with_name(dst.name + ".part")
+    if dst.exists() and size and dst.stat().st_size != size:
+        dst.replace(part)                  # 舊版直接寫正式檔名、下載到一半的檔案：接著續傳
+    last = None
+    for url in urls:
+        try:
+            have = part.stat().st_size if part.exists() else 0
+            req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT,
+                                                       **({"Range": f"bytes={have}-"} if have else {})})
+            with urllib.request.urlopen(req, timeout=60) as r:
+                if have and r.status != 206:   # 伺服器不支援續傳：從頭下載
+                    have = 0
+                with open(part, "ab" if have else "wb") as f:
+                    got = have
+                    while True:
+                        chunk = r.read(1 << 20)
+                        if not chunk:
+                            break
+                        f.write(chunk)
+                        got += len(chunk)
+                        if size:
+                            HQ_DL["got"] = got
+            if size and part.stat().st_size != size:
+                raise IOError(f"檔案大小不對（{part.stat().st_size} / {size}）")
+            part.replace(dst)
+            return
+        except Exception as e:
+            last = e
+            log_error(f"download {dst.name} {url}", e)
+    raise last or IOError("下載失敗")
+
+
+def start_hq_download() -> None:
+    """在背景下載高品質主唱分離模型（約 900 MB），不佔用處理歌曲的佇列。"""
+    with _hq_lock:
+        if HQ_DL["state"] == "downloading" or hq_ready():
+            return
+        HQ_DL.update(state="downloading", error="")
+
+    def run():
+        try:
+            uvr = MODELS / "uvr"
+            uvr.mkdir(parents=True, exist_ok=True)
+            for name, (size, urls) in HQ_FILES.items():
+                p = uvr / name
+                if p.exists() and (not size or p.stat().st_size == size):
+                    continue
+                _download(urls, p, size)
+            HQ_DL.update(state="done", got=HQ_DL["total"])
+        except Exception as e:
+            HQ_DL.update(state="error", error=f"{type(e).__name__}: {e}")
+    threading.Thread(target=run, daemon=True).start()
+
+
+def hq_status() -> dict:
+    if HQ_DL["state"] in ("idle", "done") and hq_ready():
+        return {"state": "ready"}
+    return dict(HQ_DL)
+
+
 def karaoke_model(cfg: dict) -> str:
+    """要用的主唱／合音分離模型。高品質模型還沒下載好時，這首先用標準模型，模型在背景下載。"""
     q = cfg.get("karaoke_quality", "auto")
     if q == "high" or (q == "auto" and cuda_ok()):
-        return HQ_KARAOKE
+        if hq_ready():
+            return HQ_KARAOKE
+        start_hq_download()
     return cfg["karaoke_model"]
 
 
@@ -547,7 +635,8 @@ def separate_uvr(d: Path, cfg: dict, report) -> None:
 
     kara = karaoke_model(cfg)
     hq = kara == HQ_KARAOKE
-    report("把人聲分成主唱與合音" + ("（高品質，第一次會下載約 900 MB 模型）" if hq else ""), 0.35)
+    waiting = not hq and HQ_DL["state"] == "downloading"
+    report("把人聲分成主唱與合音" + ("（高品質）" if hq else "（高品質模型下載中，這首先用標準模型）" if waiting else ""), 0.35)
     try:
         sep.load_model(model_filename=kara)
         outs2 = [p for p in _outputs(sep.separate(str(voc)), tmp) if p != voc and p != inst_p]
@@ -1008,15 +1097,79 @@ def to_lrc(lines: list[dict]) -> str:
     return "\n".join(out) + "\n"
 
 
-def _collect_words(segs, dur: float, report) -> list:
-    """逐段取出辨識結果，同時更新進度；使用者按「停止」時在這裡停下。"""
+def _collect_words(segs, dur: float, report, stats: list | None = None) -> list:
+    """逐段取出辨識結果，同時更新進度；使用者按「停止」時在這裡停下。stats 會收到每段的可信度資料。"""
     words = []
     for s in segs:
         done = min(1.0, (s.end or 0) / max(dur, 1))
         report(f"辨識歌詞 {int(s.end // 60)}:{int(s.end % 60):02d} / {int(dur // 60)}:{int(dur % 60):02d}",
                0.75 + 0.19 * done)
         words.extend(s.words or [])
+        if stats is not None:
+            stats.append({"start": s.start, "end": s.end, "lp": getattr(s, "avg_logprob", 0.0),
+                          "cr": getattr(s, "compression_ratio", 1.0), "ns": getattr(s, "no_speech_prob", 0.0),
+                          "text": s.text or ""})
     return words
+
+
+LANG_NAMES = {"zh": "中文", "ja": "日文", "en": "英文", "ko": "韓文", "yue": "粵語"}
+
+
+def pick_language(model, y16: np.ndarray, want: str, per_song: bool) -> tuple[str | None, str]:
+    """決定辨識語言。回傳 (語言, 說明)。
+
+    每首歌個別指定的語言一定照用。全域設定是某個語言（例如中文）時，如果偵測到明顯是別的語言
+    （例如日文歌），改用偵測到的語言，避免把日文硬辨識成中文。設定是自動時直接用偵測結果。"""
+    if per_song and want:
+        return want, ""
+    try:
+        det, prob, _ = model.detect_language(y16, vad_filter=True, language_detection_segments=4)
+    except Exception:
+        traceback.print_exc()
+        return (want or None), ""
+    print(f"[lyrics] 偵測語言 {det} {prob:.2f}（設定 {want or '自動'}）", flush=True)
+    if want and det != want and prob >= 0.7:
+        return det, f"偵測到這首是{LANG_NAMES.get(det, det)}歌，改用{LANG_NAMES.get(det, det)}辨識"
+    if want:
+        return want, ""
+    return (det if prob >= 0.5 else None), ""
+
+
+def lyric_quality(stats: list, words: list, d: Path, lines: list) -> dict:
+    """判斷辨識結果可不可靠（Whisper 的可信度指標＋和主唱有聲音的時間對不對得上）。"""
+    total = sum(max(0.0, s["end"] - s["start"]) for s in stats) or 0.0
+    bad = sum(max(0.0, s["end"] - s["start"]) for s in stats if s["lp"] < -1.0 or s["cr"] > 2.4)
+    lp = (sum(s["lp"] * max(0.0, s["end"] - s["start"]) for s in stats) / total) if total else -9.0
+    chars = sum(len(re.sub(r"\s", "", l["text"])) for l in lines)
+    texts = [_norm(l["text"]) for l in lines if _norm(l["text"])]
+    loop, run = 0, 1   # 同一句「連續」重複很多次：Whisper 卡住的典型症狀（副歌隔一段重複不算）
+    for a, b in zip(texts, texts[1:]):
+        run = run + 1 if a == b else 1
+        loop = max(loop, run)
+    sung = 0.0
+    try:   # 主唱有聲音（有旋律）的總時間
+        pj = json.loads((d / "pitch.json").read_text("utf-8"))
+        sung = sum(1 for v in pj["midi"] if v is not None) * pj.get("hop", HOP_S)
+    except Exception:
+        pass
+    spoken = sum(max(0.0, (w.end or 0) - (w.start or 0)) for w in words)
+    cover = min(1.0, spoken / sung) if sung > 5 else None
+    q = {"lp": round(lp, 3), "bad": round(bad / total, 3) if total else 1.0, "chars": chars,
+         "loop": loop, "cover": None if cover is None else round(cover, 3)}
+    reasons = []
+    if chars < 15:
+        reasons.append("幾乎沒有辨識出文字")
+    if q["bad"] > 0.5:
+        reasons.append("大部分段落的辨識把握很低")
+    if lp < -1.1:
+        reasons.append("整體辨識把握很低")
+    if loop >= 5:
+        reasons.append("同一句連續重複太多次")
+    if cover is not None and cover < 0.25:
+        reasons.append("有唱歌的地方大多沒有辨識出字")
+    q["ok"] = not reasons
+    q["reasons"] = reasons
+    return q
 
 
 def step_lyrics(d: Path, cfg: dict, report) -> None:
@@ -1025,14 +1178,19 @@ def step_lyrics(d: Path, cfg: dict, report) -> None:
     report("載入語音辨識模型（第一次會下載）", 0.7)
     model = _whisper_model(cfg)
     y16 = read_audio(d / "lead.wav", sr=PITCH_SR, mono=True)
+    report("判斷歌詞語言", 0.74)
+    meta0 = read_meta(d)
+    song_lang = meta0.get("lyrics_language")          # 這首歌個別指定的語言（None＝依設定）
+    want = song_lang if song_lang is not None else (cfg.get("lyrics_language") or "")
+    lang, lang_note = pick_language(model, y16, want, song_lang is not None)
     report("辨識歌詞", 0.75)
-    lang = cfg.get("lyrics_language") or None
+    stats: list = []
     try:
         segs, info = model.transcribe(
             y16, language=lang, vad_filter=True,
             vad_parameters={"min_silence_duration_ms": 500},
             word_timestamps=True, condition_on_previous_text=False, beam_size=5)
-        words = _collect_words(segs, len(y16) / PITCH_SR, report)
+        words = _collect_words(segs, len(y16) / PITCH_SR, report, stats)
     except RuntimeError:
         # 例如有顯示卡但缺 CUDA 函式庫：改用 CPU 重跑
         traceback.print_exc()
@@ -1041,7 +1199,8 @@ def step_lyrics(d: Path, cfg: dict, report) -> None:
                              compute_type="int8", download_root=str(MODELS / "whisper"))
         segs, info = model.transcribe(y16, language=lang, vad_filter=True,
                                       word_timestamps=True, condition_on_previous_text=False)
-        words = _collect_words(segs, len(y16) / PITCH_SR, report)
+        stats = []
+        words = _collect_words(segs, len(y16) / PITCH_SR, report, stats)
 
     lines, cur = [], []
 
@@ -1074,12 +1233,31 @@ def step_lyrics(d: Path, cfg: dict, report) -> None:
             l["text"] = to_taiwan(l["text"])
 
     lrc = to_lrc(lines)
-    (d / "lyrics_auto.lrc").write_text(lrc, "utf-8")
-    (d / "lyrics.lrc").write_text(lrc, "utf-8")
+    q = lyric_quality(stats, words, d, lines)
+    print(f"[lyrics] 辨識可信度 {q}", flush=True)
+    (d / "lyrics_auto.lrc").write_text(lrc, "utf-8")      # 辨識結果一律保留，之後可以叫出來看
     meta = read_meta(d)
+    keep_user = meta.get("lyrics_source") in ("online", "import", "claude") and (d / "lyrics.lrc").exists() \
+        and (d / "lyrics.lrc").read_text("utf-8").strip()
+    notes = [x for x in meta.get("notes", []) if "歌詞" not in x and "辨識" not in x]
+    if lang_note:
+        notes.append(lang_note + "。")
+    if q["ok"]:
+        if not keep_user:   # 使用者已經換成線上／匯入的歌詞時，重新辨識不覆蓋
+            (d / "lyrics.lrc").write_text(lrc, "utf-8")
+            meta["lyrics_source"] = "whisper"
+        meta["lyrics_unreliable"] = False
+    else:
+        # 辨識不可靠：不要把錯的歌詞放上去，留白並建議找線上歌詞
+        if not keep_user:
+            (d / "lyrics.lrc").write_text("", "utf-8")
+            meta["lyrics_source"] = None
+        meta["lyrics_unreliable"] = True
+        notes.append("自動辨識的歌詞不夠準確（" + "、".join(q["reasons"]) + "），已先留白。建議用練唱畫面的「搜尋線上歌詞」或匯入歌詞檔。")
+    meta["notes"] = notes
     meta["steps"]["lyrics"] = True
-    meta["lyrics_source"] = "whisper"
     meta["language"] = language
+    meta["lyrics_quality"] = q
     write_meta(d, meta)
 
 
@@ -1468,10 +1646,7 @@ def process_song(song_id: str, steps: list[str]):
             step_pitch(d, cfg, report)
         if "lyrics" in steps:
             try:
-                step_lyrics(d, cfg, report)
-                meta = read_meta(d)
-                meta["notes"] = [x for x in meta.get("notes", []) if "歌詞" not in x]
-                write_meta(d, meta)
+                step_lyrics(d, cfg, report)   # 歌詞相關的提示由 step_lyrics 自己更新
             except JobCancelled:
                 meta = read_meta(d)
                 meta["notes"] = [x for x in meta.get("notes", []) if "歌詞" not in x] + [
@@ -1583,7 +1758,7 @@ def similarity(recognized: str, candidate: str) -> float | None:
     return round(sum(x.size for x in m.get_matching_blocks()) / len(a), 3)
 
 
-USER_AGENT = "LeihuLiantai/1.4.6 (+https://github.com/LeihuTW/Leihu-singsing)"   # HTTP 標頭只能用英文字
+USER_AGENT = "LeihuLiantai/1.4.7 (+https://github.com/LeihuTW/Leihu-singsing)"   # HTTP 標頭只能用英文字
 
 
 def _http_json(url: str, headers: dict | None = None, timeout: int = 8):
@@ -1721,7 +1896,8 @@ def find_candidates(d: Path, cfg: dict, query: str = "", check=None,
         pool.shutdown(wait=False, cancel_futures=True)
     if not found and errors and len(dead) == len(sites):
         raise UserError("無法連到歌詞網站，請確認網路後再試。")
-    rec = recognized_text(d)
+    reliable = recognition_reliable(meta)
+    rec = recognized_text(d) if reliable else ""
     dur = meta.get("duration")
     to_tw = bool(cfg.get("convert_to_taiwan", True))
     out = []
@@ -1736,22 +1912,138 @@ def find_candidates(d: Path, cfg: dict, query: str = "", check=None,
         c["lines"] = len(lines)
         out.append(c)
 
+    title = _norm(" ".join(filter(None, [meta.get("title"), meta.get("yt_track"), meta.get("yt_artist")])))
+
     def score(c):
-        sim = c["similarity"] if c["similarity"] is not None else 0.3
+        # 歌名吻合度：候選的歌名（與歌手）有多少字出現在這首歌的標題裡；和辨識結果無關
+        tr = _norm(c.get("track") or "")
+        c["title_match"] = round(sum(1 for ch in tr if ch in title) / len(tr), 2) if tr and title else 0.0
         pen = min((c["diff"] or 0) / 30, 0.3) if c["diff"] is not None else 0.1
-        return -(sim - pen + (0.05 if c["synced"] else 0))
+        base = 0.5 * c["title_match"] - pen + (0.08 if c["synced"] else 0)
+        if reliable and c["similarity"] is not None:   # 辨識可靠時，相似度才拿來參考
+            base += c["similarity"]
+        return -base
     out.sort(key=score)
-    return list(dict.fromkeys(tried)), out[:10]
+    return list(dict.fromkeys(tried)), out[:12]
+
+
+def recognition_reliable(meta: dict) -> bool:
+    """自動辨識的歌詞可不可靠。1.4.7 之前辨識的歌沒有這項資料，視為可靠（維持原本的行為）。"""
+    q = meta.get("lyrics_quality")
+    return bool(q.get("ok", True)) if isinstance(q, dict) else not meta.get("lyrics_unreliable")
 
 
 def find_and_store_candidates(d: Path, cfg: dict, check=None) -> None:
     _, cands = find_candidates(d, cfg, check=check)
-    # 至少要有一點像，才請使用者挑選；完全不像的多半是同名的其他歌
-    good = [c for c in cands if c["similarity"] is None or c["similarity"] >= 0.25]
-    (d / "lyrics_candidates.json").write_text(json.dumps(good, ensure_ascii=False), "utf-8")
     meta = read_meta(d)
+    # 候選一律保留給使用者看，不再用辨識結果過濾。是否主動提示「有線上歌詞可選」：
+    # 辨識可靠時看和辨識結果像不像；辨識不可靠（或沒有辨識）時看歌名和長度。
+    if recognition_reliable(meta) and (d / "lyrics_auto.lrc").exists():
+        likely = [c for c in cands if c["similarity"] is None or c["similarity"] >= 0.25]
+    else:
+        likely = [c for c in cands if c.get("title_match", 0) >= 0.5 or (c["diff"] is not None and c["diff"] <= 5)]
+    (d / "lyrics_candidates.json").write_text(json.dumps(cands, ensure_ascii=False), "utf-8")
     if meta.get("lyrics_source") in (None, "whisper"):
-        update_meta(d, lyrics_pending=bool(good))
+        update_meta(d, lyrics_pending=bool(likely))
+
+
+# ---------------------------------------------------------------- 依主唱聲音對時間（不需要辨識結果，任何語言都可以）
+
+def voice_phrases(d: Path, gap: float = 0.35, min_len: float = 0.3) -> list[tuple[float, float]]:
+    """從旋律分析結果找出「有在唱」的段落 (開始, 結束)。"""
+    try:
+        pj = json.loads((d / "pitch.json").read_text("utf-8"))
+    except Exception:
+        return []
+    hop = pj.get("hop", HOP_S)
+    on = np.array([v is not None for v in pj["midi"]])
+    out, i, n = [], 0, len(on)
+    while i < n:
+        if not on[i]:
+            i += 1
+            continue
+        j = i
+        while j < n and on[j]:
+            j += 1
+        a, b = i * hop, j * hop
+        if out and a - out[-1][1] < gap:
+            out[-1] = (out[-1][0], b)
+        else:
+            out.append((a, b))
+        i = j
+    return [(a, b) for a, b in out if b - a >= min_len]
+
+
+def align_synced_to_voice(lines: list[dict], d: Path, cand_dur: float | None, dur: float | None) -> tuple[list[dict], str]:
+    """網站的時間軸和這首歌對不上（版本長度不同）時，找最能對上主唱開口位置的整體位移（與速度比例）。"""
+    ph = voice_phrases(d)
+    if not ph or not lines:
+        return lines, ""
+    onsets = np.array([a for a, _ in ph])
+    ts = np.array([l["t"] for l in lines], dtype=float)
+    scales = [1.0]
+    if cand_dur and dur and 0.8 < dur / cand_dur < 1.25:
+        scales.append(dur / cand_dur)
+
+    def fit(t):
+        k = np.clip(np.searchsorted(onsets, t), 1, len(onsets) - 1)
+        dist = np.minimum(np.abs(t - onsets[k - 1]), np.abs(t - onsets[k]))
+        return float(np.exp(-(dist ** 2) / (2 * 0.3 ** 2)).sum())
+    best = (fit(ts), 1.0, 0.0)
+    for sc in scales:
+        for off in np.arange(-25, 25.01, 0.05):
+            v = fit(ts * sc + off)
+            if v > best[0] + 1e-9:
+                best = (v, sc, float(off))
+    _, sc, off = best
+    out = [{**l, "t": round(max(0.0, l["t"] * sc + off), 2)} for l in lines]
+    return out, f"依主唱的聲音位置調整了網站的時間軸（{off:+.1f} 秒{'、速度比例 %.3f' % sc if sc != 1.0 else ''}）"
+
+
+def align_by_voice(lines: list[str], d: Path, bonus: float = 0.6) -> list[dict]:
+    """只有文字的歌詞：依每句的字數，找出最符合「有唱歌的時間長度」的分句位置（動態規劃）。
+
+    候選的句子開頭是主唱開口的位置（段落開頭、音符開頭）；每句預期唱的時間和字數成正比。
+    和語言無關，但只是估計，通常還需要用「對準目前位置」和逐句調整微調。"""
+    try:
+        pj = json.loads((d / "pitch.json").read_text("utf-8"))
+    except Exception:
+        pj = None
+    if not pj or not lines:
+        return [{"t": round(3.5 * i, 2), "text": t} for i, t in enumerate(lines)]
+    hop = pj.get("hop", HOP_S)
+    on = np.array([v is not None for v in pj["midi"]], dtype=float)
+    cumv = np.concatenate([[0.0], np.cumsum(on)]) * hop          # 累積「有唱歌」的秒數
+    strong = {round(a, 2) for a, _ in voice_phrases(d)}
+    cands = sorted(strong | {round(n[0], 2) for n in pj.get("notes", [])})
+    if len(cands) < len(lines):
+        return [{"t": round(3.5 * i, 2), "text": t} for i, t in enumerate(lines)]
+    C = np.array(cands)
+    is_strong = np.array([c in strong for c in cands])
+    V = np.array([cumv[min(len(cumv) - 1, int(t / hop))] for t in C])
+    end_v = cumv[-1]
+    w = np.array([max(1, len(_norm(t))) for t in lines], float)
+    e = w * (end_v / w.sum())                                     # 每句預期的有聲秒數
+    N, M = len(lines), len(C)
+    cost = np.full((N, M), 1e18)
+    back = np.zeros((N, M), int)
+    cost[0] = 0.02 * V - bonus * is_strong
+    for i in range(1, N):
+        prev = cost[i - 1]
+        for k in range(i, M):
+            js = np.arange(max(i - 1, k - 80), k)
+            c = prev[js] + (V[k] - V[js] - e[i - 1]) ** 2 / (e[i - 1] + 0.5)
+            j = int(np.argmin(c))
+            cost[i, k] = c[j] - bonus * is_strong[k]
+            back[i, k] = js[j]
+    last = cost[N - 1] + 0.3 * (end_v - V - e[N - 1]).clip(min=0) ** 2 / (e[N - 1] + 0.5)
+    k = int(np.argmin(last))
+    idx = [k]
+    for i in range(N - 1, 0, -1):
+        k = back[i, k]
+        idx.append(k)
+    idx.reverse()
+    return [{"t": round(max(0.0, float(C[k]) - 0.1), 2), "text": t} for k, t in zip(idx, lines)]
 
 
 def align_to_recognized(lines: list[str], d: Path) -> list[dict]:
@@ -1831,9 +2123,15 @@ def import_lyrics(d: Path, text: str, cfg: dict, filename: str = "") -> tuple[st
     else:
         lines = [l.strip() for l in text.splitlines() if l.strip()]
         auto = d / "lyrics_auto.lrc"
-        lrc = to_lrc(align_to_recognized(lines, d))
-        how = "歌詞檔沒有時間，已依辨識結果自動對上每一句" if auto.exists() else \
-              "歌詞檔沒有時間，暫時每句間隔 3.5 秒，可以用「跟拍打點」或 Claude 對齊調整"
+        if auto.exists() and recognition_reliable(read_meta(d)):
+            lrc = to_lrc(align_to_recognized(lines, d))
+            how = "歌詞檔沒有時間，已依辨識結果自動對上每一句"
+        elif (d / "pitch.json").exists():
+            lrc = to_lrc(align_by_voice(lines, d))
+            how = "歌詞檔沒有時間，已依主唱有聲音的段落分配每一句，可以用「對準目前位置」和逐句調整微調"
+        else:
+            lrc = to_lrc(align_to_recognized(lines, d))
+            how = "歌詞檔沒有時間，暫時每句間隔 3.5 秒，可以用「跟拍打點」或 Claude 對齊調整"
     if not lrc.strip():
         raise UserError("讀不到歌詞內容，請確認檔案格式（LRC、SRT 或 TXT）")
     if cfg.get("convert_to_taiwan", True) and re.search(r"[\u4e00-\u9fff]", lrc):
@@ -1855,16 +2153,25 @@ def apply_candidate(d: Path, cand: dict) -> tuple[str, str]:
     synced = cand.get("synced") or ""
     plain_lines = [l.strip() for l in (cand.get("plain") or "").splitlines() if l.strip()]
     diff = abs(cand["duration"] - dur) if (cand.get("duration") and dur) else None
+    reliable = recognition_reliable(meta) and (d / "lyrics_auto.lrc").exists()
     if synced and (diff is None or diff <= 3):
         lines = [l for l in parse_lrc(synced) if l["t"] is not None and l["text"]]
         how = "使用網站提供的時間軸"
+    elif synced:
+        # 網站有時間軸、但版本長度不同：不靠辨識結果，改依主唱的聲音位置整體平移
+        lines = [l for l in parse_lrc(synced) if l["t"] is not None and l["text"]]
+        lines, how = align_synced_to_voice(lines, d, cand.get("duration"), dur)
+        how = how or "使用網站提供的時間軸（版本長度不同，可能需要用「對準目前位置」微調）"
     else:
-        if not plain_lines:
-            plain_lines = [l["text"] for l in parse_lrc(synced) if l["text"]]
-        lines = align_to_recognized(plain_lines, d)
-        how = "依辨識結果的時間自動對齊" + ("（網站的時間軸和這首歌長度不同）" if synced else "")
+        if reliable:
+            lines = align_to_recognized(plain_lines, d)
+            how = "依辨識結果的時間自動對齊"
+        else:
+            lines = align_by_voice(plain_lines, d)
+            how = "依主唱有聲音的段落分配時間（建議用「對準目前位置」和逐句調整微調）"
     lrc = to_lrc(lines)
     (d / "lyrics.lrc").write_text(lrc, "utf-8")
+    (d / "lyrics_online.lrc").write_text(lrc, "utf-8")   # 線上歌詞另外保存，和辨識結果互不影響
     meta = read_meta(d)
     meta["steps"]["lyrics"] = True
     meta["lyrics_source"] = "online"

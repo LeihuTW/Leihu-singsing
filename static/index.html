@@ -8,7 +8,7 @@
 </head>
 <body>
 <header class="bar">
-  <span class="logo">雷虎練唱台<small id="ver">1.4.6</small></span>
+  <span class="logo">雷虎練唱台<small id="ver">1.4.7</small></span>
   <nav class="row">
     <button id="nav-lib" class="tab cur">歌曲庫</button>
     <button id="nav-practice" class="tab" disabled>練唱</button>
@@ -161,11 +161,29 @@
 
       <div class="panel">
         <h2>歌詞</h2>
+        <div id="lyr-warn" class="cand warn-box" hidden>
+          <b>自動辨識的歌詞不夠準確，已先留白</b>
+          <span id="lyr-warn-why" class="hint"></span>
+          <div class="row"><button id="lyr-warn-search" class="primary">搜尋線上歌詞</button><button id="lyr-warn-import" class="ghost">匯入歌詞檔</button><button id="lyr-warn-show" class="ghost">仍然使用辨識結果</button></div>
+        </div>
+        <div id="lyr-src" class="row lyr-src">
+          <span class="hint">目前使用：<b id="lyr-src-name">—</b></span>
+          <button id="use-auto" class="ghost" hidden>改用辨識結果</button>
+          <button id="use-online" class="ghost" hidden>改用線上歌詞</button>
+        </div>
+        <div class="row lyr-src">
+          <label for="lyr-lang" class="hint">這首的辨識語言</label>
+          <select id="lyr-lang" aria-label="這首歌的辨識語言">
+            <option value="__cfg">依設定</option><option value="">自動判斷</option><option value="zh">中文</option>
+            <option value="ja">日文</option><option value="en">英文</option><option value="ko">韓文</option><option value="yue">粵語</option>
+          </select>
+          <button id="lyr-redo" class="ghost" title="用選的語言重新辨識；目前用的線上或匯入的歌詞不會被覆蓋">重新辨識歌詞</button>
+        </div>
         <div id="cand-box" class="cand" hidden>
           <b>找到線上歌詞，選一版使用</b>
-          <span class="hint">相似度是和自動辨識結果比對的程度，越高越可能是同一首歌、同一個版本。</span>
+          <span id="cand-hint" class="hint">相似度是和自動辨識結果比對的程度，越高越可能是同一首歌、同一個版本。</span>
           <div id="cand-list" class="ls-results"></div>
-          <div class="row"><button id="cand-keep" class="ghost">都不用，保留辨識結果</button></div>
+          <div class="row"><button id="cand-keep" class="ghost">都不用</button></div>
         </div>
         <div class="first-line">
           <div class="row">
@@ -183,7 +201,6 @@
         <div class="row">
           <button id="lrc-save">儲存歌詞</button>
           <button id="tap-start">跟拍打點</button>
-          <button id="lrc-auto" class="ghost">還原辨識結果</button>
           <button id="lrc-import" class="ghost" title="匯入 LRC、SRT 或 TXT 歌詞檔">匯入歌詞檔</button>
           <input id="lrc-file" type="file" accept=".lrc,.srt,.txt,text/plain" hidden>
         </div>
@@ -349,7 +366,7 @@
       </select></label>
     <label class="field"><span>歌詞語言</span>
       <select id="cfg-lang">
-        <option value="zh">中文</option><option value="">自動判斷</option>
+        <option value="">自動判斷（建議）</option><option value="zh">中文</option>
         <option value="en">英文</option><option value="ja">日文</option><option value="ko">韓文</option>
       </select></label>
     <label class="row"><input id="cfg-tw" type="checkbox"> 中文歌詞轉成台灣繁體用字</label>
