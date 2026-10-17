@@ -268,8 +268,165 @@ def clean_youtube_url(url: str) -> str:
     return f"https://www.youtube.com/watch?v={vid}"
 
 
-def new_youtube_song(url: str) -> str:
-    return _blank_song("YouTube 下載中…", source_url=url)
+# ---------------------------------------------------------------- 批次匯入（多個網址、歌單、歌名搜尋、Excel）
+
+BATCH_MAX = 200
+
+
+def _ydl():
+    import yt_dlp
+    return yt_dlp.YoutubeDL({"quiet": True, "no_warnings": True, "skip_download": True,
+                             "extract_flat": "in_playlist", "socket_timeout": 20})
+
+
+def _entry(e: dict) -> dict:
+    vid = e.get("id") or ""
+    return {"id": vid, "url": f"https://www.youtube.com/watch?v={vid}", "title": e.get("title") or "",
+            "duration": e.get("duration"), "channel": e.get("channel") or e.get("uploader") or ""}
+
+
+def _playlist_id(line: str) -> str | None:
+    from urllib.parse import parse_qs, urlparse
+    u = urlparse(line if "://" in line else "https://" + line)
+    if (u.hostname or "").lower() not in YOUTUBE_HOSTS:
+        return None
+    lid = (parse_qs(u.query).get("list") or [""])[0]
+    # RD 開頭是 YouTube 自動產生的「合輯」，不是真的歌單：只取那一首
+    if lid and not lid.startswith("RD") and (u.path.startswith("/playlist") or lid):
+        return lid
+    return None
+
+
+def resolve_line(line: str) -> list[dict]:
+    """把一行輸入變成要下載的影片清單：影片網址、歌單網址，或「歌手 歌名」（到 YouTube 搜尋第一筆）。"""
+    line = re.sub(r"\s+", " ", line.replace("\t", " ")).strip()
+    if not line:
+        return []
+    is_url = re.match(r"^(https?://)?([\w-]+\.)*(youtube\.com|youtu\.be)/", line, re.I)
+    with _ydl() as ydl:
+        if is_url and _playlist_id(line):
+            info = ydl.extract_info(f"https://www.youtube.com/playlist?list={_playlist_id(line)}", download=False)
+            items = [_entry(e) for e in (info.get("entries") or []) if e and e.get("id")]
+            for it in items:
+                it["from"] = f"歌單：{info.get('title') or ''}"
+            return items[:BATCH_MAX]
+        if is_url:
+            url = clean_youtube_url(line)
+            try:
+                info = ydl.extract_info(url, download=False, process=False)
+                it = _entry(info)
+            except Exception:
+                it = {"id": url[-11:], "url": url, "title": "", "duration": None, "channel": ""}
+            return [it]
+        info = ydl.extract_info(f"ytsearch1:{line}", download=False)
+        items = [_entry(e) for e in (info.get("entries") or []) if e and e.get("id")]
+        for it in items:
+            it["from"] = f"搜尋：{line}"
+        return items[:1]
+
+
+def resolve_lines(lines: list[str]) -> list[dict]:
+    """多行一起解析（同時查 4 行）。每一行的結果依原本順序排好；失敗的行也會列出來，附上原因。"""
+    from concurrent.futures import ThreadPoolExecutor
+    lines = [l for l in (x.strip() for x in lines) if l][:BATCH_MAX]
+    existing = {m.get("source_url"): m.get("title") for m in list_songs() if m.get("source_url")}
+
+    def one(line):
+        try:
+            items = resolve_line(line)
+            return [dict(it, input=line) for it in items] or [{"input": line, "error": "找不到符合的影片"}]
+        except UserError as e:
+            return [{"input": line, "error": str(e)}]
+        except Exception as e:
+            log_error(f"resolve({line})", e)
+            return [{"input": line, "error": f"查詢失敗：{type(e).__name__}"}]
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        groups = list(pool.map(one, lines))
+    out, seen = [], set()
+    for g in groups:
+        for it in g:
+            if it.get("url"):
+                it["dup"] = existing.get(it["url"]) or ("（清單裡重複）" if it["url"] in seen else None)
+                seen.add(it["url"])
+            out.append(it)
+    return out[:BATCH_MAX]
+
+
+def read_sheet(data: bytes, name: str) -> list[str]:
+    """讀 Excel（.xlsx）或 CSV：有「歌手」「曲名」欄位就組成「歌手 曲名」，否則把每一列的文字接起來。"""
+    import csv
+    import io
+    ext = Path(name).suffix.lower()
+    rows: list[list[str]] = []
+    if ext == ".xlsx":
+        import zipfile
+        import xml.etree.ElementTree as ET
+        ns = {"m": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
+        try:
+            z = zipfile.ZipFile(io.BytesIO(data))
+        except zipfile.BadZipFile:
+            raise UserError("讀不到這個 Excel 檔，請另存成 .xlsx 或 .csv 再試")
+        shared = []
+        if "xl/sharedStrings.xml" in z.namelist():
+            for si in ET.fromstring(z.read("xl/sharedStrings.xml")).findall("m:si", ns):
+                shared.append("".join(t.text or "" for t in si.iter("{%s}t" % ns["m"])))
+        sheets = sorted(n for n in z.namelist() if re.fullmatch(r"xl/worksheets/sheet\d+\.xml", n))
+        if not sheets:
+            raise UserError("Excel 檔裡沒有工作表")
+        first = "xl/worksheets/sheet1.xml" if "xl/worksheets/sheet1.xml" in sheets else sheets[0]
+        for r in ET.fromstring(z.read(first)).iter("{%s}row" % ns["m"]):
+            cells = {}
+            for c in r.findall("m:c", ns):
+                ref = re.match(r"([A-Z]+)", c.get("r", "A"))
+                col = 0
+                for ch in ref.group(1):
+                    col = col * 26 + ord(ch) - 64
+                t, v = c.get("t"), c.find("m:v", ns)
+                if t == "s" and v is not None:
+                    val = shared[int(v.text)]
+                elif t == "inlineStr":
+                    val = "".join(x.text or "" for x in c.iter("{%s}t" % ns["m"]))
+                else:
+                    val = v.text if v is not None else ""
+                cells[col] = (val or "").strip()
+            if cells:
+                rows.append([cells.get(i, "") for i in range(1, max(cells) + 1)])
+    elif ext in (".csv", ".txt", ".tsv"):
+        text = None
+        for enc in ("utf-8-sig", "big5", "gbk"):
+            try:
+                text = data.decode(enc)
+                break
+            except UnicodeDecodeError:
+                continue
+        if text is None:
+            raise UserError("讀不到這個檔案的文字編碼")
+        dialect = "excel-tab" if ext == ".tsv" or ("\t" in text and "," not in text) else "excel"
+        rows = [[c.strip() for c in r] for r in csv.reader(io.StringIO(text), dialect=dialect)]
+    elif ext == ".xls":
+        raise UserError("舊版 Excel（.xls）請先另存成 .xlsx 或 .csv")
+    else:
+        raise UserError("只支援 .xlsx、.csv 或 .txt")
+    rows = [r for r in rows if any(r)]
+    if not rows:
+        return []
+    head = [c.lower() for c in rows[0]]
+    find = lambda keys: next((i for i, c in enumerate(head) if any(k in c for k in keys)), None)
+    ai = find(["歌手", "演唱", "藝人", "artist", "singer"])
+    ti = find(["曲名", "歌名", "歌曲", "標題", "title", "song", "name"])
+    out = []
+    if ai is not None or ti is not None:
+        for r in rows[1:]:
+            parts = [r[i] for i in (ai, ti) if i is not None and i < len(r) and r[i]]
+            if parts:
+                out.append(" ".join(parts))
+    else:
+        out = [" ".join(c for c in r if c) for r in rows]
+    return out[:BATCH_MAX]
+
+
+def new_youtube_song(url: str, title: str = "") -> str:
+    return _blank_song((title + "（排隊下載）") if title else "YouTube 下載中…", source_url=url)
 
 
 def _upgrade_ytdlp() -> None:
@@ -320,7 +477,8 @@ def step_youtube(d: Path, url: str, report) -> None:
     report("取得影片資訊", 0.01)
     code, title, err = attempt()
     if code:
-        if re.search(r"Private video|unavailable|Sign in|members-only|age", err):
+        if re.search(r"Private video|Video unavailable|This video is unavailable|members-only|"
+                     r"confirm your age|age-restricted|age restricted", err):
             raise UserError(f"這部影片無法下載（可能是私人、會員限定或需要登入）：{err.strip()[-200:]}")
         report("下載失敗，更新 yt-dlp 後重試", 0.02)
         _upgrade_ytdlp()
@@ -1535,19 +1693,41 @@ class Jobs:
     """一次只跑一個重工作，避免記憶體爆掉。"""
 
     def __init__(self):
-        self.q: queue.Queue = queue.Queue()
+        self.pending: list[tuple[str, object]] = []   # 排隊中的工作（可以調整順序）
         self.state: dict[str, dict] = {}
         self.lock = threading.Lock()
+        self.cv = threading.Condition(self.lock)
         threading.Thread(target=self._run, daemon=True).start()
 
     def submit(self, kind: str, song_id: str, fn, label: str = "") -> str:
         jid = uuid.uuid4().hex[:10]
-        with self.lock:
+        with self.cv:
             self.state[jid] = {"id": jid, "kind": kind, "song": song_id, "label": label,
                                "status": "queued", "step": "排隊中", "progress": 0.0,
                                "error": None, "created": time.time()}
-        self.q.put((jid, fn))
+            self.pending.append((jid, fn))
+            self.cv.notify()
         return jid
+
+    def move(self, jid: str, delta: int) -> bool:
+        """調整排隊順序：delta = -1 往前、+1 往後（只在還沒開始的工作之間移動）。"""
+        with self.lock:
+            ids = [j for j, _ in self.pending if self.state[j]["status"] == "queued"]
+            if jid not in ids:
+                return False
+            i = ids.index(jid)
+            k = i + (1 if delta > 0 else -1)
+            if not 0 <= k < len(ids):
+                return False
+            a = next(n for n, (j, _) in enumerate(self.pending) if j == jid)
+            b = next(n for n, (j, _) in enumerate(self.pending) if j == ids[k])
+            self.pending[a], self.pending[b] = self.pending[b], self.pending[a]
+            return True
+
+    def order(self) -> dict[str, int]:
+        with self.lock:
+            ids = [j for j, _ in self.pending if self.state[j]["status"] == "queued"]
+        return {j: n for n, j in enumerate(ids)}
 
     def update(self, jid: str, **kw) -> None:
         with self.lock:
@@ -1560,9 +1740,13 @@ class Jobs:
 
     def active(self) -> list[dict]:
         cutoff = time.time() - 600
+        order = self.order()
         with self.lock:
-            return [dict(j) for j in self.state.values() if j["status"] != "cancelled"
-                    and (j["status"] in ("queued", "running") or j["created"] > cutoff)]
+            out = [dict(j, order=order.get(j["id"])) for j in self.state.values() if j["status"] != "cancelled"
+                   and (j["status"] in ("queued", "running") or j["created"] > cutoff)]
+        # 執行中的在前，排隊中的依目前順序
+        return sorted(out, key=lambda j: (j["status"] != "running", j["order"] if j["order"] is not None else -1,
+                                          j["created"]))
 
     def cancel_queued(self, kind: str, song_id: str, keep_label: str) -> int:
         """取消同一首歌還在排隊、但已經不需要的工作（例如連按好幾次 KEY 時中間的那些）。"""
@@ -1599,8 +1783,13 @@ class Jobs:
             me = self.state.get(jid)
             if not me or me["status"] != "queued":
                 return 0
-            return sum(1 for j in self.state.values()
-                       if j["status"] in ("queued", "running") and j["created"] < me["created"])
+            ahead = 0
+            for j, _ in self.pending:
+                if j == jid:
+                    break
+                if self.state[j]["status"] == "queued":
+                    ahead += 1
+            return ahead + sum(1 for j in self.state.values() if j["status"] == "running")
 
     def find(self, kind: str, song_id: str, label: str = "") -> str | None:
         with self.lock:
@@ -1612,7 +1801,10 @@ class Jobs:
 
     def _run(self):
         while True:
-            jid, fn = self.q.get()
+            with self.cv:
+                while not self.pending:
+                    self.cv.wait()
+                jid, fn = self.pending.pop(0)
             if self.get(jid)["status"] == "cancelled":
                 continue
             self.update(jid, status="running", step="開始")
@@ -1758,7 +1950,7 @@ def similarity(recognized: str, candidate: str) -> float | None:
     return round(sum(x.size for x in m.get_matching_blocks()) / len(a), 3)
 
 
-USER_AGENT = "LeihuLiantai/1.4.7 (+https://github.com/LeihuTW/Leihu-singsing)"   # HTTP 標頭只能用英文字
+USER_AGENT = "LeihuLiantai/1.4.8 (+https://github.com/LeihuTW/Leihu-singsing)"   # HTTP 標頭只能用英文字
 
 
 def _http_json(url: str, headers: dict | None = None, timeout: int = 8):

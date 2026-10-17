@@ -8,7 +8,7 @@
 </head>
 <body>
 <header class="bar">
-  <span class="logo">雷虎練唱台<small id="ver">1.4.7</small></span>
+  <span class="logo">雷虎練唱台<small id="ver">1.4.8</small></span>
   <nav class="row">
     <button id="nav-lib" class="tab cur">歌曲庫</button>
     <button id="nav-practice" class="tab" disabled>練唱</button>
@@ -32,6 +32,7 @@
       <label for="yt-url" class="yt-label">YouTube</label>
       <input id="yt-url" type="text" inputmode="url" autocomplete="off" placeholder="https://www.youtube.com/watch?v=…">
       <button id="yt-go" type="submit">下載並分析</button>
+      <button id="batch-open" type="button" class="ghost" title="一次加入多首：多個網址、歌單網址、歌手＋歌名，或 Excel 歌單">批次加入</button>
       <span id="yt-msg" class="hint"></span>
     </form>
     <div id="drop" class="drop">把音訊檔拖到這裡。匯入後會自動分離主唱、合音、伴奏，分析旋律並辨識歌詞。</div>
@@ -122,6 +123,14 @@
         </div>
         <div id="faders" class="detail"></div>
         <label class="row hint" title="每首歌的音量差很多時，自動調到差不多大聲（不會改動原始檔）"><input id="norm-vol" type="checkbox" checked> 音量標準化 <span id="norm-db" class="num"></span></label>
+        <div id="mix-export" class="mix-export" hidden>
+          <div class="row">
+            <select id="mx-fmt" aria-label="匯出格式"><option value="mp3">MP3</option><option value="wav">WAV</option></select>
+            <button id="mx-go">匯出調整後的音訊</button>
+            <button id="mx-show" class="ghost" hidden>顯示檔案</button>
+          </div>
+          <span id="mx-msg" class="hint">依目前的 KEY、速度和主唱／合音／伴奏音量（含音量標準化）匯出；把主唱拉到 0 就是伴奏。不含導引音和你的錄音。</span>
+        </div>
         <p class="hint">「練唱」會把主唱調小、打開旋律導引音。移調和變速在本機算好後會存起來，下次切換不用再等。</p>
       </div>
 
@@ -312,6 +321,26 @@
       </div>
     </div>
     <div class="row" style="justify-content:flex-end"><button id="sh-close" class="ghost">關閉</button></div>
+  </div>
+</div>
+
+<div id="batch-dlg" class="modal" hidden>
+  <div class="sheet batch-sheet" role="dialog" aria-modal="true" aria-labelledby="batch-title">
+    <h1 id="batch-title">批次加入歌曲</h1>
+    <p class="hint">每行一首，可以混著輸入：YouTube 影片網址、歌單網址（會加入歌單裡的每一首），或「歌手 歌名」（會到 YouTube 搜尋第一筆結果）。也可以直接從 Excel 複製「歌手、曲名」兩欄貼上，或匯入 .xlsx／.csv 檔。</p>
+    <textarea id="batch-text" rows="7" placeholder="https://www.youtube.com/watch?v=…&#10;https://www.youtube.com/playlist?list=…&#10;周杰倫 晴天&#10;YOASOBI 夜に駆ける"></textarea>
+    <div class="row">
+      <button id="batch-resolve" class="primary">查詢</button>
+      <label class="btn ghost">匯入 Excel／CSV<input id="batch-file" type="file" accept=".xlsx,.csv,.txt,.tsv" hidden></label>
+      <span id="batch-msg" class="hint"></span>
+    </div>
+    <div id="batch-list" class="batch-list"></div>
+    <div class="row" id="batch-actions" hidden>
+      <label class="hint"><input id="batch-all" type="checkbox" checked> 全選</label>
+      <button id="batch-add" class="primary">加入下載佇列</button>
+      <span class="hint">依清單順序下載與處理，之後也可以在歌曲庫上方用 ▲▼ 調整順序。請只下載你有權使用的內容。</span>
+    </div>
+    <div class="row" style="justify-content:flex-end"><button id="batch-close" class="ghost">關閉</button></div>
   </div>
 </div>
 

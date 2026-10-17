@@ -264,6 +264,11 @@ $("#yt-form").addEventListener("submit", async e => {
   const url = inp.value.trim();
   msg.classList.remove("err");
   if (!url) { msg.textContent = "先貼上 YouTube 影片網址"; msg.classList.add("err"); return; }
+  // 歌單網址或不是網址（歌手＋歌名）：交給批次加入
+  if (/[?&]list=(?!RD)/.test(url) || !/youtu\.?be/i.test(url)) {
+    $("#batch-text").value = url; inp.value = "";
+    $("#batch-dlg").hidden = false; $("#batch-resolve").click(); return;
+  }
   btn.disabled = true; msg.textContent = "加入佇列…";
   try {
     await api("/api/youtube", { json: { url, category: importCategory() } });
@@ -272,6 +277,76 @@ $("#yt-form").addEventListener("submit", async e => {
   } catch (err) { msg.textContent = err.message; msg.classList.add("err"); }
   finally { btn.disabled = false; }
 });
+/* 1.4.8：批次加入（多個網址、歌單、歌手＋歌名、Excel） */
+const BATCH = { items: [] };
+function fmtDur(v) { return v ? `${Math.floor(v / 60)}:${String(Math.round(v % 60)).padStart(2, "0")}` : ""; }
+function renderBatch() {
+  const box = $("#batch-list"); box.innerHTML = "";
+  BATCH.items.forEach((it, i) => {
+    const el = document.createElement("div");
+    el.className = "batch-item" + (it.error ? " bad" : "");
+    el.innerHTML = `<input type="checkbox" ${it.on ? "checked" : ""} ${it.error ? "disabled" : ""} aria-label="加入這首">
+      <span class="mv"><button class="ghost" data-d="-1" aria-label="往前">▲</button><button class="ghost" data-d="1" aria-label="往後">▼</button></span>
+      <div><div class="t"></div><div class="s"></div></div><span class="num hint"></span>`;
+    $(".t", el).textContent = it.error ? it.input : (it.title || it.url);
+    $(".s", el).textContent = it.error ? it.error
+      : [it.channel, it.from, it.dup ? `已在歌曲庫：${it.dup}` : ""].filter(Boolean).join("・");
+    $(".num", el).textContent = fmtDur(it.duration);
+    $("input", el).onchange = e => { it.on = e.target.checked; syncBatch(); };
+    $$(".mv button", el).forEach(b => (b.onclick = () => {
+      const k = i + +b.dataset.d;
+      if (k < 0 || k >= BATCH.items.length) return;
+      [BATCH.items[i], BATCH.items[k]] = [BATCH.items[k], BATCH.items[i]]; renderBatch();
+    }));
+    box.appendChild(el);
+  });
+  syncBatch();
+}
+function syncBatch() {
+  const n = BATCH.items.filter(it => it.on && !it.error).length;
+  $("#batch-actions").hidden = !BATCH.items.length;
+  $("#batch-add").textContent = `加入下載佇列（${n} 首）`;
+  $("#batch-add").disabled = !n;
+}
+$("#batch-open").onclick = () => { $("#batch-dlg").hidden = false; $("#batch-text").focus(); };
+$("#batch-close").onclick = () => { $("#batch-dlg").hidden = true; };
+$("#batch-all").onchange = e => { BATCH.items.forEach(it => { if (!it.error) it.on = e.target.checked; }); renderBatch(); };
+$("#batch-resolve").onclick = async () => {
+  const lines = $("#batch-text").value.split(/\r?\n/).map(x => x.trim()).filter(Boolean);
+  if (!lines.length) return toast("先輸入網址或歌名");
+  const btn = $("#batch-resolve"); btn.disabled = true;
+  $("#batch-msg").textContent = `查詢 ${lines.length} 行中，歌單和搜尋需要一點時間…`;
+  try {
+    const r = await api("/api/youtube/resolve", { json: { lines } });
+    BATCH.items = r.items.map(it => ({ ...it, on: !it.error && !it.dup }));
+    const bad = r.items.filter(it => it.error).length, dup = r.items.filter(it => it.dup).length;
+    $("#batch-msg").textContent = `找到 ${r.items.length - bad} 首` + (dup ? `，${dup} 首已經有了（預設不勾）` : "") + (bad ? `，${bad} 行找不到` : "") + "。搜尋到的歌請確認標題是不是你要的版本。";
+    renderBatch();
+  } catch (e) { $("#batch-msg").textContent = e.message; }
+  finally { btn.disabled = false; }
+};
+$("#batch-file").onchange = async e => {
+  const f = e.target.files[0]; e.target.value = "";
+  if (!f) return;
+  const fd = new FormData(); fd.append("file", f);
+  try {
+    const r = await api("/api/youtube/sheet", { method: "POST", body: fd });
+    if (!r.lines.length) return toast("檔案裡沒有讀到歌曲");
+    const cur = $("#batch-text").value.trim();
+    $("#batch-text").value = (cur ? cur + "\n" : "") + r.lines.join("\n");
+    $("#batch-msg").textContent = `從「${f.name}」讀到 ${r.lines.length} 首，按「查詢」到 YouTube 找對應的影片。`;
+  } catch (err) { toast(err.message); }
+};
+$("#batch-add").onclick = async () => {
+  const items = BATCH.items.filter(it => it.on && !it.error).map(it => ({ url: it.url, title: it.title }));
+  try {
+    const r = await api("/api/youtube/batch", { json: { items, category: importCategory() } });
+    toast(`已加入 ${r.added} 首到下載佇列` + (r.skipped ? `（${r.skipped} 首已經有了，略過）` : ""), 4000);
+    BATCH.items = []; renderBatch(); $("#batch-text").value = ""; $("#batch-msg").textContent = "";
+    $("#batch-dlg").hidden = true; loadSongs(); pollJobs();
+  } catch (e) { toast(e.message); }
+};
+
 $("#yt-url").addEventListener("input", () => { $("#yt-msg").textContent = ""; $("#yt-msg").classList.remove("err"); });
 $("#import").onchange = e => { importFiles([...e.target.files]); e.target.value = ""; };
 const drop = $("#drop");
@@ -313,9 +388,14 @@ async function pollJobs() {
     const el = document.createElement("div");
     el.className = "job" + (j.status === "error" ? " error" : "");
     el.innerHTML = `<span class="lbl"></span><span class="num">${j.status === "error" ? "" : Math.round(j.progress * 100) + "%"}</span>
-      ${j.status === "error" ? `<button class="ghost job-x" title="關閉這則訊息" aria-label="關閉這則訊息">✕</button>`
-        : `<button class="ghost job-stop" title="停止處理這首歌；已經完成的步驟會保留">${j.status === "queued" ? "取消" : "停止"}</button>`}
+      <span class="acts">${j.status === "error" ? `<button class="ghost job-x" title="關閉這則訊息" aria-label="關閉這則訊息">✕</button>`
+        : (j.status === "queued" ? `<button class="ghost job-mv" data-d="-1" title="往前移" aria-label="往前移">▲</button><button class="ghost job-mv" data-d="1" title="往後移" aria-label="往後移">▼</button>` : "")
+          + `<button class="ghost job-stop" title="停止處理這首歌；已經完成的步驟會保留">${j.status === "queued" ? "取消" : "停止"}</button>`}</span>
       <div class="meter"><i style="width:${Math.round(j.progress * 100)}%"></i></div>${j.error ? `<div class="err"></div>` : ""}`;
+    $$(".job-mv", el).forEach(b => (b.onclick = async () => {
+      try { await api(`/api/jobs/${j.id}/move`, { json: { delta: +b.dataset.d } }); } catch (e) { toast(e.message); }
+      pollJobs();
+    }));
     const x = $(".job-x", el);
     if (x) x.onclick = () => { jobHidden.add(j.id); el.remove(); };
     const stop = $(".job-stop", el);
@@ -328,7 +408,7 @@ async function pollJobs() {
         pollJobs();
       };
     }
-    $(".lbl", el).textContent = `${songTitle(j.song)}：${j.status === "queued" ? "排隊中" : j.step}`;
+    $(".lbl", el).textContent = `${j.status === "queued" && j.order != null ? `#${j.order + 1} ` : ""}${songTitle(j.song)}：${j.status === "queued" ? "排隊中" : j.step}`;
     if (j.error) $(".err", el).textContent = j.error;
     box.appendChild(el);
   }
@@ -602,6 +682,40 @@ function syncNormUi() {
     ? `這首 ${S.song.lufs.toFixed(1)} LUFS，${S.normVol ? (db >= 0 ? "+" : "") + db.toFixed(1) + " dB" : "未調整"}` : "";
   if (S.bus) S.bus.gain.value = Math.pow(10, normGain() / 20);
 }
+/* 隱藏功能：在「關於開發者」點 LINE Pay 圖片 10 下開啟／關閉「匯出調整後的音訊」 */
+S.mixExport = store.get("mixExport", false);
+function syncMixExport() { $("#mix-export").hidden = !S.mixExport; }
+syncMixExport();
+(() => {
+  const img = document.querySelector(".about-pay");
+  if (!img) return;
+  let n = 0, last = 0;
+  img.addEventListener("click", () => {
+    const now = Date.now();
+    n = now - last > 2000 ? 1 : n + 1;   // 兩下之間超過 2 秒就重新計算
+    last = now;
+    if (n >= 10) {
+      n = 0;
+      S.mixExport = !S.mixExport; store.set("mixExport", S.mixExport); syncMixExport();
+      toast(S.mixExport ? "已開啟隱藏功能：「分軌與混音」下方可以匯出調整後的音訊" : "已關閉隱藏功能", 4000);
+    }
+  });
+})();
+let mixPath = "";
+$("#mx-go").onclick = async () => {
+  if (!S.song) return;
+  const btn = $("#mx-go"), msg = $("#mx-msg");
+  btn.disabled = true; $("#mx-show").hidden = true; msg.textContent = "匯出中…";
+  try {
+    const r = await api(`/api/songs/${S.song.id}/mixdown`, { json: {
+      key: S.key, speed: S.speed, fmt: $("#mx-fmt").value, norm: S.normVol,
+      vol: { lead: S.vol.lead, back: S.vol.back, inst: S.vol.inst } } });
+    await waitJob(r.job);
+    mixPath = r.file; msg.textContent = `已存到：${r.file}`; $("#mx-show").hidden = false;
+  } catch (e) { msg.textContent = e.message; }
+  finally { btn.disabled = false; }
+};
+$("#mx-show").onclick = () => mixPath && api("/api/reveal", { json: { path: mixPath } }).catch(e => toast(e.message));
 $("#norm-vol").onchange = e => { S.normVol = e.target.checked; store.set("normVol", S.normVol); syncNormUi(); };
 function startNode(k, buf, when, pos) {
   const c = ac();

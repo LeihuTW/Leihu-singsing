@@ -18,7 +18,7 @@ import claude_api as C
 import pipeline as P
 import share as SH
 
-VERSION = "1.4.7"
+VERSION = "1.4.8"
 HOST, PORT = "127.0.0.1", int(os.environ.get("LIANTAI_PORT", "8765"))
 app = Flask(__name__, static_folder=str(P.ROOT / "static"), static_url_path="/static")
 app.config["MAX_CONTENT_LENGTH"] = 1024 * 1024 * 1024
@@ -126,6 +126,108 @@ def add_youtube():
         P.update_meta(P.song_dir(sid), category=cat)
     jid = jobs.submit("process", sid, P.youtube_job(sid, url), label="youtube")
     return jsonify(id=sid, job=jid)
+
+
+@app.post("/api/youtube/resolve")
+def youtube_resolve():
+    """批次匯入：把多行輸入（影片網址、歌單網址、歌手＋歌名）解析成影片清單，讓使用者確認。"""
+    lines = (request.get_json(force=True) or {}).get("lines") or []
+    if not isinstance(lines, list):
+        raise P.UserError("格式不正確")
+    return jsonify(items=P.resolve_lines([str(x) for x in lines]))
+
+
+@app.post("/api/youtube/batch")
+def youtube_batch():
+    """把確認好的影片依順序加入下載佇列。"""
+    body = request.get_json(force=True) or {}
+    cat = body.get("category") or None
+    if cat not in P.load_categories():
+        cat = None
+    existing = {m.get("source_url") for m in P.list_songs() if m.get("steps", {}).get("import")}
+    added, skipped = [], 0
+    for it in (body.get("items") or [])[:P.BATCH_MAX]:
+        try:
+            url = P.clean_youtube_url(it.get("url", ""))
+        except P.UserError:
+            skipped += 1
+            continue
+        if url in existing:
+            skipped += 1
+            continue
+        existing.add(url)
+        sid = P.new_youtube_song(url, str(it.get("title") or "")[:100])
+        if cat:
+            P.update_meta(P.song_dir(sid), category=cat)
+        jobs.submit("process", sid, P.youtube_job(sid, url), label="youtube")
+        added.append(sid)
+    return jsonify(added=len(added), skipped=skipped)
+
+
+@app.post("/api/youtube/sheet")
+def youtube_sheet():
+    f = request.files.get("file")
+    if not f:
+        raise P.UserError("沒有收到檔案")
+    data = f.read()
+    if len(data) > 10_000_000:
+        raise P.UserError("檔案太大")
+    return jsonify(lines=P.read_sheet(data, f.filename or ""))
+
+
+@app.post("/api/songs/<sid>/mixdown")
+def mixdown(sid):
+    """隱藏功能：依目前的 KEY、速度、各軌音量（含音量標準化）匯出混音，例如去掉主唱的伴奏。"""
+    d = P.song_dir(sid)
+    body = request.get_json(force=True) or {}
+    key, speed = _key_speed()
+    if not P.variant_ready(d, key, speed):
+        raise P.UserError("這個 KEY／速度的版本還沒準備好，請先播放一次再匯出")
+    import numpy as np
+    import soundfile as sf
+    vol = body.get("vol") or {}
+    gains = {k: min(2.0, max(0.0, float(vol.get(k, 1.0) or 0))) for k in P.STEMS}
+    if not any(gains.values()):
+        raise P.UserError("所有音軌都是靜音，沒有東西可以匯出")
+    fmt = "wav" if body.get("fmt") == "wav" else "mp3"
+    meta = P.read_meta(d)
+    norm = P.norm_gain_db(meta) if body.get("norm") else 0.0
+    kname = f"KEY{key:+d}" if key else "原調"
+    sname = f"_{int(round(speed * 100))}%" if abs(speed - 1) > 1e-3 else ""
+    vname = "伴奏" if gains["lead"] == 0 else "混音"
+    out = P.downloads_dir() / P.APP_NAME / f"{_safe_name(meta.get('title', '歌曲'))[:50]}_{vname}_{kname}{sname}.{fmt}"
+
+    def run(report):
+        report("混音中", 0.2)
+        vd = P.variant_dir(d, key, speed)
+        parts, sr = [], P.SR
+        for k, g in gains.items():
+            if g <= 0:
+                continue
+            y, sr = sf.read(str(vd / f"{k}.wav"), dtype="float32", always_2d=True)
+            y = y.T if y.shape[1] == 2 else np.repeat(y.T, 2, 0)
+            parts.append(y * g)
+        n = min(p.shape[1] for p in parts)
+        mix = sum(p[:, :n] for p in parts) * (10 ** (norm / 20))
+        try:
+            from pedalboard import Limiter
+            mix = Limiter(threshold_db=-1.0, release_ms=80)(np.ascontiguousarray(mix, dtype=np.float32), sr)
+        except ImportError:
+            mix = np.clip(mix, -0.98, 0.98)
+        report("輸出檔案", 0.7)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        SH.export_audio(mix.astype(np.float32), sr, out)
+    jid = jobs.submit("export", sid, run, label="mixdown")
+    return jsonify(job=jid, file=str(out))
+
+
+@app.post("/api/jobs/<jid>/move")
+def job_move(jid):
+    """調整排隊順序（往前／往後一個）。"""
+    delta = int((request.get_json(force=True) or {}).get("delta") or 0)
+    if not jobs.move(jid, delta):
+        raise P.UserError("無法移動（可能已經開始處理）")
+    return jsonify(ok=True)
 
 
 @app.get("/api/songs/<sid>")

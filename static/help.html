@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>雷虎練唱台 1.4.7 使用說明</title>
+<title>雷虎練唱台 1.4.8 使用說明</title>
 <style>
 /* 和程式本體同一套色彩：冷色控台底、琥珀色是原唱旋律、藍色是你的聲音 */
 :root {
@@ -51,7 +51,7 @@ th { color: var(--muted); font-weight: 600; font-size: 13px; }
 <body>
 <div class="wrap">
   <div class="top"><a href="/" id="back">← 回到雷虎練唱台</a></div>
-  <h1>雷虎練唱台 <span class="ver">1.4.7</span></h1>
+  <h1>雷虎練唱台 <span class="ver">1.4.8</span></h1>
 
   <section id="copyright" class="note legal" aria-labelledby="copyright-h">
     <h2 id="copyright-h">版權與使用聲明</h2>
@@ -85,7 +85,7 @@ th { color: var(--muted); font-weight: 600; font-size: 13px; }
 
   <h2 id="install">安裝</h2>
   <ol>
-    <li>雙擊 <code>雷虎練唱台1.4.7.exe</code>（從 GitHub 下載的檔名是 <code>LeihuLiantai-1.4.7-Setup.exe</code>）。已經裝過舊版的，直接安裝新版即可，歌曲庫和設定會保留。</li>
+    <li>雙擊 <code>雷虎練唱台1.4.8.exe</code>（從 GitHub 下載的檔名是 <code>LeihuLiantai-1.4.8-Setup.exe</code>）。已經裝過舊版的，直接安裝新版即可，歌曲庫和設定會保留。</li>
     <li>如果出現藍色的「Windows 已保護您的電腦」，按「其他資訊」，再按「仍要執行」。這是因為安裝程式沒有付費的數位簽章，不是病毒警告。</li>
     <li>選安裝位置（預設即可，不需要系統管理員權限），按「安裝」。</li>
     <li>如果這台電腦裝過雷虎練唱台，會先詢問：
@@ -105,7 +105,9 @@ th { color: var(--muted); font-weight: 600; font-size: 13px; }
     <li><b>拖曳</b>：把音訊檔拖進視窗。</li>
     <li><b>匯入歌曲</b>按鈕：一次可以選多首。支援 mp3、wav、flac、ogg、m4a。</li>
     <li><b>YouTube</b>：貼上影片網址，按「下載並分析」。請只下載你有權使用的內容。</li>
+    <li><b>批次加入</b>：按 YouTube 欄旁的「批次加入」，每行一首，可以混著輸入影片網址、歌單網址（加入歌單裡每一首）或「歌手 歌名」（到 YouTube 搜尋第一筆）。也可以從 Excel 複製「歌手、曲名」兩欄貼上，或按「匯入 Excel／CSV」選 .xlsx／.csv 檔。按「查詢」後確認清單（可以勾選、用 ▲▼ 調整順序），再按「加入下載佇列」。搜尋到的歌請確認是原唱版本，伴奏版沒有主唱，分析不出旋律。</li>
   </ul>
+  <p>下載與處理會依序排隊。歌曲庫上方排隊中的歌可以用 ▲▼ 調整順序，或按「取消」。</p>
   <p>匯入後會自動依序處理：分離主唱／合音／伴奏、分析主唱旋律、辨識歌詞並轉成台灣繁體用字，最後到線上歌詞網站找同一首歌的歌詞來比對（見「歌詞」一節）。進度會顯示在歌曲庫上方，處理時可以繼續練別首歌。處理太久或卡住時，可以按進度旁的「停止」，已經完成的步驟（例如分軌、旋律）會保留；失敗的訊息可以按「✕」關閉。</p>
   <h3>分類與搜尋</h3>
   <ul>
@@ -281,6 +283,11 @@ th { color: var(--muted); font-weight: 600; font-size: 13px; }
   <p>Windows 設定 → 應用程式 → 找到「雷虎練唱台」→ 解除安裝。過程中會問你要不要保留歌曲庫；選「否」就只移除程式，歌曲和錄音會留下來。</p>
 
   <h2 id="changes">版本紀錄</h2>
+  <h3>1.4.8</h3>
+  <p><b>功能新增</b></p>
+  <ul>
+    <li>更新批次匯入</li>
+  </ul>
   <h3>1.4.7</h3>
   <p><b>功能新增</b></p>
   <ul>
@@ -449,7 +456,7 @@ th { color: var(--muted); font-weight: 600; font-size: 13px; }
     <li>初版：AI 分離主唱／合音／伴奏、旋律分析、歌詞辨識與台灣繁體轉換、升降 KEY 與變速、A–B 循環、麥克風即時音高與錄音評分、YouTube 匯入、Claude 歌詞對齊與練習建議、用量與費用顯示、歌詞匯出（LRC／SRT／TXT）、顯示卡加速、桌面程式與安裝程式</li>
   </ul>
 
-  <p class="lede" style="margin-top:40px">雷虎練唱台 1.4.7</p>
+  <p class="lede" style="margin-top:40px">雷虎練唱台 1.4.8</p>
 </div>
 <script>
   // 直接用瀏覽器開啟這份說明時，隱藏「回到程式」的連結
