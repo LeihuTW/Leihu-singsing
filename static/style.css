@@ -293,7 +293,12 @@ a.tab { text-decoration: none; font-size: 14px; }
 .share-sheet { width: min(640px, 100%); }
 #sh-caption { min-height: 72px; font-family: inherit; font-size: 14px; }
 .sh-player { display: flex; gap: 10px; align-items: center; }
-#sh-pos { flex: 1; min-width: 0; }
+#sh-pos { width: 100%; margin: 0; }
+.sh-track { flex: 1; min-width: 0; display: grid; gap: 2px; }
+.sh-region { position: relative; height: 4px; background: var(--lane-k); border-radius: 2px; }
+.sh-region i { position: absolute; top: 0; bottom: 0; left: 0; width: 0; background: var(--voice); border-radius: 2px; }
+.sh-jump { gap: 4px; }
+.sh-jump button { padding: 2px 8px; font-size: 12px; }
 #sh-time { width: 96px; text-align: right; }
 /* 1.4.1：錄音批次刪除 */
 .takes-bar { justify-content: flex-end; }

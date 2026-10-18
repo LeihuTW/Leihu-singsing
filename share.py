@@ -54,7 +54,11 @@ def polish_vocal(v: np.ndarray, sr: int, reverb: str) -> np.ndarray:
         from pedalboard import Compressor, HighpassFilter, Pedalboard, Reverb
     except ImportError:
         return v
-    fx = [HighpassFilter(cutoff_frequency_hz=90), Compressor(threshold_db=-20, ratio=3, attack_ms=5, release_ms=120)]
+    # 先把音量對齊（峰值約 -6 dB），壓縮器才不會因為錄音音量大小不同而壓太多或沒作用；
+    # 輕度壓縮（2.5:1、10 ms 起音）保留歌聲的動態和咬字，不會聽起來扁扁的
+    pk = float(np.percentile(np.abs(v), 99.9)) or 1.0
+    v = v * (0.5 / pk)
+    fx = [HighpassFilter(cutoff_frequency_hz=80), Compressor(threshold_db=-16, ratio=2.5, attack_ms=10, release_ms=150)]
     wet = REVERB.get(reverb, 0.12)
     if wet > 0:
         fx.append(Reverb(room_size=0.45 if reverb != "hall" else 0.7, damping=0.5, wet_level=wet, dry_level=1.0, width=0.9))
@@ -122,6 +126,55 @@ def suggest_balance(d: Path, tid: str, opts: dict | None = None) -> dict:
     return {"vocal_db": r(vocal_db), "back_db": r(back_db), "inst_db": r(inst_db)}
 
 
+EXPORT_LUFS = -14.0       # 匯出成品的響度
+BED_TARGET_LUFS = -17.0   # 合音＋伴奏調到這個響度，歌聲再大約 3 dB，整體約 -14 LUFS（和串流平台差不多）
+
+
+def master_db(d: Path, key: int, speed: float) -> float:
+    """整體音量：依這個 KEY／速度版本的合音＋伴奏響度，算出要加減幾 dB。
+
+    原曲很大聲（例如 -7 LUFS）時先整體調小，再加歌聲就不會被限幅器硬壓（聲音扁、會抽動）；
+    原曲很小聲時整體調大，匯出來才不會比練唱時小聲、單薄。結果存在版本資料夾，只算一次。"""
+    vd = P.variant_dir(d, key, speed)
+    cache = vd / "loudness.json"
+    try:
+        return float(json.loads(cache.read_text("utf-8"))["master_db"])
+    except Exception:
+        pass
+    back, sr = sf.read(str(vd / "back.wav"), dtype="float32", always_2d=True)
+    inst, _ = sf.read(str(vd / "inst.wav"), dtype="float32", always_2d=True)
+    n = min(len(back), len(inst))
+    bed = (back[:n] * _db(-3) + inst[:n]).T
+    lufs = P.integrated_loudness(bed, sr)
+    m = 0.0 if lufs is None else float(np.clip(BED_TARGET_LUFS - lufs, -20.0, 12.0))
+    try:
+        cache.write_text(json.dumps({"bed_lufs": lufs, "master_db": round(m, 2)}), "utf-8")
+    except OSError:
+        pass
+    return round(m, 2)
+
+
+def peak_limit(x: np.ndarray, sr: int, ceiling_db: float = -1.0) -> np.ndarray:
+    """透明的峰值限幅：只在峰值超過上限的瞬間把音量壓下來，其他地方完全不動。
+
+    1.4.9 以前用的 pedalboard Limiter（JUCE）其實是兩段壓縮器：-10 dB 以上就 4:1 壓縮、
+    還會自動加大音量，整首歌被壓得扁扁的，這是匯出音質變差的主要原因。"""
+    from scipy.ndimage import minimum_filter1d, uniform_filter1d
+    x = np.atleast_2d(np.asarray(x, dtype=np.float32))
+    ceil = 10 ** (ceiling_db / 20)
+    amp = np.abs(x).max(axis=0)
+    need = np.minimum(1.0, ceil / np.maximum(amp, 1e-9))          # 每個取樣需要的音量倍率
+    if need.min() >= 1.0:
+        return x
+    g = need
+    for w in (int(0.005 * sr), int(0.06 * sr)):                     # 5 ms 前瞻、60 ms 釋放，平滑不會失真
+        w = max(1, w)
+        g = minimum_filter1d(g, size=2 * w + 1, mode="nearest")
+        g = uniform_filter1d(g, size=w, mode="nearest")
+    g = np.minimum(g, need)                                          # 保證不超過上限
+    return (x * g[None, :]).astype(np.float32)
+
+
 def mix_take(d: Path, tid: str, opts: dict) -> tuple[np.ndarray, int, dict]:
     """回傳 (立體聲混音, 取樣率, 時間資訊)。opts["range"]："full" 整首歌（預設）／"take" 只有錄音的段落。"""
     info = load_take(d, tid)
@@ -137,15 +190,19 @@ def mix_take(d: Path, tid: str, opts: dict) -> tuple[np.ndarray, int, dict]:
         out, start = out[:, a:b], a / sr
     else:
         start = 0.0
+    # 整體音量：把混好的成品調到 -14 LUFS（和串流平台差不多），再確認峰值，
+    # 讓限幅器只需要壓住少數瞬間的峰值，不會整首被壓扁（原曲很大聲時以前會出現聲音扁、抽動）
+    lufs = P.integrated_loudness(out, sr)
+    g = 10 ** ((EXPORT_LUFS - lufs) / 20) if lufs is not None else 1.0
+    pk = float(np.percentile(np.abs(out), 99.99)) * g if out.size else 0.0
+    if pk > 1.41:   # 峰值會超過 +3 dB 太多：整體少加一點
+        g *= 1.41 / pk
+    out = out * g
     n = out.shape[1]
     fi, fo = int(0.05 * sr), int(min(1.5, n / sr / 4) * sr)
     out[:, :fi] *= np.linspace(0, 1, fi, dtype=np.float32)
     out[:, n - fo:] *= np.linspace(1, 0, fo, dtype=np.float32)
-    try:
-        from pedalboard import Limiter
-        out = Limiter(threshold_db=-1.0, release_ms=80)(np.ascontiguousarray(out, dtype=np.float32), sr)
-    except ImportError:
-        out = np.clip(out, -0.98, 0.98)
+    out = peak_limit(out, sr)
     timing = {"song_t0": start * speed, "speed": speed, "key": key, "dur": n / sr}
     return out.astype(np.float32), sr, timing
 

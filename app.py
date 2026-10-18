@@ -18,7 +18,7 @@ import claude_api as C
 import pipeline as P
 import share as SH
 
-VERSION = "1.4.8"
+VERSION = "1.4.9"
 HOST, PORT = "127.0.0.1", int(os.environ.get("LIANTAI_PORT", "8765"))
 app = Flask(__name__, static_folder=str(P.ROOT / "static"), static_url_path="/static")
 app.config["MAX_CONTENT_LENGTH"] = 1024 * 1024 * 1024
@@ -209,11 +209,7 @@ def mixdown(sid):
             parts.append(y * g)
         n = min(p.shape[1] for p in parts)
         mix = sum(p[:, :n] for p in parts) * (10 ** (norm / 20))
-        try:
-            from pedalboard import Limiter
-            mix = Limiter(threshold_db=-1.0, release_ms=80)(np.ascontiguousarray(mix, dtype=np.float32), sr)
-        except ImportError:
-            mix = np.clip(mix, -0.98, 0.98)
+        mix = SH.peak_limit(mix, sr)
         report("輸出檔案", 0.7)
         out.parent.mkdir(parents=True, exist_ok=True)
         SH.export_audio(mix.astype(np.float32), sr, out)
@@ -507,7 +503,7 @@ def take_mixprep(sid, tid):
     key, speed = SH.variant_needed(d, info)
     back = P.variant_dir(d, key, speed) / "back.wav"
     sr, n = sf_info(back)
-    tag = f"{int(opts['polish'])}_{opts['reverb']}"
+    tag = f"v2_{int(opts['polish'])}_{opts['reverb']}"   # v2：1.4.9 改了人聲處理，舊的暫存要重做
     vp = d / "takes" / f"{tid}.vocal_{tag}.wav"
     if not vp.exists():
         for old in (d / "takes").glob(f"{tid}.vocal_*.wav"):
@@ -517,7 +513,7 @@ def take_mixprep(sid, tid):
     start = (float(info.get("start", 0)) + float(info.get("offset", 0))) / speed
     return jsonify(vocal=f"/api/songs/{sid}/takes/{tid}/vocal/{tag}?t={int(vp.stat().st_mtime)}",
                    back=f"/api/songs/{sid}/audio/back?{q}", inst=f"/api/songs/{sid}/audio/inst?{q}",
-                   start=round(start, 3), key=key, speed=speed,
+                   start=round(start, 3), key=key, speed=speed, master_db=SH.master_db(d, key, speed),
                    balance=SH.suggest_balance(d, tid, opts) if request.args.get("balance") else None)
 
 

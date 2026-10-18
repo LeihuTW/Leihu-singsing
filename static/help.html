@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>雷虎練唱台 1.4.8 使用說明</title>
+<title>雷虎練唱台 1.4.9 使用說明</title>
 <style>
 /* 和程式本體同一套色彩：冷色控台底、琥珀色是原唱旋律、藍色是你的聲音 */
 :root {
@@ -51,7 +51,7 @@ th { color: var(--muted); font-weight: 600; font-size: 13px; }
 <body>
 <div class="wrap">
   <div class="top"><a href="/" id="back">← 回到雷虎練唱台</a></div>
-  <h1>雷虎練唱台 <span class="ver">1.4.8</span></h1>
+  <h1>雷虎練唱台 <span class="ver">1.4.9</span></h1>
 
   <section id="copyright" class="note legal" aria-labelledby="copyright-h">
     <h2 id="copyright-h">版權與使用聲明</h2>
@@ -85,7 +85,7 @@ th { color: var(--muted); font-weight: 600; font-size: 13px; }
 
   <h2 id="install">安裝</h2>
   <ol>
-    <li>雙擊 <code>雷虎練唱台1.4.8.exe</code>（從 GitHub 下載的檔名是 <code>LeihuLiantai-1.4.8-Setup.exe</code>）。已經裝過舊版的，直接安裝新版即可，歌曲庫和設定會保留。</li>
+    <li>雙擊 <code>雷虎練唱台1.4.9.exe</code>（從 GitHub 下載的檔名是 <code>LeihuLiantai-1.4.9-Setup.exe</code>）。已經裝過舊版的，直接安裝新版即可，歌曲庫和設定會保留。</li>
     <li>如果出現藍色的「Windows 已保護您的電腦」，按「其他資訊」，再按「仍要執行」。這是因為安裝程式沒有付費的數位簽章，不是病毒警告。</li>
     <li>選安裝位置（預設即可，不需要系統管理員權限），按「安裝」。</li>
     <li>如果這台電腦裝過雷虎練唱台，會先詢問：
@@ -169,6 +169,7 @@ th { color: var(--muted); font-weight: 600; font-size: 13px; }
     <li>在「麥克風」選單選要用的輸入裝置（例如 GoXLR、USB 麥克風），再按「開啟麥克風」，卷軸上會即時畫出你的音高。第一次開啟後選單才會顯示裝置名稱；之後會記住你的選擇。</li>
     <li>看「音量」表調整大小：唱歌時音量條大多在綠色、偶爾到黃色最好；碰到紅色就是太大聲。可以拖「增益」調整，或按「自動調整」後用平常練唱的音量唱幾句，程式會自動調到適合的大小。音量過大時會出現紅字提醒，錄音也會自動壓住避免爆音，讓評分更準。</li>
     <li>想直接從唱的地方開始，按「跳過前奏」跳到第一句前 5 秒；勾選「自動」後每次從頭播放都會自動跳過。</li>
+    <li>錄音中跳過前奏、點卷軸換位置或 A-B 循環回到起點時，程式會把前一段收尾、從新位置接著錄新的一段，評分時間才對得上。不到 8 秒的片段（例如前奏）會自動丟掉；開 A-B 循環錄音時，每唱完一輪會各存成一筆。</li>
     <li><b>建議 KEY</b>：唱的時候程式會比對你和原唱的音高（男女差一個八度不算）。如果你大多數的音都固定比原曲高或低 2 個半音以上，代表這個 KEY 不適合你的音域，「我的演唱」會出現「建議改成 KEY X」和一鍵套用的按鈕。錄音評分完成後也會再給一次建議。</li>
     <li>錄音太多時，按錄音列表上方的「選取多筆」，勾選後可以一次刪除。</li>
     <li>按「錄一次」：會從 A 點（沒設就從目前位置）開始播放並錄音。唱完按「停止」。</li>
@@ -283,6 +284,17 @@ th { color: var(--muted); font-weight: 600; font-size: 13px; }
   <p>Windows 設定 → 應用程式 → 找到「雷虎練唱台」→ 解除安裝。過程中會問你要不要保留歌曲庫；選「否」就只移除程式，歌曲和錄音會留下來。</p>
 
   <h2 id="changes">版本紀錄</h2>
+  <h3>1.4.9</h3>
+  <p><b>功能新增</b></p>
+  <ul>
+    <li>匯出／分享的試聽可以自由拖曳時間，並標出有錄音的範圍；新增「從我開始唱」和 ±5／±10 秒按鈕</li>
+  </ul>
+  <p><b>功能修改</b></p>
+  <ul>
+    <li>改善匯出音質：錄音改為無損，人聲美化與限幅更自然，匯出音量自動調整到一致</li>
+    <li>修正錄音中跳過前奏、跳轉位置或 A-B 循環時，錄音位置會提前的問題</li>
+    <li>剛開歌時按播放會等分軌載入完自動開始，不用按好幾次</li>
+  </ul>
   <h3>1.4.8</h3>
   <p><b>功能新增</b></p>
   <ul>
@@ -456,7 +468,7 @@ th { color: var(--muted); font-weight: 600; font-size: 13px; }
     <li>初版：AI 分離主唱／合音／伴奏、旋律分析、歌詞辨識與台灣繁體轉換、升降 KEY 與變速、A–B 循環、麥克風即時音高與錄音評分、YouTube 匯入、Claude 歌詞對齊與練習建議、用量與費用顯示、歌詞匯出（LRC／SRT／TXT）、顯示卡加速、桌面程式與安裝程式</li>
   </ul>
 
-  <p class="lede" style="margin-top:40px">雷虎練唱台 1.4.8</p>
+  <p class="lede" style="margin-top:40px">雷虎練唱台 1.4.9</p>
 </div>
 <script>
   // 直接用瀏覽器開啟這份說明時，隱藏「回到程式」的連結

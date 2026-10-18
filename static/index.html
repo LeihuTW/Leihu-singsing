@@ -8,7 +8,7 @@
 </head>
 <body>
 <header class="bar">
-  <span class="logo">雷虎練唱台<small id="ver">1.4.8</small></span>
+  <span class="logo">雷虎練唱台<small id="ver">1.4.9</small></span>
   <nav class="row">
     <button id="nav-lib" class="tab cur">歌曲庫</button>
     <button id="nav-practice" class="tab" disabled>練唱</button>
@@ -289,8 +289,17 @@
     </div>
     <div class="sh-player">
       <button id="sh-play" disabled>▶ 試聽</button>
-      <input id="sh-pos" type="range" min="0" max="1" step="0.1" value="0" aria-label="試聽位置" disabled>
+      <div class="sh-track">
+        <input id="sh-pos" type="range" min="0" max="1" step="0.05" value="0" aria-label="試聽位置" disabled>
+        <div class="sh-region" aria-hidden="true"><i id="sh-region"></i></div>
+      </div>
       <span id="sh-time" class="num hint">0:00</span>
+    </div>
+    <div class="row sh-jump">
+      <button class="ghost" id="sh-to-me" disabled title="跳到你開始唱的前 2 秒">⏮ 從我開始唱</button>
+      <button class="ghost" data-shj="-10" disabled>−10 秒</button><button class="ghost" data-shj="-5" disabled>−5 秒</button>
+      <button class="ghost" data-shj="5" disabled>+5 秒</button><button class="ghost" data-shj="10" disabled>+10 秒</button>
+      <span class="hint">拉桿下方的色帶是你有錄音的範圍，可以直接拖曳或點任何位置跳過去</span>
     </div>
     <span id="sh-pv-msg" class="hint">準備試聽中…</span>
     <div class="row">

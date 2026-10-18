@@ -589,8 +589,12 @@ async function loadAudio() {
   } catch (e) {
     if (e.cancelled) return;   // 被新的切換取代：交給最新的那次處理
     busy.textContent = e.message;
+    if (S.wantPlay) { S.wantPlay = false; $("#play").textContent = "播放"; toast(e.message); }
   } finally {
-    if (req === S.audioReq) { S.loadingAudio = false; S.dirty = true; }
+    if (req === S.audioReq) {
+      S.loadingAudio = false; S.dirty = true;
+      if (S.wantPlay && S.bufs.inst) play();   // 載入期間按過播放：現在開始
+    }
   }
 }
 
@@ -634,7 +638,14 @@ function stopNodes() {
   S.nodes = {};
 }
 function play() {
-  if (S.loadingAudio || !S.bufs.inst) return;
+  if (S.loadingAudio || !S.bufs.inst) {
+    // 1.4.9：剛開歌或換 KEY 時分軌還在載入，以前按了沒反應；現在先記下來，載入完自動開始播放
+    S.wantPlay = true;
+    $("#play").textContent = "載入中…";
+    toast("音訊載入中，好了會自動開始播放", 2000);
+    return;
+  }
+  S.wantPlay = false;
   const c = ac(); c.resume();
   stopNodes();
   if (S.t >= S.dur - 0.05) S.t = 0;
@@ -726,6 +737,7 @@ function startNode(k, buf, when, pos) {
   S.nodes[k] = { src, g };
 }
 function pause() {
+  if (S.wantPlay) { S.wantPlay = false; $("#play").textContent = "播放"; }
   if (S.playing) S.t = cur();
   stopNodes(); S.playing = false;
   $("#play").textContent = "播放";
@@ -736,9 +748,10 @@ function seek(t) {
   S.t = clamp(t, 0, S.dur || 0);
   S.live = [];
   if (S.playing) play();
+  if (S.rec) splitRecording();   // 錄音中跳轉：從新位置重新對齊
   S.dirty = true;
 }
-$("#play").onclick = () => (S.playing ? pause() : play());
+$("#play").onclick = () => (S.playing || S.wantPlay ? pause() : play());
 
 /* 跳過前奏：跳到第一句歌詞（沒有歌詞就用第一個旋律音）前 5 秒 */
 function introSkipTime() {
@@ -1353,6 +1366,7 @@ async function startMic() {
     src.connect(raw); src.connect(gain); gain.connect(an); gain.connect(lim); lim.connect(dest);
     S.mic = { stream, src, raw, gain, an, lim, dest, buf: new Float32Array(an.fftSize),
               rbuf: new Float32Array(raw.fftSize), tick: 0, peak: 0, peakT: 0, clipRaw: 0, clipGain: 0, auto: null };
+    S.mic.tap = await recTap(c, lim);
     $("#mic-lv").hidden = false;
     $("#mic").textContent = "關閉麥克風"; $("#mic").classList.add("on");
     $("#rec").disabled = false;
@@ -1482,37 +1496,116 @@ const fmtKey = k => (k > 0 ? "+" : k < 0 ? "−" : "") + Math.abs(k);
 
 /* 錄音 */
 $("#rec").onclick = () => (S.rec ? stopRecording() : startRecording());
+/* 1.4.9：錄音改成直接收原始音訊（無損 PCM），不再經過 MediaRecorder 的 Opus 壓縮。
+   AudioWorklet 每 2048 個取樣送一次資料，附上取樣編號，錄音的開始、結束可以精準切齊。 */
+const REC_TAP_SRC = `class RecTap extends AudioWorkletProcessor {
+  constructor() { super(); this.buf = new Float32Array(2048); this.n = 0; this.f0 = 0; }
+  process(inputs) {
+    const ch = inputs[0] && inputs[0][0];
+    if (ch) {
+      if (this.n === 0) this.f0 = currentFrame;
+      this.buf.set(ch, this.n); this.n += ch.length;
+      if (this.n >= this.buf.length) { this.port.postMessage({ frame: this.f0, data: this.buf.slice(0, this.n) }); this.n = 0; }
+    }
+    return true;
+  }
+}
+registerProcessor("rec-tap", RecTap);`;
+async function recTap(c, from) {
+  try {
+    if (!c.audioWorklet) return null;
+    if (!c._tapReady) {
+      await c.audioWorklet.addModule(URL.createObjectURL(new Blob([REC_TAP_SRC], { type: "application/javascript" })));
+      c._tapReady = true;
+    }
+    const node = new AudioWorkletNode(c, "rec-tap", { numberOfInputs: 1, numberOfOutputs: 1, channelCount: 1, channelCountMode: "explicit" });
+    const mute = c.createGain(); mute.gain.value = 0;
+    from.connect(node); node.connect(mute).connect(c.destination);   // 要接到輸出才會持續運作（音量 0，聽不到）
+    node.port.onmessage = e => recChunk(e.data.frame, e.data.data);
+    return node;
+  } catch (e) { console.warn("AudioWorklet 無法使用，改用 MediaRecorder", e); return null; }
+}
+S.recs = [];   // 正在錄或正在收尾的錄音
+function recChunk(frame, data) {
+  const end = frame + data.length;
+  for (const r of [...S.recs]) {
+    const a = Math.max(frame, r.f0), b = Math.min(end, r.f1 ?? Infinity);
+    if (b > a) { r.pcm.push(data.slice(a - frame, b - frame)); r.n += b - a; }
+    if (r.f1 != null && end >= r.f1) finishRec(r);
+  }
+}
+function finishRec(r) {
+  if (r.done) return;
+  r.done = true;
+  S.recs = S.recs.filter(x => x !== r);
+  if (r.keep) uploadTake(r);
+}
+function endRec(r) {
+  if (r.mr) { r.mr.stop(); return; }
+  r.f1 = Math.round(mc().currentTime * r.sr);
+  setTimeout(() => finishRec(r), 600);   // 保險：資料沒有再進來也會收尾
+}
+function beginRecorder() {
+  if (S.mic.tap) {
+    const sr = mc().sampleRate;
+    const rec = { pcm: [], n: 0, sr, f0: Math.round(mc().currentTime * sr), f1: null, start: cur() - 0.06 * S.speed,
+                  key: S.key, speed: S.speed, t0: performance.now(), keep: true, quiet: false };
+    S.recs.push(rec); S.rec = rec;
+    return;
+  }
+  const mr = new MediaRecorder(S.mic.dest.stream);   // 錄的是調過增益、防爆音後的聲音
+  const rec = { mr, chunks: [], start: cur() - 0.06 * S.speed, key: S.key, speed: S.speed,
+                t0: performance.now(), keep: true, quiet: false };
+  mr.ondataavailable = e => e.data.size && rec.chunks.push(e.data);
+  mr.onstop = () => { if (rec.keep) uploadTake(rec); };
+  mr.start();
+  S.rec = rec;
+}
 function startRecording() {
   if (!S.mic) return;
+  if (S.loadingAudio || !S.bufs.inst) return toast("音訊還在載入，載入完再開始錄音");
   if (!S.playing) { if (S.loopA != null) S.t = S.loopA; S.live = []; play(); }
-  const mr = new MediaRecorder(S.mic.dest.stream);   // 錄的是調過增益、防爆音後的聲音
-  const chunks = [];
-  mr.ondataavailable = e => e.data.size && chunks.push(e.data);
-  S.rec = { mr, chunks, start: cur() - 0.06 * S.speed, key: S.key, speed: S.speed };
-  mr.onstop = () => uploadTake(S.recDone);
-  mr.start();
+  beginRecorder();
   $("#rec").textContent = "■ 停止"; $("#rec").classList.add("live");
 }
 function stopRecording() {
   if (!S.rec) return;
-  S.recDone = S.rec; S.rec = null;
-  S.recDone.mr.stop();
+  const r = S.rec; S.rec = null;
+  endRec(r);
   $("#rec").textContent = "● 錄一次"; $("#rec").classList.remove("live");
   if (S.playing) pause();
 }
+/* 1.4.9：錄音中播放位置跳動（跳過前奏、點卷軸、方向鍵、A-B 循環回到起點）時，
+   錄音的時間軸會和歌對不上（評分時聲音被放到錯的位置）。這時把目前這段收尾，從新位置接著錄新的一段。
+   收尾的那段太短（例如只錄到前奏）就直接丟掉。 */
+function splitRecording() {
+  const r = S.rec;
+  if (!r || !S.playing) return;
+  r.keep = (performance.now() - r.t0) / 1000 >= 8;
+  r.quiet = true;
+  endRec(r);
+  beginRecorder();
+}
 async function uploadTake(r) {
   try {
-    const blob = new Blob(r.chunks, { type: r.mr.mimeType });
-    const buf = await ac().decodeAudioData(await blob.arrayBuffer());
-    if (buf.duration < 2) return toast("錄音太短，沒有存");
-    const ch = buf.getChannelData(0);
+    let ch, sr;
+    if (r.pcm) {   // 無損：直接把收到的原始取樣接起來
+      ch = new Float32Array(r.n); sr = r.sr;
+      let o = 0; for (const p of r.pcm) { ch.set(p, o); o += p.length; }
+    } else {
+      const blob = new Blob(r.chunks, { type: r.mr.mimeType });
+      const buf = await ac().decodeAudioData(await blob.arrayBuffer());
+      ch = buf.getChannelData(0); sr = buf.sampleRate;
+    }
+    const dur = ch.length / sr;
+    if (dur < 2) return r.quiet ? null : toast("錄音太短，沒有存");
     let pk = 0; for (let i = 0; i < ch.length; i += 4) { const a = Math.abs(ch[i]); if (a > pk) pk = a; }
     if (pk < 0.01) toast("這次錄音幾乎沒有聲音：請確認麥克風選對、唱歌時音量表有動，或按「自動調整」", 6000);
-    const wav = encodeWav(buf.getChannelData(0), buf.sampleRate);
+    const wav = encodeWav(ch, sr);
     const fd = new FormData();
     fd.append("file", new Blob([wav], { type: "audio/wav" }), "take.wav");
     fd.append("start", r.start.toFixed(3)); fd.append("key", r.key);
-    fd.append("speed", r.speed); fd.append("duration", buf.duration.toFixed(2));
+    fd.append("speed", r.speed); fd.append("duration", dur.toFixed(2));
     toast("錄音已上傳，正在評分…");
     const res = await api(`/api/songs/${S.song.id}/takes`, { method: "POST", body: fd });
     await refreshTakes();
@@ -1711,6 +1804,7 @@ async function shPrepare(withBalance) {
   const req = ++SH.req, msg = $("#sh-pv-msg");
   const wasPlaying = SH.playing; shStop();
   $("#sh-play").disabled = true; $("#sh-pos").disabled = true;
+  $$("#sh-to-me, [data-shj]").forEach(b => (b.disabled = true));
   msg.textContent = withBalance ? "計算建議音量、準備試聽中…" : "套用人聲效果中…";
   try {
     let r;
@@ -1729,26 +1823,30 @@ async function shPrepare(withBalance) {
     }
     SH.bufs.vocal = await fetchBuf(r.vocal);
     if (req !== SH.req) return;
-    SH.start = r.start;
+    SH.start = r.start; SH.master = r.master_db || 0;
     const dur = SH.bufs.inst.duration;
     $("#sh-pos").max = String(dur);
     if (!SH.pos) SH.pos = Math.max(0, r.start - 2);   // 從你開始唱的前 2 秒開始試聽
     $("#sh-pos").value = String(SH.pos);
+    shRegion(dur);
     $("#sh-play").disabled = false; $("#sh-pos").disabled = false;
+    $$("#sh-to-me, [data-shj]").forEach(b => (b.disabled = false));
     msg.textContent = "邊聽邊拖拉桿，音量會即時改變；人聲美化和殘響切換後會重新處理幾秒";
     shTime();
     if (wasPlaying) shPlay();
   } catch (e) { if (req === SH.req) msg.textContent = e.message; }
 }
 function shPlay() {
-  const c = ac(); c.resume(); shStop();
+  const c = ac(); c.resume(); shStop(true);   // 保留剛設定的位置（不要被停止時的播放位置蓋掉）
   const lim = c.createDynamicsCompressor();   // 和匯出時一樣加限幅
   lim.threshold.value = -1; lim.knee.value = 0; lim.ratio.value = 20; lim.attack.value = 0.003; lim.release.value = 0.08;
   lim.connect(c.destination);
+  const master = c.createGain(); master.gain.value = Math.pow(10, (SH.master || 0) / 20);   // 和匯出相同的整體音量
+  master.connect(lim);
   const nodes = {};
   for (const k of ["vocal", "back", "inst"]) {
     const src = c.createBufferSource(); src.buffer = SH.bufs[k];
-    const g = c.createGain(); src.connect(g); g.connect(lim);
+    const g = c.createGain(); src.connect(g); g.connect(master);
     src.start(c.currentTime + 0.05, SH.pos);
     nodes[k] = g; nodes[k + "Src"] = src;
   }
@@ -1759,9 +1857,9 @@ function shPlay() {
   pause();   // 練唱畫面的播放先停掉
   requestAnimationFrame(shTick);
 }
-function shStop() {
+function shStop(keepPos) {
   if (SH.nodes) {
-    SH.pos = Math.min(+$("#sh-pos").max || 0, Math.max(0, ac().currentTime - SH.t0));
+    if (!keepPos) SH.pos = Math.min(+$("#sh-pos").max || 0, Math.max(0, ac().currentTime - SH.t0));
     for (const k of ["vocal", "back", "inst"]) { try { SH.nodes[k + "Src"].stop(); } catch {} }
     SH.nodes.lim.disconnect();
   }
@@ -1773,15 +1871,39 @@ function shTime() {
   $("#sh-time").textContent = `${fmt(t, 0)} / ${fmt(+$("#sh-pos").max || 0, 0)}`;
   return t;
 }
+/* 拉桿下方標出有錄音（人聲）的範圍 */
+function shRegion(dur) {
+  const ch = SH.bufs.vocal.getChannelData(0), sr = SH.bufs.vocal.sampleRate;
+  let a = -1, b = -1;
+  for (let i = 0; i < ch.length; i += 256) if (Math.abs(ch[i]) > 1e-4) { if (a < 0) a = i; b = i; }
+  const el = $("#sh-region");
+  if (a < 0 || !dur) { el.style.width = "0"; return; }
+  SH.vEnd = b / sr;
+  el.style.left = (a / sr / dur * 100).toFixed(2) + "%";
+  el.style.width = ((b - a) / sr / dur * 100).toFixed(2) + "%";
+}
+function shSeek(t) {
+  SH.pos = clamp(t, 0, +$("#sh-pos").max || 0);
+  $("#sh-pos").value = String(SH.pos);
+  if (SH.playing) shPlay(); else shTime();
+}
+$("#sh-to-me").onclick = () => shSeek(Math.max(0, (SH.start || 0) - 2));
+$$("[data-shj]").forEach(b => (b.onclick = () => shSeek((SH.playing ? shTime() : SH.pos) + +b.dataset.shj)));
 function shTick() {
   if (!SH.playing) return;
   const t = shTime();
-  $("#sh-pos").value = String(t);
+  if (!SH.drag) $("#sh-pos").value = String(t);   // 拖曳中不要把拉桿拉回播放位置
   if (t >= (+$("#sh-pos").max || 0)) { shStop(); SH.pos = 0; return; }
   requestAnimationFrame(shTick);
 }
 $("#sh-play").onclick = () => (SH.playing ? shStop() : shPlay());
-$("#sh-pos").addEventListener("input", e => { SH.pos = +e.target.value; if (SH.playing) shPlay(); else shTime(); });
+// 拖曳時只更新時間顯示，放開後才從新位置播放（不會一邊拖一邊斷斷續續重播）
+$("#sh-pos").addEventListener("pointerdown", () => { SH.drag = true; });
+$("#sh-pos").addEventListener("input", e => {
+  SH.drag = true;
+  $("#sh-time").textContent = `${fmt(+e.target.value, 0)} / ${fmt(+e.target.max || 0, 0)}`;
+});
+$("#sh-pos").addEventListener("change", e => { SH.drag = false; shSeek(+e.target.value); });
 function openShare(t) {
   SH.take = t; SH.pos = 0;
   $("#share").hidden = false;
@@ -2140,7 +2262,7 @@ let lastTimeText = "";
 function frame() {
   if (S.playing) {
     const t = cur();
-    if (S.loopA != null && S.loopB != null && t >= S.loopB) { S.t = S.loopA; S.live = []; play(); }
+    if (S.loopA != null && S.loopB != null && t >= S.loopB) { S.t = S.loopA; S.live = []; play(); if (S.rec) splitRecording(); }
     else if (t >= S.dur) { pause(); S.t = S.dur; }
     S.dirty = true;
   }
@@ -2246,7 +2368,7 @@ function setLineEnds() {
 
 document.addEventListener("keydown", e => {
   if ($("#view-practice").hidden || /INPUT|TEXTAREA|SELECT/.test(document.activeElement?.tagName || "")) return;
-  if (e.code === "Space") { e.preventDefault(); S.tap ? tapHit() : (S.playing ? pause() : play()); }
+  if (e.code === "Space") { e.preventDefault(); S.tap ? tapHit() : (S.playing || S.wantPlay ? pause() : play()); }
   else if (e.code === "ArrowLeft") seek(cur() - 3);
   else if (e.code === "ArrowRight") seek(cur() + 3);
 });
