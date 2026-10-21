@@ -18,7 +18,7 @@ import claude_api as C
 import pipeline as P
 import share as SH
 
-VERSION = "1.5"
+VERSION = "1.5.1"
 HOST, PORT = "127.0.0.1", int(os.environ.get("LIANTAI_PORT", "8765"))
 app = Flask(__name__, static_folder=str(P.ROOT / "static"), static_url_path="/static")
 app.config["MAX_CONTENT_LENGTH"] = 1024 * 1024 * 1024
@@ -289,7 +289,17 @@ def pitch(sid):
 @app.get("/api/songs/<sid>/lyrics")
 def get_lyrics(sid):
     d = P.song_dir(sid)
-    rd = lambda n: (d / n).read_text("utf-8") if (d / n).exists() else ""
+
+    def rd(n):
+        if not (d / n).exists():
+            return ""
+        t = (d / n).read_text("utf-8")
+        if P.is_japanese(t):   # 1.5 以前把日文歌詞轉成了台灣繁體（来→來）：改回日文字形並存回去
+            j = P.tw_to_ja(t)
+            if j != t:
+                (d / n).write_text(j, "utf-8")
+                t = j
+        return t
     meta = P.read_meta(d)
     return jsonify(lrc=rd("lyrics.lrc"), auto=rd("lyrics_auto.lrc"), online=rd("lyrics_online.lrc"),
                    source=meta.get("lyrics_source"), online_info=meta.get("lyrics_online"),

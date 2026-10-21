@@ -1174,7 +1174,8 @@ function kanaSegs(text) {
     return toks.map(t => {
       const parts = fixedParts(t), surf = parts.map(p => p[0]).join("");
       if (!JA_RE.test(surf)) return [surf, ""];
-      return [surf, romaji(parts.map(([b, r]) => r || b).join(""), t.pt)];
+      const ro = romaji(parts.map(([b, r]) => r || b).join(""), t.pt);
+      return [surf, KANJI_RE.test(ro) ? "" : ro];   // 字典查不到讀音的字：不標（可以切到假名標音補上讀音）
     });
   }
   return toks.flatMap(fixedParts);
@@ -1183,8 +1184,8 @@ function furiHTML(text) {
   const segs = kanaSegs(text);
   if (!segs) return null;
   const edit = S.kanaMode === "hira";
-  return segs.map(([b, t]) => t
-    ? `<ruby${edit && KANJI_RE.test(b) ? ` data-b="${escH(b)}" title="點一下修改讀音"` : ""}>${escH(b)}<rt>${escH(t)}</rt></ruby>`
+  return segs.map(([b, t]) => (t || (edit && KANJI_RE.test(b)))
+    ? `<ruby${edit && KANJI_RE.test(b) ? ` data-b="${escH(b)}" title="${t ? "點一下修改讀音" : "查不到讀音，點一下輸入"}"` : ""}>${escH(b)}<rt>${escH(t)}</rt></ruby>`
     : escH(b)).join("");
 }
 function setLyrNode(node, text) {

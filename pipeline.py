@@ -1415,7 +1415,16 @@ HALLUCINATION = re.compile(r"字幕|訂閱|订阅|點贊|点赞|感謝觀看|感
 PUNCT_END = "，。！？、,.!?;；：:…"
 
 
+def is_japanese(text: str) -> bool:
+    """文字裡有一定比例的平假名／片假名 → 日文（日文的漢字不能轉成台灣繁體，例如「来」會被改成「來」）。"""
+    kana = len(re.findall(r"[\u3040-\u30ff]", text or ""))
+    han = len(re.findall(r"[\u3400-\u9fff]", text or ""))
+    return kana >= 3 and kana >= 0.15 * (kana + han)
+
+
 def to_taiwan(text: str) -> str:
+    if is_japanese(text):
+        return text
     try:
         from opencc import OpenCC
     except ImportError:
@@ -1833,8 +1842,8 @@ def _hira(s: str) -> str:
 
 def _ruby_word(surface: str, reading: str) -> list[list[str]]:
     """一個詞拆成「漢字＋讀音」與「假名」：沈む／シズム → [["沈","しず"],["む",""]]"""
-    if not _KANJI_RE.search(surface) or not reading or reading == "*":
-        return [[surface, ""]]
+    if not _KANJI_RE.search(surface) or not reading or reading == "*" or _KANJI_RE.search(reading):
+        return [[surface, ""]]   # 字典查不到讀音（讀音還是漢字）：不標
     parts = _PARTS_RE.findall(surface)
     pat = "".join("(.+?)" if _KANJI_RE.match(p) else re.escape(_kata(p)) for p in parts)
     m = re.fullmatch(pat, _kata(reading))
@@ -1849,6 +1858,38 @@ def _ruby_word(surface: str, reading: str) -> list[list[str]]:
 _JA_RE = re.compile(f"[\u3040-\u30ff{_KANJI}]")
 
 
+_TW2JA: dict | None = None
+
+
+def tw_to_ja(text: str) -> str:
+    """把被轉成台灣繁體的日文字改回日文字形（1.5 以前的線上歌詞／匯入歌詞會把「来」改成「來」、「会」改成「會」）。
+    對照表：日本常用漢字（JIS 第一水準）經過簡轉繁後變成的字 → 原本的日文字；只換逐字對應、不影響日文本來就用的字。"""
+    global _TW2JA
+    if _TW2JA is None:
+        table: dict = {}
+        try:
+            from opencc import OpenCC
+            cc = OpenCC("s2twp")
+            level1 = []
+            for hi in range(0x88, 0x99):
+                for lo in list(range(0x40, 0x7F)) + list(range(0x80, 0xFD)):
+                    if (hi, lo) < (0x88, 0x9F) or (hi, lo) > (0x98, 0x72):
+                        continue
+                    try:
+                        level1.append(bytes([hi, lo]).decode("shift_jis"))
+                    except UnicodeDecodeError:
+                        pass
+            jp = set(level1)
+            for j in level1:
+                c = cc.convert(j)
+                if len(c) == 1 and c != j and c not in jp:
+                    table.setdefault(c, j)
+        except Exception as e:
+            log_error("tw_to_ja", e)
+        _TW2JA = table
+    return "".join(_TW2JA.get(c, c) for c in text) if _TW2JA else text
+
+
 def furigana(text: str) -> list[dict] | None:
     """一句日文歌詞拆成詞：[{"p": [[字, 讀音], …], "pt": 是否助詞}, …]。
     讀音只標在漢字上（空字串＝不用標）；羅馬拼音由前端依每個詞的讀音換算（助詞は／へ／を 念 wa／e／o）。
@@ -1861,11 +1902,14 @@ def furigana(text: str) -> list[dict] | None:
             from sudachipy import dictionary
             _KANA_TK = dictionary.Dictionary(dict="small").create()
         from sudachipy import tokenizer
-        toks = _KANA_TK.tokenize(text, tokenizer.Tokenizer.SplitMode.C)
+        norm = tw_to_ja(text)
+        toks = _KANA_TK.tokenize(norm, tokenizer.Tokenizer.SplitMode.C)
     out: list[dict] = []
     for t in toks:
         parts: list[list[str]] = []
+        pos = t.begin()
         for b, r in _ruby_word(t.surface(), t.reading_form()):
+            b, pos = text[pos:pos + len(b)], pos + len(b)   # 顯示原本的字
             if not r and parts and not parts[-1][1]:
                 parts[-1][0] += b
             else:
@@ -2274,7 +2318,7 @@ def similarity(recognized: str, candidate: str) -> float | None:
     return round(sum(x.size for x in m.get_matching_blocks()) / len(a), 3)
 
 
-USER_AGENT = "LeihuLiantai/1.5 (+https://github.com/LeihuTW/Leihu-singsing)"   # HTTP 標頭只能用英文字
+USER_AGENT = "LeihuLiantai/1.5.1 (+https://github.com/LeihuTW/Leihu-singsing)"   # HTTP 標頭只能用英文字
 
 
 def _http_json(url: str, headers: dict | None = None, timeout: int = 8):
@@ -2420,7 +2464,8 @@ def find_candidates(d: Path, cfg: dict, query: str = "", check=None,
     for c in found.values():
         c["similarity"] = similarity(rec, c["plain"] or c["synced"])
         c["diff"] = round(abs(c["duration"] - dur), 1) if (c.get("duration") and dur) else None
-        if to_tw and re.search(r"[\u4e00-\u9fff]", c["plain"] + c["synced"] + c["track"] + c["artist"]):
+        if to_tw and re.search(r"[\u4e00-\u9fff]", c["plain"] + c["synced"] + c["track"] + c["artist"]) \
+                and not is_japanese(c["plain"] + c["synced"]):
             for k in ("plain", "synced", "track", "artist", "album"):
                 c[k] = to_taiwan(c[k])
         lines = [l for l in c["plain"].splitlines() if l.strip()]
