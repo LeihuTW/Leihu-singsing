@@ -920,6 +920,21 @@ def karaoke_model(cfg: dict) -> str:
     return cfg["karaoke_model"]
 
 
+def free_gpu() -> None:
+    """把 PyTorch 暫存的顯示卡記憶體還回去。不還的話，後面的歌詞辨識（CTranslate2）可能記憶體不夠，
+    Windows 會改用很慢的共用記憶體，看起來就像卡在「判斷歌詞語言」。"""
+    import gc
+    gc.collect()
+    if "torch" in sys.modules:
+        try:
+            import torch
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+                torch.cuda.empty_cache()
+        except Exception:
+            pass
+
+
 class _sep_progress:
     """audio-separator 內部用 tqdm 跑每一段，換成會回報進度的版本，畫面上就看得到分離跑到哪裡；
     按停止時 report 會丟出例外，也能在分離到一半時停下來。"""
@@ -1037,6 +1052,8 @@ def separate_uvr(d: Path, cfg: dict, report) -> None:
     for name, p in (("lead", lead_p), ("back", back_p), ("inst", inst_p)):
         write_wav(d / f"{name}.wav", fit_length(read_audio(p), n))
     shutil.rmtree(tmp, ignore_errors=True)
+    del sep
+    free_gpu()
 
 
 def separate_dsp(d: Path, report) -> None:
@@ -1397,6 +1414,7 @@ def step_pitch(d: Path, cfg: dict, report) -> None:
         "notes": notes,
     }
     (d / "pitch.json").write_text(json.dumps(data, separators=(",", ":")), "utf-8")
+    free_gpu()
     meta = read_meta(d)
     meta["steps"]["pitch"] = True
     meta["pitch_algo"] = PITCH_ALGO
@@ -1502,6 +1520,26 @@ def _collect_words(segs, dur: float, report, stats: list | None = None) -> list:
 LANG_NAMES = {"zh": "中文", "ja": "日文", "en": "英文", "ko": "韓文", "yue": "粵語"}
 
 
+def _sung_windows(y16: np.ndarray, n: int = 3, win: float = 30.0) -> np.ndarray:
+    """主唱聲音最多的幾段（每段 30 秒）接起來，用來判斷語言。
+    以前先對整首歌跑一次語音偵測（VAD）再判斷，比較慢；主唱軌本來就只有人聲，直接挑最大聲的段落即可。"""
+    sr = PITCH_SR
+    W = int(win * sr)
+    if len(y16) <= W:
+        return y16.astype(np.float32)
+    hop = sr // 2
+    e = np.array([float(np.sqrt(np.mean(y16[i:i + hop] ** 2))) for i in range(0, len(y16) - hop + 1, hop)])
+    k = W // hop
+    sums = np.convolve((e > max(1e-4, np.median(e) * 0.5)).astype(np.float32) * e, np.ones(k), "valid")
+    picks: list[int] = []
+    for i in np.argsort(-sums):
+        if all(abs(int(i) - j) >= k for j in picks):
+            picks.append(int(i))
+        if len(picks) >= n:
+            break
+    return np.concatenate([y16[j * hop:j * hop + W] for j in sorted(picks)]).astype(np.float32)
+
+
 def pick_language(model, y16: np.ndarray, want: str, per_song: bool) -> tuple[str | None, str]:
     """決定辨識語言。回傳 (語言, 說明)。
 
@@ -1509,12 +1547,13 @@ def pick_language(model, y16: np.ndarray, want: str, per_song: bool) -> tuple[st
     （例如日文歌），改用偵測到的語言，避免把日文硬辨識成中文。設定是自動時直接用偵測結果。"""
     if per_song and want:
         return want, ""
+    t0 = time.time()
     try:
-        det, prob, _ = model.detect_language(y16, vad_filter=True, language_detection_segments=4)
+        det, prob, _ = model.detect_language(_sung_windows(y16), vad_filter=False, language_detection_segments=3)
     except Exception:
         traceback.print_exc()
         return (want or None), ""
-    print(f"[lyrics] 偵測語言 {det} {prob:.2f}（設定 {want or '自動'}）", flush=True)
+    print(f"[lyrics] 偵測語言 {det} {prob:.2f}（設定 {want or '自動'}，{time.time() - t0:.1f} 秒）", flush=True)
     if want and det != want and prob >= 0.7:
         return det, f"偵測到這首是{LANG_NAMES.get(det, det)}歌，改用{LANG_NAMES.get(det, det)}辨識"
     if want:
@@ -1563,6 +1602,7 @@ def step_lyrics(d: Path, cfg: dict, report) -> None:
     if not module_status()["whisper"]:
         raise UserError("沒有安裝 faster-whisper，無法辨識歌詞")
     report("載入語音辨識模型（第一次會下載）", 0.7)
+    free_gpu()
     model = _whisper_model(cfg)
     y16 = read_audio(d / "lead.wav", sr=PITCH_SR, mono=True)
     report("判斷歌詞語言", 0.74)
