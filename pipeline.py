@@ -47,6 +47,7 @@ DEFAULT_CONFIG = {
     "whisper_model": "large-v3-turbo",
     "lyrics_language": "",   # 空字串＝自動判斷
     "convert_to_taiwan": True,
+    "font": "huninn",   # 介面與歌詞字體：huninn（內建 jf open 粉圓）／kai（楷書）／sans（黑體）
     "pitch_model": "auto",
     "claude_model": "claude-sonnet-5-5",
     "anthropic_api_key": "",
@@ -675,14 +676,30 @@ def _pick(paths: list[Path], kind: str) -> Path:
 HQ_KARAOKE = "mel_band_roformer_karaoke_aufr33_viperx_sdr_10.1956.ckpt"
 
 
-HQ_FILES = {   # 檔名 → (大小, 下載網址…)；第一個網址失敗就換下一個
-    HQ_KARAOKE: (913096801, [
-        "https://github.com/TRvlvr/model_repo/releases/download/all_public_uvr_models/" + HQ_KARAOKE,
-        "https://github.com/nomadkaraoke/python-audio-separator/releases/download/model-configs/" + HQ_KARAOKE]),
-    "mel_band_roformer_karaoke_aufr33_viperx_sdr_10.1956_config.yaml": (None, [
-        "https://github.com/nomadkaraoke/python-audio-separator/releases/download/model-configs/"
-        "mel_band_roformer_karaoke_aufr33_viperx_sdr_10.1956_config.yaml"]),
+# 模型下載來源：Hugging Face 的鏡像在台灣比 GitHub 快很多，放第一個；失敗或太慢再換 GitHub。
+# 每個檔案都核對大小與 SHA-256（與 GitHub 原檔一致），鏡像就算被換掉也不會用到錯的檔案。
+_HF_UVR = "https://huggingface.co/Politrees/UVR_resources/resolve/main/models/"
+_GH_UVR = "https://github.com/TRvlvr/model_repo/releases/download/all_public_uvr_models/"
+_GH_AS = "https://github.com/nomadkaraoke/python-audio-separator/releases/download/model-configs/"
+_HQ_YAML = "mel_band_roformer_karaoke_aufr33_viperx_sdr_10.1956_config.yaml"
+MODEL_FILES = {   # 檔名 → (大小, SHA-256, 下載網址…)
+    "UVR-MDX-NET-Inst_HQ_3.onnx": (66759214, "317554b07fe1ea5279a77f2b1520a41ea4b93432560c4ffd08792c30fddf9adc", [
+        _HF_UVR + "MDXNet/UVR-MDX-NET-Inst_HQ_3.onnx", _GH_UVR + "UVR-MDX-NET-Inst_HQ_3.onnx"]),
+    "UVR_MDXNET_KARA_2.onnx": (52786726, "bf32e15105a09c0f7dddd2b67346146334d6f3ecb399ed7638eba2ab07cbf5f4", [
+        _HF_UVR + "MDXNet/UVR_MDXNET_KARA_2.onnx", _GH_UVR + "UVR_MDXNET_KARA_2.onnx"]),
+    HQ_KARAOKE: (913096801, "1de20d459332fe8869aeb01327a31df0032262706e1365114e852dc271779813", [
+        _HF_UVR + "Roformer/MelBand/" + HQ_KARAOKE, _GH_UVR + HQ_KARAOKE, _GH_AS + HQ_KARAOKE]),
+    _HQ_YAML: (None, None, [_GH_AS + _HQ_YAML]),
 }
+# audio-separator 第一次載入模型時要的設定檔；raw.githubusercontent 不通時改走 jsDelivr
+_RAW = "https://raw.githubusercontent.com/TRvlvr/application_data/main/"
+_JSD = "https://cdn.jsdelivr.net/gh/TRvlvr/application_data@main/"
+MODEL_DATA = {
+    "download_checks.json": [_RAW + "filelists/download_checks.json", _JSD + "filelists/download_checks.json"],
+    "vr_model_data.json": [_RAW + "vr_model_data/model_data_new.json", _JSD + "vr_model_data/model_data_new.json"],
+    "mdx_model_data.json": [_RAW + "mdx_model_data/model_data_new.json", _JSD + "mdx_model_data/model_data_new.json"],
+}
+HQ_FILES = {k: MODEL_FILES[k] for k in (HQ_KARAOKE, _HQ_YAML)}
 HQ_DL = {"state": "idle", "got": 0, "total": HQ_FILES[HQ_KARAOKE][0], "error": ""}
 _hq_lock = threading.Lock()
 
@@ -690,46 +707,183 @@ _hq_lock = threading.Lock()
 def hq_ready() -> bool:
     """高品質模型已經完整下載（大小完全正確才算，避免下載到一半的檔案被當成可用）。"""
     uvr = MODELS / "uvr"
-    for name, (size, _) in HQ_FILES.items():
+    for name, (size, _, _) in HQ_FILES.items():
         p = uvr / name
         if not p.exists() or (size and p.stat().st_size != size) or p.stat().st_size == 0:
             return False
     return True
 
 
-def _download(urls: list[str], dst: Path, size: int | None) -> None:
-    """下載到 .part 檔，可續傳；完成且大小正確才改成正式檔名。"""
+class _SlowSource(Exception):
+    pass
+
+
+def _sha256(path: Path) -> str:
+    import hashlib
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 22), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _open(url: str, start: int = 0, end: int | None = None, timeout: int = 30):
     import urllib.request
-    part = dst.with_name(dst.name + ".part")
-    if dst.exists() and size and dst.stat().st_size != size:
-        dst.replace(part)                  # 舊版直接寫正式檔名、下載到一半的檔案：接著續傳
-    last = None
-    for url in urls:
-        try:
-            have = part.stat().st_size if part.exists() else 0
-            req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT,
-                                                       **({"Range": f"bytes={have}-"} if have else {})})
-            with urllib.request.urlopen(req, timeout=60) as r:
-                if have and r.status != 206:   # 伺服器不支援續傳：從頭下載
-                    have = 0
-                with open(part, "ab" if have else "wb") as f:
-                    got = have
-                    while True:
-                        chunk = r.read(1 << 20)
-                        if not chunk:
-                            break
-                        f.write(chunk)
-                        got += len(chunk)
-                        if size:
-                            HQ_DL["got"] = got
-            if size and part.stat().st_size != size:
-                raise IOError(f"檔案大小不對（{part.stat().st_size} / {size}）")
-            part.replace(dst)
+    hdr = {"User-Agent": USER_AGENT}
+    if start or end is not None:
+        hdr["Range"] = f"bytes={start}-{'' if end is None else end - 1}"
+    return urllib.request.urlopen(urllib.request.Request(url, headers=hdr), timeout=timeout)
+
+
+def fetch_file(urls: list[str], dst: Path, size: int | None = None, sha256: str | None = None,
+               progress=None, conns: int = 4) -> None:
+    """下載檔案：大檔分成幾段同時下載（單一連線被限速時快很多），每段都能續傳；
+    一個來源連不上或中斷就換下一個來源。完成後核對大小與 SHA-256 才改成正式檔名。
+    progress(已下載, 總大小, 速度) 每半秒呼叫一次；它丟出例外（例如按了停止）就中止下載。"""
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    legacy = dst.with_name(dst.name + ".part")
+    if dst.exists():
+        if not size or dst.stat().st_size == size:
             return
+        if not legacy.exists():
+            dst.replace(legacy)            # 舊版直接寫正式檔名、下載到一半的檔案：接著續傳
+        else:
+            dst.unlink()
+
+    if not size or size < (16 << 20):      # 小檔：一次下載
+        last = None
+        for url in urls:
+            try:
+                with _open(url) as r, open(legacy, "wb") as f:
+                    shutil.copyfileobj(r, f, 1 << 20)
+                if size and legacy.stat().st_size != size:
+                    raise IOError(f"檔案大小不對（{legacy.stat().st_size} / {size}）")
+                if sha256 and _sha256(legacy) != sha256:
+                    raise IOError("檢查碼不符")
+                legacy.replace(dst)
+                return
+            except Exception as e:
+                last = e
+                legacy.unlink(missing_ok=True)
+                log_error(f"download {dst.name} {url}", e)
+        raise last or IOError("下載失敗")
+
+    seg = -(-size // conns)
+    ranges = [(k * seg, min(size, (k + 1) * seg)) for k in range(conns)]
+    parts = [dst.with_name(f"{dst.name}.part{k}") for k in range(conns)]
+    if legacy.exists():                    # 1.4.5～1.4.9 的單一續傳檔：當作第一段的開頭
+        if not parts[0].exists():
+            with open(legacy, "r+b") as f:
+                f.truncate(min(legacy.stat().st_size, seg))
+            legacy.replace(parts[0])
+        else:
+            legacy.unlink()
+    stop = threading.Event()
+    errors: list[Exception] = []
+    pref = [0]                             # 目前最好用的來源，其他段落也跟著用
+
+    def have(k: int) -> int:
+        return parts[k].stat().st_size if parts[k].exists() else 0
+
+    def worker(k: int) -> None:
+        a, b = ranges[k]
+        fails, ui = 0, pref[0]
+        while not stop.is_set():
+            got = have(k)
+            if got >= b - a:
+                if got > b - a:
+                    with open(parts[k], "r+b") as f:
+                        f.truncate(b - a)
+                return
+            url = urls[ui % len(urls)]
+            try:
+                with _open(url, a + got, b) as r:
+                    if r.status != 206:
+                        raise IOError(f"來源不支援分段下載（HTTP {r.status}）")
+                    with open(parts[k], "ab") as f:
+                        w0, n0 = time.time(), 0
+                        while not stop.is_set():
+                            chunk = r.read(256 << 10)
+                            if not chunk:
+                                break
+                            f.write(chunk)
+                            n0 += len(chunk)
+                            if time.time() - w0 > 30:   # 這個來源慢到不行（每段 < 30 KB/s）：換下一個
+                                if n0 < 30e3 * 30 and len(urls) > 1:
+                                    raise _SlowSource()
+                                w0, n0 = time.time(), 0
+                fails = 0
+            except _SlowSource:
+                ui += 1                    # 太慢：換來源，不算失敗
+                pref[0] = ui % len(urls)
+            except Exception as e:
+                fails += 1
+                ui += 1                    # 換下一個來源
+                pref[0] = ui % len(urls)
+                log_error(f"download {dst.name}[{k}] {url}", e)
+                if fails >= 3 * len(urls):
+                    errors.append(e)
+                    stop.set()
+                    return
+                stop.wait(2)
+
+    threads = [threading.Thread(target=worker, args=(k,), daemon=True) for k in range(conns)]
+    for t in threads:
+        t.start()
+    start_got, t0 = sum(have(k) for k in range(conns)), time.time()
+    try:
+        while any(t.is_alive() for t in threads):
+            for t in threads:
+                t.join(0.5 / conns)
+            if progress:
+                got = sum(have(k) for k in range(conns))
+                progress(got, size, (got - start_got) / max(0.5, time.time() - t0))
+    except BaseException:
+        stop.set()
+        for t in threads:
+            t.join(5)
+        raise
+    if errors:
+        raise errors[0]
+    with open(parts[0], "ab") as f:        # 接起來
+        for p in parts[1:]:
+            with open(p, "rb") as g:
+                shutil.copyfileobj(g, f, 1 << 22)
+            p.unlink()
+    if parts[0].stat().st_size != size or (sha256 and _sha256(parts[0]) != sha256):
+        parts[0].unlink(missing_ok=True)
+        raise IOError(f"{dst.name} 下載不完整（檢查碼不符），下次會重新下載")
+    parts[0].replace(dst)
+
+
+def ensure_model_data() -> None:
+    """audio-separator 需要的模型設定檔；壞掉（例如下載到一半）就重新下載。"""
+    uvr = MODELS / "uvr"
+    for name, urls in MODEL_DATA.items():
+        p = uvr / name
+        if p.exists():
+            try:
+                json.loads(p.read_text("utf-8"))
+                continue
+            except Exception:
+                p.unlink(missing_ok=True)
+        try:
+            fetch_file(urls, p)
         except Exception as e:
-            last = e
-            log_error(f"download {dst.name} {url}", e)
-    raise last or IOError("下載失敗")
+            log_error(f"model data {name}", e)   # 讓 audio-separator 自己再試一次
+
+
+def ensure_model(name: str, progress=None) -> None:
+    """確認分離模型已經完整下載；沒有或不完整就從最快的來源下載。"""
+    ensure_model_data()
+    spec = MODEL_FILES.get(name)
+    if not spec:
+        return                             # 不認得的模型：交給 audio-separator 自己下載
+    size, sha, urls = spec
+    p = MODELS / "uvr" / name
+    if p.exists() and (not size or p.stat().st_size == size):
+        return
+    fetch_file(urls, p, size, sha, progress)
 
 
 def start_hq_download() -> None:
@@ -741,13 +895,8 @@ def start_hq_download() -> None:
 
     def run():
         try:
-            uvr = MODELS / "uvr"
-            uvr.mkdir(parents=True, exist_ok=True)
-            for name, (size, urls) in HQ_FILES.items():
-                p = uvr / name
-                if p.exists() and (not size or p.stat().st_size == size):
-                    continue
-                _download(urls, p, size)
+            for name in HQ_FILES:
+                ensure_model(name, lambda got, total, spd: HQ_DL.update(got=got))
             HQ_DL.update(state="done", got=HQ_DL["total"])
         except Exception as e:
             HQ_DL.update(state="error", error=f"{type(e).__name__}: {e}")
@@ -770,6 +919,65 @@ def karaoke_model(cfg: dict) -> str:
     return cfg["karaoke_model"]
 
 
+class _sep_progress:
+    """audio-separator 內部用 tqdm 跑每一段，換成會回報進度的版本，畫面上就看得到分離跑到哪裡；
+    按停止時 report 會丟出例外，也能在分離到一半時停下來。"""
+    MODS = ("mdx_separator", "mdxc_separator", "vr_separator")
+
+    def __init__(self, label: str, report, start: float, span: float):
+        self.saved, self.best, self.t0 = [], 0.0, time.time()
+        self.cb = lambda p, eta: report(f"{label} {p * 100:.0f}%{eta}", start + span * p)
+
+    def eta(self, p: float) -> str:
+        el = time.time() - self.t0
+        if p < 0.05 or el < 5:
+            return ""
+        left = el * (1 - p) / p
+        return f"（約剩 {left / 60:.0f} 分鐘）" if left >= 90 else f"（約剩 {max(5, round(left / 5) * 5):.0f} 秒）"
+
+    def __enter__(self):
+        import importlib
+
+        def tq(it=None, *a, **k):
+            try:
+                n = len(it)
+            except Exception:
+                n = 0
+
+            def gen():
+                for i, x in enumerate(it):
+                    if n:
+                        p = i / n
+                        if p >= self.best:
+                            self.best = p
+                            self.cb(p, self.eta(p))
+                    yield x
+            return gen()
+        for name in self.MODS:
+            try:
+                m = importlib.import_module("audio_separator.separator.architectures." + name)
+                self.saved.append((m, m.tqdm))
+                m.tqdm = tq
+            except Exception:
+                pass
+        return self
+
+    def __exit__(self, *exc):
+        for m, orig in self.saved:
+            m.tqdm = orig
+        return False
+
+
+def _dl_report(report, label: str, frac: float):
+    last = [0.0]
+
+    def cb(got, total, spd):
+        if time.time() - last[0] >= 0.5:
+            last[0] = time.time()
+            report(f"下載{label} {got / 1e6:.0f}／{total / 1e6:.0f} MB（{spd / 1e6:.1f} MB/s）", frac)
+    return cb
+
+
 def separate_uvr(d: Path, cfg: dict, report) -> None:
     try:
         import torch  # noqa: F401  先載入 PyTorch 的 CUDA 函式庫，ONNX 會沿用同一份
@@ -784,9 +992,12 @@ def separate_uvr(d: Path, cfg: dict, report) -> None:
     sep = Separator(output_dir=str(tmp), model_file_dir=str(MODELS / "uvr"),
                     output_format="WAV", sample_rate=SR)
 
-    report("分離人聲與伴奏（第一次會下載模型）", 0.08)
+    report("準備人聲分離模型", 0.07)
+    ensure_model(cfg["separation_model"], _dl_report(report, "人聲分離模型", 0.07))
+    report("分離人聲與伴奏", 0.08)
     sep.load_model(model_filename=cfg["separation_model"])
-    outs = _outputs(sep.separate(str(d / "mix.wav")), tmp)
+    with _sep_progress("分離人聲與伴奏", report, 0.08, 0.26):
+        outs = _outputs(sep.separate(str(d / "mix.wav")), tmp)
     voc = tmp / "vocals_only.wav"
     _pick(outs, "vocals").replace(voc)
     inst_p = _pick(outs, "instrumental")
@@ -794,10 +1005,17 @@ def separate_uvr(d: Path, cfg: dict, report) -> None:
     kara = karaoke_model(cfg)
     hq = kara == HQ_KARAOKE
     waiting = not hq and HQ_DL["state"] == "downloading"
-    report("把人聲分成主唱與合音" + ("（高品質）" if hq else "（高品質模型下載中，這首先用標準模型）" if waiting else ""), 0.35)
+    label = "把人聲分成主唱與合音" + ("（高品質）" if hq else "（高品質模型下載中，這首先用標準模型）" if waiting else "")
+    if not hq:
+        ensure_model(kara, _dl_report(report, "主唱分離模型", 0.35))
+    report(label, 0.35)
+
+    def run_kara(label):
+        with _sep_progress(label, report, 0.35, 0.18):
+            return [p for p in _outputs(sep.separate(str(voc)), tmp) if p != voc and p != inst_p]
     try:
         sep.load_model(model_filename=kara)
-        outs2 = [p for p in _outputs(sep.separate(str(voc)), tmp) if p != voc and p != inst_p]
+        outs2 = run_kara(label)
     except Exception as e:
         if not hq:
             raise
@@ -805,8 +1023,9 @@ def separate_uvr(d: Path, cfg: dict, report) -> None:
         print(f"[separate] 高品質主唱分離失敗，改用標準模型：{type(e).__name__}: {e}", flush=True)
         kara = cfg["karaoke_model"]
         report("把人聲分成主唱與合音（標準）", 0.35)
+        ensure_model(kara, _dl_report(report, "主唱分離模型", 0.35))
         sep.load_model(model_filename=kara)
-        outs2 = [p for p in _outputs(sep.separate(str(voc)), tmp) if p != voc and p != inst_p]
+        outs2 = run_kara("把人聲分成主唱與合音（標準）")
     meta = read_meta(d)
     meta["karaoke"] = kara
     write_meta(d, meta)
@@ -1950,7 +2169,7 @@ def similarity(recognized: str, candidate: str) -> float | None:
     return round(sum(x.size for x in m.get_matching_blocks()) / len(a), 3)
 
 
-USER_AGENT = "LeihuLiantai/1.4.9 (+https://github.com/LeihuTW/Leihu-singsing)"   # HTTP 標頭只能用英文字
+USER_AGENT = "LeihuLiantai/1.4.10 (+https://github.com/LeihuTW/Leihu-singsing)"   # HTTP 標頭只能用英文字
 
 
 def _http_json(url: str, headers: dict | None = None, timeout: int = 8):

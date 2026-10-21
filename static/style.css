@@ -1,4 +1,6 @@
 /* 練唱台 — 錄音室控台風格：冷色底、琥珀色是原唱旋律、藍色是你的聲音 */
+/* 內建字體 jf open 粉圓 2.1（justfont，SIL Open Font License 1.1，授權見 fonts/jf-openhuninn-LICENSE.txt） */
+@font-face { font-family: "jf open huninn"; src: url("/static/fonts/jf-openhuninn-2.1.ttf") format("truetype"); font-display: swap; }
 :root {
   --bg: #eef1f4;
   --panel: #fbfcfd;
@@ -19,6 +21,12 @@
   --mono: ui-monospace, "SF Mono", Consolas, "Cascadia Mono", monospace;
   color-scheme: light;
 }
+/* 設定裡的「字體」：粉圓（預設）＝介面和歌詞都用粉圓；楷書＝歌詞用楷書、介面黑體；黑體＝全部黑體 */
+:root[data-font="huninn"] {
+  --sans: "jf open huninn", "Noto Sans TC", "PingFang TC", "Microsoft JhengHei", system-ui, sans-serif;
+  --lyric: "jf open huninn", "Noto Sans TC", "PingFang TC", "Microsoft JhengHei", sans-serif;
+}
+:root[data-font="sans"] { --lyric: "Noto Sans TC", "PingFang TC", "Microsoft JhengHei", "Heiti TC", sans-serif; }
 @media (prefers-color-scheme: dark) {
   :root {
     --bg: #0e1318;

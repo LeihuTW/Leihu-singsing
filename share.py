@@ -236,20 +236,120 @@ def export_audio(y: np.ndarray, sr: int, path: Path) -> Path:
 
 # ---------------------------------------------------------------- 影片
 
-def _font(size: int, bold: bool = False):
+FONT_DIR = Path(__file__).resolve().parent / "static" / "fonts"
+HUNINN = FONT_DIR / "jf-openhuninn-2.1.ttf"   # jf open 粉圓（SIL OFL 1.1，內建）
+_FAMILY = ["huninn"]                          # huninn／kai／sans，匯出前依設定切換
+_FONTS: dict = {}
+_CMAPS: dict = {}
+
+
+def set_font_family(name: str | None) -> None:
+    _FAMILY[0] = name if name in ("huninn", "kai", "sans") else "huninn"
+
+
+def _cmap(path: Path) -> set:
+    """讀字型檔裡有哪些字（TrueType cmap，格式 4／12），用來判斷要不要換備用字型。"""
+    import struct
+    if path in _CMAPS:
+        return _CMAPS[path]
+    out: set = set()
+    try:
+        b = path.read_bytes()
+        n = struct.unpack(">H", b[4:6])[0]
+        o = next(struct.unpack(">L", b[12 + 16 * i + 8:12 + 16 * i + 12])[0] for i in range(n)
+                 if b[12 + 16 * i:12 + 16 * i + 4] == b"cmap")
+        subs = {}
+        for j in range(struct.unpack(">H", b[o + 2:o + 4])[0]):
+            pid, eid, off = struct.unpack(">HHL", b[o + 4 + 8 * j:o + 12 + 8 * j])
+            subs[(pid, eid)] = o + off
+        if (3, 10) in subs and struct.unpack(">H", b[subs[(3, 10)]:subs[(3, 10)] + 2])[0] == 12:
+            t = subs[(3, 10)]
+            for g in range(struct.unpack(">L", b[t + 12:t + 16])[0]):
+                st, en, _ = struct.unpack(">LLL", b[t + 16 + 12 * g:t + 28 + 12 * g])
+                out.update(range(st, en + 1))
+        elif (3, 1) in subs:
+            t = subs[(3, 1)]
+            seg = struct.unpack(">H", b[t + 6:t + 8])[0] // 2
+            ends = struct.unpack(f">{seg}H", b[t + 14:t + 14 + 2 * seg])
+            starts = struct.unpack(f">{seg}H", b[t + 16 + 2 * seg:t + 16 + 4 * seg])
+            for st, en in zip(starts, ends):
+                if st != 0xFFFF:
+                    out.update(range(st, en + 1))
+    except Exception:
+        out = set()
+    _CMAPS[path] = out
+    return out
+
+
+def _sys_font(size: int, bold: bool = False, kai: bool = False):
     from PIL import ImageFont
     win = Path(r"C:\Windows\Fonts")
-    names = (["msjhbd.ttc", "msjh.ttc"] if bold else ["msjh.ttc", "msjhbd.ttc"]) + [
+    names = (["kaiu.ttf"] if kai else []) + (["msjhbd.ttc", "msjh.ttc"] if bold else ["msjh.ttc", "msjhbd.ttc"]) + [
         "/usr/share/fonts/opentype/noto/NotoSansCJK-%s.ttc" % ("Bold" if bold else "Regular"),
         "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc", "/System/Library/Fonts/PingFang.ttc"]
     for n in names:
         p = Path(n) if "/" in n else win / n
         if p.exists():
             try:
-                return ImageFont.truetype(str(p), size, index=0)
+                f = ImageFont.truetype(str(p), size, index=0)
+                f._path = p
+                return f
             except OSError:
                 continue
     return ImageFont.load_default()
+
+
+def _font(size: int, bold: bool = False):
+    """依設定的字體取字型。粉圓與楷書只有一種粗細，粗體用描邊模擬；
+    字型裡沒有的字（例如韓文、罕用字）畫的時候會整句改用微軟正黑體，不會變成方塊。"""
+    from PIL import ImageFont
+    fam = _FAMILY[0]
+    key = (fam, size, bold)
+    if key in _FONTS:
+        return _FONTS[key]
+    f = None
+    if fam == "huninn" and HUNINN.exists():
+        try:
+            f = ImageFont.truetype(str(HUNINN), size)
+            f._path = HUNINN
+        except OSError:
+            f = None
+    elif fam == "kai":
+        k = _sys_font(size, bold, kai=True)
+        if getattr(k, "_path", Path()).name == "kaiu.ttf":
+            f = k
+    if f is None:
+        f = _sys_font(size, bold)
+    else:
+        f._fb = _sys_font(size, bold)
+        f._cmap = _cmap(f._path) if f._path.suffix.lower() == ".ttf" else set()
+        f._sw = max(1, round(size / 64)) if bold else 0
+    _FONTS[key] = f
+    return f
+
+
+def _ff(font, text: str):
+    """這句裡有字型沒有的字，就改用備用字型。"""
+    cm = getattr(font, "_cmap", None)
+    if cm and any(ord(c) not in cm and not c.isspace() for c in str(text)):
+        return font._fb
+    return font
+
+
+class _Draw:
+    """包住 ImageDraw：自動換備用字型、粉圓／楷書的粗體用描邊模擬。"""
+
+    def __init__(self, dr):
+        self._dr = dr
+
+    def __getattr__(self, name):
+        return getattr(self._dr, name)
+
+    def text(self, xy, text, font=None, fill=None, **kw):
+        f = _ff(font, text) if font is not None else font
+        if f is font and getattr(f, "_sw", 0) and "stroke_width" not in kw:
+            kw.update(stroke_width=f._sw, stroke_fill=fill)
+        return self._dr.text(xy, text, font=f, fill=fill, **kw)
 
 
 def _hex(c: str, a: int = 255) -> tuple:
@@ -291,7 +391,7 @@ class VideoPainter:
 
     def _background(self):
         img = self.Image.new("RGB", (W, H), _hex(self.BG)[:3])   # RGB 底圖，半透明的筆畫才會混色
-        dr = self.ImageDraw.Draw(img, "RGBA")
+        dr = _Draw(self.ImageDraw.Draw(img, "RGBA"))
         # 上方淡淡的琥珀色漸層
         for y in range(0, 640, 4):
             a = int(70 * (1 - y / 640) ** 2)
@@ -336,7 +436,7 @@ class VideoPainter:
         """vt：影片第幾秒。"""
         now = self.t0 + vt * self.speed          # 歌曲時間
         img = self.bg.copy()
-        dr = self.ImageDraw.Draw(img, "RGBA")
+        dr = _Draw(self.ImageDraw.Draw(img, "RGBA"))
         x0, y0, x1, y1 = self.roll
         lo_t, hi_t = now - self.window * 0.35, now + self.window * 0.65
         rh = (y1 - y0) / (self.hi - self.lo)
@@ -397,19 +497,20 @@ class VideoPainter:
 
     def _lyric(self, img, text: str, y: int, frac: float) -> None:
         text = self._fit(text, self.f_now)
-        dr = self.ImageDraw.Draw(img, "RGBA")
+        dr = _Draw(self.ImageDraw.Draw(img, "RGBA"))
         dr.text((W / 2, y), text, font=self.f_now, fill=_hex(self.INK), anchor="mm")
         if frac > 0:   # 唱過的部分換成琥珀色
             tw = self.f_now.getlength(text)
             x0 = int(W / 2 - tw / 2)
             layer = self.Image.new("RGBA", (W, 120), (0, 0, 0, 0))
-            self.ImageDraw.Draw(layer).text((W / 2, 60), text, font=self.f_now, fill=_hex(self.MEL), anchor="mm")
+            _Draw(self.ImageDraw.Draw(layer)).text((W / 2, 60), text, font=self.f_now, fill=_hex(self.MEL), anchor="mm")
             cut = x0 + int(tw * frac)
             layer = layer.crop((0, 0, max(1, cut), 120))
             img.paste(layer, (0, y - 60), layer)
 
 
 def export_video(d: Path, info: dict, timing: dict, title: str, audio: Path, out: Path, report) -> Path:
+    set_font_family(P.load_config().get("font"))
     painter = VideoPainter(d, info, timing, title)
     total = int(timing["dur"] * FPS)
     flags = 0x08000000 if sys.platform == "win32" else 0
@@ -439,12 +540,13 @@ def export_video(d: Path, info: dict, timing: dict, title: str, audio: Path, out
 
 def export_scorecard(d: Path, info: dict, title: str, out: Path) -> Path:
     """成績卡（1080×1350，IG／FB／X／Threads 貼文都適合的 4:5）：分數、旋律對照、最需要練的句子。"""
+    set_font_family(P.load_config().get("font"))
     from PIL import Image, ImageDraw
     CW, CH = 1080, 1350
     BG, GRID, MEL, VOICE, BAD, INK, MUTED = (VideoPainter.BG, VideoPainter.GRID, VideoPainter.MEL, VideoPainter.VOICE,
                                              VideoPainter.BAD, VideoPainter.INK, VideoPainter.MUTED)
     img = Image.new("RGB", (CW, CH), _hex(BG)[:3])
-    dr = ImageDraw.Draw(img, "RGBA")
+    dr = _Draw(ImageDraw.Draw(img, "RGBA"))
     for y in range(0, 560, 4):
         dr.rectangle((0, y, CW, y + 4), fill=_hex(MEL, int(70 * (1 - y / 560) ** 2) // 3))
     key, speed = int(info.get("key", 0)), float(info.get("speed", 1))
@@ -540,6 +642,7 @@ def safe_name(s: str) -> str:
 
 def export_take(d: Path, tid: str, opts: dict, out_base: Path, report) -> list[str]:
     """依 opts["formats"]（mp3／wav／mp4）匯出，回傳檔案路徑。"""
+    set_font_family(P.load_config().get("font"))
     info = load_take(d, tid)
     title = P.read_meta(d).get("title", "我的演唱")
     out_base.parent.mkdir(parents=True, exist_ok=True)

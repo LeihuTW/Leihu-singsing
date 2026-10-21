@@ -8,7 +8,7 @@
 </head>
 <body>
 <header class="bar">
-  <span class="logo">雷虎練唱台<small id="ver">1.4.9</small></span>
+  <span class="logo">雷虎練唱台<small id="ver">1.4.10</small></span>
   <nav class="row">
     <button id="nav-lib" class="tab cur">歌曲庫</button>
     <button id="nav-practice" class="tab" disabled>練唱</button>
@@ -367,7 +367,7 @@
       <label for="ov-align">對齊</label>
       <select id="ov-align"><option value="center" selected>置中</option><option value="left">靠左</option></select>
       <label for="ov-font">字體</label>
-      <select id="ov-font"><option value="kai" selected>楷書（和練唱畫面相同）</option><option value="sans">黑體（微軟正黑體）</option></select>
+      <select id="ov-font"><option value="huninn" selected>粉圓（內建）</option><option value="kai">楷書</option><option value="sans">黑體（微軟正黑體）</option></select>
       <label for="ov-color">上色</label>
       <span class="row"><input id="ov-color" type="color" value="#f0a04a"><span class="hint">字的顏色是白色，唱到的字換成這個顏色</span></span>
       <label for="ov-bg">背景</label>
@@ -408,6 +408,8 @@
         <option value="en">英文</option><option value="ja">日文</option><option value="ko">韓文</option>
       </select></label>
     <label class="row"><input id="cfg-tw" type="checkbox"> 中文歌詞轉成台灣繁體用字</label>
+    <label class="field"><span>字體（練唱畫面、歌詞與匯出的影片／成績卡）</span>
+      <select id="cfg-font"><option value="huninn">粉圓（內建 jf open 粉圓）</option><option value="kai">楷書（歌詞楷書、介面黑體）</option><option value="sans">黑體（微軟正黑體）</option></select></label>
     <label class="field"><span>人聲分離模型</span><input id="cfg-sep" type="text"></label>
     <label class="field"><span>主唱／合音分離品質（合音多的歌，高品質的旋律會準很多）</span>
       <select id="cfg-kq"><option value="auto">自動（有顯示卡用高品質）</option><option value="high">高品質（沒有顯示卡會非常慢）</option><option value="standard">標準（快）</option></select></label>

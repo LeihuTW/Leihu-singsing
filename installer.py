@@ -558,12 +558,16 @@ def prefetch_models(tag: str = "cpu") -> None:
                 (uvr / m).unlink(missing_ok=True)
             missing.append(m)
     if missing:
-        say("  下載人聲分離模型（約 120 MB，來源伺服器較慢，可能要 5–10 分鐘）…")
+        say("  下載人聲分離模型（約 120 MB，優先從 Hugging Face 鏡像分段下載）…")
         stop = _watch(uvr, 60e6 * len(missing), "人聲分離模型", (0, 0.2))
-        code = ("import pipeline\nfrom audio_separator.separator import Separator\n"
-                f"s = Separator(model_file_dir=r'{uvr}', output_dir=r'{ROOT / 'logs'}')\n"
-                + "".join(f"s.download_model_and_data(r'{m}')\n" for m in missing) + "print('ok')")
+        # 用練唱台自己的下載程式：Hugging Face 鏡像＋GitHub 備援、多段同時下載、可續傳、核對檢查碼
+        code = ("import pipeline\n" + "".join(f"pipeline.ensure_model(r'{m}')\n" for m in missing) + "print('ok')")
         ok, out = probe(code, timeout=3600)
+        if not ok:   # 萬一失敗，改用 audio-separator 內建的下載（GitHub）
+            code = ("import pipeline\nfrom audio_separator.separator import Separator\n"
+                    f"s = Separator(model_file_dir=r'{uvr}', output_dir=r'{ROOT / 'logs'}')\n"
+                    + "".join(f"s.download_model_and_data(r'{m}')\n" for m in missing) + "print('ok')")
+            ok, out = probe(code, timeout=3600)
         if not ok:   # 舊版 audio-separator 沒有 download_model_and_data，改用 load_model 觸發下載
             code = ("import pipeline\nfrom audio_separator.separator import Separator\n"
                     f"s = Separator(model_file_dir=r'{uvr}', output_dir=r'{ROOT / 'logs'}')\n"

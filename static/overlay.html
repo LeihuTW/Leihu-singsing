@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>雷虎練唱台 直播歌詞</title>
 <style>
+  @font-face { font-family: "jf open huninn"; src: url("/static/fonts/jf-openhuninn-2.1.ttf") format("truetype"); font-display: block; }
   /* 直播用的歌詞畫面：背景透明，給 OBS「瀏覽器」來源使用。設定都在網址參數裡 */
   :root {
     --size: 56px; --fill: #f0a04a; --ink: #ffffff; --edge: rgba(0, 0, 0, .85);
@@ -13,6 +14,7 @@
   html, body { margin: 0; height: 100%; background: transparent; overflow: hidden; }
   body.bg-green { background: #00ff00; }
   body.bg-black { background: #000; }
+  body.font-huninn { --font: "jf open huninn", "Microsoft JhengHei", "微軟正黑體", "PingFang TC", "Noto Sans TC", sans-serif; }
   body.font-sans { --font: "Microsoft JhengHei", "微軟正黑體", "PingFang TC", "Noto Sans TC", sans-serif; }
   .wrap {
     position: fixed; inset: 0; display: flex; flex-direction: column; padding: 4vh 4vw;
@@ -62,7 +64,7 @@ if (hex(Q.get("ink"))) document.documentElement.style.setProperty("--ink", hex(Q
 document.body.classList.add("pos-" + (["top", "center", "bottom"].includes(Q.get("pos")) ? Q.get("pos") : "bottom"));
 document.body.classList.add("align-" + (Q.get("align") === "left" ? "left" : "center"));
 if (["green", "black"].includes(Q.get("bg"))) document.body.classList.add("bg-" + Q.get("bg"));
-if (Q.get("font") === "sans") document.body.classList.add("font-sans");
+if (["sans", "huninn"].includes(Q.get("font"))) document.body.classList.add("font-" + Q.get("font"));
 
 // 依行數排版：1 行＝正在唱；2 行＝正在唱＋下一句；3 行＝上一句＋正在唱＋下一句；5 行＝上一句＋正在唱＋後三句
 const LAYOUT = { 1: [0], 2: [0, 1], 3: [-1, 0, 1], 5: [-1, 0, 1, 2, 3] }[NLINES];

@@ -11,6 +11,16 @@ const store = {
   set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} },
 };
 
+/* 字體：粉圓（內建）／楷書／黑體。先套用上次的設定避免閃一下，再跟伺服器的設定同步 */
+function applyFont(f) {
+  f = ["huninn", "kai", "sans"].includes(f) ? f : "huninn";
+  document.documentElement.dataset.font = f;
+  store.set("font", f);
+  if (f === "huninn" && document.fonts) document.fonts.load('20px "jf open huninn"').catch(() => {});
+}
+applyFont(store.get("font", "huninn"));
+fetch("/api/config").then(r => r.json()).then(c => applyFont(c.font)).catch(() => {});
+
 async function api(path, opts = {}) {
   const o = { ...opts };
   if (o.json !== undefined) { o.body = JSON.stringify(o.json); o.headers = { "Content-Type": "application/json" }; o.method = o.method || "POST"; delete o.json; }
@@ -2231,9 +2241,9 @@ function overlaySync() {
 }
 
 /* 直播歌詞設定視窗 */
-const OVO = store.get("overlayOpts", { lines: "2", size: 56, pos: "bottom", align: "center", font: "kai", color: "#f0a04a", bg: "none" });
+const OVO = store.get("overlayOpts", { lines: "2", size: 56, pos: "bottom", align: "center", font: "huninn", color: "#f0a04a", bg: "none" });
 function overlayUrl() {
-  const q = new URLSearchParams({ lines: OVO.lines, size: OVO.size, pos: OVO.pos, align: OVO.align, font: OVO.font || "kai", color: OVO.color.replace("#", ""), bg: OVO.bg });
+  const q = new URLSearchParams({ lines: OVO.lines, size: OVO.size, pos: OVO.pos, align: OVO.align, font: OVO.font || "huninn", color: OVO.color.replace("#", ""), bg: OVO.bg });
   return `${location.origin}/overlay?${q}`;
 }
 function syncOverlayDlg() {
@@ -2383,6 +2393,7 @@ async function openSettings(focusUsage) {
   $("#cfg-whisper").value = cfg.whisper_model;
   $("#cfg-lang").value = cfg.lyrics_language || "";
   $("#cfg-tw").checked = !!cfg.convert_to_taiwan;
+  $("#cfg-font").value = cfg.font || "huninn";
   $("#cfg-sep").value = cfg.separation_model;
   $("#cfg-kara").value = cfg.karaoke_model;
   $("#cfg-kq").value = cfg.karaoke_quality || "auto";
@@ -2399,10 +2410,11 @@ async function saveSettings(extra = {}) {
     await api("/api/config", { json: {
       anthropic_api_key: $("#cfg-key").value, claude_model: $("#cfg-model").value.trim(),
       whisper_model: $("#cfg-whisper").value, lyrics_language: $("#cfg-lang").value,
-      convert_to_taiwan: $("#cfg-tw").checked, separation_model: $("#cfg-sep").value.trim(),
+      convert_to_taiwan: $("#cfg-tw").checked, font: $("#cfg-font").value, separation_model: $("#cfg-sep").value.trim(),
       karaoke_model: $("#cfg-kara").value.trim(), karaoke_quality: $("#cfg-kq").value, pitch_model: $("#cfg-pitch").value,
       balance_usd: $("#cfg-balance").value.trim().replace(/^US\$|^\$/, ""), ...extra,
     } });
+    applyFont($("#cfg-font").value);
     $("#settings").hidden = true; toast("設定已儲存"); pollJobs();
   } catch (e) { toast(e.message); }
 }
