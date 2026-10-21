@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>雷虎練唱台 1.4.10 使用說明</title>
+<title>雷虎練唱台 1.5 使用說明</title>
 <style>
 /* 和程式本體同一套色彩：冷色控台底、琥珀色是原唱旋律、藍色是你的聲音 */
 :root {
@@ -51,7 +51,7 @@ th { color: var(--muted); font-weight: 600; font-size: 13px; }
 <body>
 <div class="wrap">
   <div class="top"><a href="/" id="back">← 回到雷虎練唱台</a></div>
-  <h1>雷虎練唱台 <span class="ver">1.4.10</span></h1>
+  <h1>雷虎練唱台 <span class="ver">1.5</span></h1>
 
   <section id="copyright" class="note legal" aria-labelledby="copyright-h">
     <h2 id="copyright-h">版權與使用聲明</h2>
@@ -63,6 +63,7 @@ th { color: var(--muted); font-weight: 600; font-size: 13px; }
       <li>禁止將本工具或修改後的版本打包販售，或做成付費商品、付費服務提供。沒有販售行為時，可以自由修改與分享，但須註明來源（雷虎練唱台／雷虎肯茲 Leihustore，<a href="https://github.com/LeihuTW/Leihu-singsing">github.com/LeihuTW/Leihu-singsing</a>）並保留本聲明。</li>
       <li>匯入的歌曲與歌詞，版權屬於原權利人；直播時播放音樂，仍須遵守平台與著作權規定。</li>
       <li>本工具使用的開源套件與 AI 模型，各依其授權條款使用。</li>
+      <li>日文假名標音使用 SudachiPy 與 Sudachi 字典（Works Applications，Apache License 2.0）。</li>
       <li>內建字體「jf open 粉圓」由 justfont 以 SIL Open Font License 1.1 開源釋出，字體本身不受上面的禁止販售條款限制，依其授權使用；授權全文在安裝資料夾的 static\fonts\jf-openhuninn-LICENSE.txt。</li>
     </ol>
   </section>
@@ -86,7 +87,7 @@ th { color: var(--muted); font-weight: 600; font-size: 13px; }
 
   <h2 id="install">安裝</h2>
   <ol>
-    <li>雙擊 <code>雷虎練唱台1.4.10.exe</code>（從 GitHub 下載的檔名是 <code>LeihuLiantai-1.4.10-Setup.exe</code>）。已經裝過舊版的，直接安裝新版即可，歌曲庫和設定會保留。</li>
+    <li>雙擊 <code>雷虎練唱台1.5.exe</code>（從 GitHub 下載的檔名是 <code>LeihuLiantai-1.5-Setup.exe</code>）。已經裝過舊版的，直接安裝新版即可，歌曲庫和設定會保留。</li>
     <li>如果出現藍色的「Windows 已保護您的電腦」，按「其他資訊」，再按「仍要執行」。這是因為安裝程式沒有付費的數位簽章，不是病毒警告。</li>
     <li>選安裝位置（預設即可，不需要系統管理員權限），按「安裝」。</li>
     <li>如果這台電腦裝過雷虎練唱台，會先詢問：
@@ -138,6 +139,7 @@ th { color: var(--muted); font-weight: 600; font-size: 13px; }
     <tr><td>速度</td><td>70%–110%，放慢時音高不變；和 KEY 一樣第一次要轉換，之後會記住</td></tr>
     <tr><td>A／B 循環</td><td>在句子開頭按 A、結尾按 B，就會反覆播放這一段。「取消循環」恢復正常</td></tr>
     <tr><td>逐字上色</td><td>唱到哪個字就把哪個字上色（下方歌詞和旋律上的字）。歌詞時間沒對準時看起來會很怪，可以按一下關掉，只標出正在唱的那一句</td></tr>
+    <tr><td>假名標音／羅馬拼音</td><td>日文歌才會出現的選單：「假名標音」在漢字上方標平假名；「羅馬拼音」在每個詞上方標羅馬拼音；也可以選「不標讀音」。直播歌詞會跟著一起顯示。讀音由電腦自動判斷，歌詞裡的特殊讀法（例如「明日」唱成あした）可能標錯：在假名標音模式下點一下讀音就能修改，輸入平假名或片假名後按 Enter，這首歌裡同一個詞都會套用，羅馬拼音也會跟著改；清空再按 Enter 就恢復自動判斷。每首歌的修改各自記住。第一次使用會自動下載日文讀音字典（約 45 MB）</td></tr>
     <tr><td>字在旋律上</td><td>把歌詞逐字標在對應的音符上方，唱過的字會變色。可以隨時開關；旁邊的「字級」拉桿調整字的大小</td></tr>
     <tr><td>調整</td><td>開啟後可以用滑鼠拖曳：上方的句子標記移動整句、旋律上的字調整單字時間；雙擊字可以修改文字。放開後自動儲存</td></tr>
     <tr><td>視窗</td><td>拉桿調整卷軸一次顯示幾秒</td></tr>
@@ -285,6 +287,11 @@ th { color: var(--muted); font-weight: 600; font-size: 13px; }
   <p>Windows 設定 → 應用程式 → 找到「雷虎練唱台」→ 解除安裝。過程中會問你要不要保留歌曲庫；選「否」就只移除程式，歌曲和錄音會留下來。</p>
 
   <h2 id="changes">版本紀錄</h2>
+  <h3>1.5</h3>
+  <p><b>功能新增</b></p>
+  <ul>
+    <li>日文歌詞顯示方式優化</li>
+  </ul>
   <h3>1.4.10</h3>
   <p><b>功能新增</b></p>
   <ul>
@@ -480,7 +487,7 @@ th { color: var(--muted); font-weight: 600; font-size: 13px; }
     <li>初版：AI 分離主唱／合音／伴奏、旋律分析、歌詞辨識與台灣繁體轉換、升降 KEY 與變速、A–B 循環、麥克風即時音高與錄音評分、YouTube 匯入、Claude 歌詞對齊與練習建議、用量與費用顯示、歌詞匯出（LRC／SRT／TXT）、顯示卡加速、桌面程式與安裝程式</li>
   </ul>
 
-  <p class="lede" style="margin-top:40px">雷虎練唱台 1.4.10</p>
+  <p class="lede" style="margin-top:40px">雷虎練唱台 1.5</p>
 </div>
 <script>
   // 直接用瀏覽器開啟這份說明時，隱藏「回到程式」的連結

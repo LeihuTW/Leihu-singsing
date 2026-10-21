@@ -13,3 +13,5 @@ anthropic>=0.40
 audio-separator[cpu]>=0.30
 yt-dlp
 imageio-ffmpeg
+sudachipy
+sudachidict_small

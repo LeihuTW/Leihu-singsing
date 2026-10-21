@@ -18,7 +18,7 @@ import claude_api as C
 import pipeline as P
 import share as SH
 
-VERSION = "1.4.10"
+VERSION = "1.5"
 HOST, PORT = "127.0.0.1", int(os.environ.get("LIANTAI_PORT", "8765"))
 app = Flask(__name__, static_folder=str(P.ROOT / "static"), static_url_path="/static")
 app.config["MAX_CONTENT_LENGTH"] = 1024 * 1024 * 1024
@@ -295,7 +295,44 @@ def get_lyrics(sid):
                    source=meta.get("lyrics_source"), online_info=meta.get("lyrics_online"),
                    unreliable=not P.recognition_reliable(meta),
                    reasons=(meta.get("lyrics_quality") or {}).get("reasons", []),
-                   language=meta.get("language"), song_language=meta.get("lyrics_language"))
+                   language=meta.get("language"), song_language=meta.get("lyrics_language"),
+                   kana_fix=meta.get("kana_fix") or {})
+
+
+@app.post("/api/furigana")
+def furigana():
+    """日文歌詞的假名標音。字典還沒裝好時先在背景安裝，回傳安裝狀態。"""
+    lines = [str(x)[:300] for x in ((request.get_json(force=True) or {}).get("lines") or [])][:500]
+    if not P.kana_ready():
+        P.start_kana_install()
+        return jsonify(state=P.kana_status())
+    out = {}
+    for t in dict.fromkeys(lines):
+        try:
+            out[t] = P.furigana(t)
+        except Exception as e:
+            P.log_error("furigana", e)
+            out[t] = None
+    return jsonify(state={"state": "ready"}, ruby=out)
+
+
+@app.post("/api/songs/<sid>/kana")
+def set_kana(sid):
+    """修改這首歌某個漢字詞的讀音（每首歌各自記住）；讀音空白＝恢復自動判斷。"""
+    b = request.get_json(force=True) or {}
+    base, reading = str(b.get("base") or "").strip()[:40], str(b.get("reading") or "").strip()[:80]
+    if not base:
+        raise P.UserError("缺少要修改的字")
+    d = P.song_dir(sid)
+    meta = P.read_meta(d)
+    fix = meta.get("kana_fix") or {}
+    if reading:
+        fix[base] = reading
+    else:
+        fix.pop(base, None)
+    meta["kana_fix"] = fix
+    P.write_meta(d, meta)
+    return jsonify(kana_fix=fix)
 
 
 @app.post("/api/songs/<sid>/lyrics/use")

@@ -96,6 +96,7 @@ def module_status() -> dict:
         "pedalboard": has("pedalboard"),
         "opencc": has("opencc"),
         "anthropic": has("anthropic"),
+        "kana": has("sudachipy") and has("sudachidict_small"),
         "cuda": _cuda(),
     }
 
@@ -1774,6 +1775,110 @@ def list_takes(d: Path) -> list[dict]:
     return out
 
 
+# ---------------------------------------------------------------- 日文假名標音（ふりがな）
+
+# 用 SudachiPy（Apache-2.0）的小型字典判斷漢字讀音。第一次用到時才在背景安裝（約 45 MB），安裝檔也會先裝好。
+KANA_PKGS = ["sudachipy==0.7.0", "sudachidict_small==20261015"]
+KANA = {"state": "idle", "error": ""}
+_kana_lock = threading.Lock()
+_KANA_TK = None
+_KANJI = "\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff々〆ヶ"
+_KANJI_RE = re.compile(f"[{_KANJI}]")
+_PARTS_RE = re.compile(f"[{_KANJI}]+|[^{_KANJI}]+")
+
+
+def kana_ready() -> bool:
+    import importlib.util as u
+    return u.find_spec("sudachipy") is not None and u.find_spec("sudachidict_small") is not None
+
+
+def kana_status() -> dict:
+    return {"state": "ready"} if kana_ready() else dict(KANA)
+
+
+def start_kana_install() -> None:
+    """在背景用 pip 安裝日文讀音字典（舊版升級上來的使用者沒有，不用重跑安裝）。"""
+    with _kana_lock:
+        if KANA["state"] == "installing" or kana_ready():
+            return
+        KANA.update(state="installing", error="")
+
+    def run():
+        import importlib
+        import subprocess
+        exe = Path(sys.executable)
+        if exe.name.lower() == "pythonw.exe" and (exe.parent / "python.exe").exists():
+            exe = exe.parent / "python.exe"
+        try:
+            r = subprocess.run([str(exe), "-m", "pip", "install", "--disable-pip-version-check", *KANA_PKGS],
+                               capture_output=True, text=True, timeout=1800,
+                               creationflags=0x08000000 if sys.platform == "win32" else 0)
+            importlib.invalidate_caches()
+            if r.returncode != 0 or not kana_ready():
+                raise RuntimeError((r.stderr or r.stdout or "").strip().splitlines()[-1:] or ["安裝失敗"])
+            KANA.update(state="done")
+        except Exception as e:
+            log_error("kana install", e)
+            KANA.update(state="error", error=f"{type(e).__name__}: {e}")
+    threading.Thread(target=run, daemon=True).start()
+
+
+def _kata(s: str) -> str:
+    return "".join(chr(ord(c) + 0x60) if "ぁ" <= c <= "ゖ" else c for c in s)
+
+
+def _hira(s: str) -> str:
+    return "".join(chr(ord(c) - 0x60) if "ァ" <= c <= "ヶ" else c for c in s)
+
+
+def _ruby_word(surface: str, reading: str) -> list[list[str]]:
+    """一個詞拆成「漢字＋讀音」與「假名」：沈む／シズム → [["沈","しず"],["む",""]]"""
+    if not _KANJI_RE.search(surface) or not reading or reading == "*":
+        return [[surface, ""]]
+    parts = _PARTS_RE.findall(surface)
+    pat = "".join("(.+?)" if _KANJI_RE.match(p) else re.escape(_kata(p)) for p in parts)
+    m = re.fullmatch(pat, _kata(reading))
+    if not m:
+        return [[surface, _hira(reading)]]
+    out, g = [], iter(m.groups())
+    for p in parts:
+        out.append([p, _hira(next(g))] if _KANJI_RE.match(p) else [p, ""])
+    return out
+
+
+_JA_RE = re.compile(f"[\u3040-\u30ff{_KANJI}]")
+
+
+def furigana(text: str) -> list[dict] | None:
+    """一句日文歌詞拆成詞：[{"p": [[字, 讀音], …], "pt": 是否助詞}, …]。
+    讀音只標在漢字上（空字串＝不用標）；羅馬拼音由前端依每個詞的讀音換算（助詞は／へ／を 念 wa／e／o）。
+    沒有假名也沒有漢字的句子回傳 None。"""
+    global _KANA_TK
+    if not text or not _JA_RE.search(text):
+        return None
+    with _kana_lock:
+        if _KANA_TK is None:
+            from sudachipy import dictionary
+            _KANA_TK = dictionary.Dictionary(dict="small").create()
+        from sudachipy import tokenizer
+        toks = _KANA_TK.tokenize(text, tokenizer.Tokenizer.SplitMode.C)
+    out: list[dict] = []
+    for t in toks:
+        parts: list[list[str]] = []
+        for b, r in _ruby_word(t.surface(), t.reading_form()):
+            if not r and parts and not parts[-1][1]:
+                parts[-1][0] += b
+            else:
+                parts.append([b, r])
+        tok = {"p": parts}
+        if t.part_of_speech()[0] == "助詞":
+            tok["pt"] = 1
+        out.append(tok)
+    if "".join(b for t in out for b, _ in t["p"]) != text:
+        return None
+    return out
+
+
 def lyric_lines(d: Path) -> list[dict]:
     p = d / "lyrics.lrc"
     if not p.exists():
@@ -2169,7 +2274,7 @@ def similarity(recognized: str, candidate: str) -> float | None:
     return round(sum(x.size for x in m.get_matching_blocks()) / len(a), 3)
 
 
-USER_AGENT = "LeihuLiantai/1.4.10 (+https://github.com/LeihuTW/Leihu-singsing)"   # HTTP 標頭只能用英文字
+USER_AGENT = "LeihuLiantai/1.5 (+https://github.com/LeihuTW/Leihu-singsing)"   # HTTP 標頭只能用英文字
 
 
 def _http_json(url: str, headers: dict | None = None, timeout: int = 8):

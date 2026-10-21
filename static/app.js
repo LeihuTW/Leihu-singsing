@@ -957,6 +957,7 @@ function setLines(text) {
   S.lines.forEach((l, i) => { if (!l.chars) { l.chars = distributeChars(l, lineLimit(i)); l.autoChars = true; } });
   S.dirty = true;
   renderTiming();
+  requestFuri();
 }
 /* 把畫面上的歌詞（含逐字時間）寫回文字框；沒有時間的句子保留在最後 */
 function commitLines(save) {
@@ -984,6 +985,8 @@ $("#lrc-save").onclick = async () => {
 const SRC_NAMES = { whisper: "自動辨識結果", online: "線上歌詞", import: "匯入的歌詞檔", manual: "手動編輯的歌詞", claude: "Claude 對齊的歌詞" };
 function applyLyrState(lyr) {
   S.lyr = lyr;
+  S.lyrLangUser = lyr.song_language || null; S.lyrLang = lyr.song_language || lyr.language || null;
+  S.kanaFix = lyr.kana_fix || {};
   const empty = !(lyr.lrc || "").trim();
   let name = SRC_NAMES[lyr.source] || (empty ? "（沒有歌詞）" : "歌詞");
   if (lyr.source === "online" && lyr.online_info) name += `（${[lyr.online_info.track, lyr.online_info.artist].filter(Boolean).join(" - ")}）`;
@@ -994,6 +997,7 @@ function applyLyrState(lyr) {
   $("#lyr-warn").hidden = !(lyr.unreliable && empty);
   $("#lyr-warn-why").textContent = (lyr.reasons || []).length ? `原因：${lyr.reasons.join("、")}。建議用線上歌詞或匯入歌詞檔。` : "";
   $("#lyr-lang").value = lyr.song_language == null ? "__cfg" : lyr.song_language;
+  requestFuri();
   $("#cand-hint").textContent = lyr.unreliable || !lyr.auto
     ? "辨識結果不可靠，依歌名和歌曲長度排序；選有「時間軸」的版本最省事。"
     : "相似度是和自動辨識結果比對的程度，越高越可能是同一首歌、同一個版本。";
@@ -1022,6 +1026,7 @@ $("#lyr-warn-search").onclick = () => {
 };
 $("#lyr-lang").onchange = async e => {
   const v = e.target.value;
+  S.lyrLangUser = v === "__cfg" ? null : v; if (S.lyrLangUser) S.lyrLang = S.lyrLangUser; requestFuri();
   try { await api(`/api/songs/${S.song.id}`, { method: "PATCH", json: { lyrics_language: v === "__cfg" ? null : v } }); toast("已設定這首歌的辨識語言，按「重新辨識歌詞」套用", 2500); }
   catch (err) { toast(err.message); }
 };
@@ -1108,6 +1113,149 @@ function syncLyrButtons() {
 }
 S.charColor = store.get("charColor", true);
 const syncColorBtn = () => { $("#lyr-color").classList.toggle("on", S.charColor); $("#lyr").classList.toggle("nocolor", !S.charColor); S.dirty = true; };
+/* 日文歌詞讀音：漢字上方標平假名，或每個詞上方標羅馬拼音。讀音由本機的 SudachiPy 字典判斷，
+   判斷錯的可以點一下修改（每首歌各自記住，存在歌曲資料夾的 meta.json） */
+const FURI = { map: new Map(), timer: 0, busy: false, warned: false };
+S.kanaMode = store.get("kanaMode", store.get("furigana", true) ? "hira" : "off");   // hira／romaji／off
+S.furiOn = false;
+S.kanaFix = {};
+const escH = s => String(s).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+const JA_RE = /[぀-ヿ㐀-鿿々]/, KANJI_RE = /[㐀-鿿々〆ヶ]/;
+const toHira = s => s.replace(/[ァ-ヶ]/g, c => String.fromCharCode(c.charCodeAt(0) - 0x60));
+function jaSong() {
+  if (S.lyrLangUser && S.lyrLangUser !== "ja") return false;
+  if (S.lyrLang === "ja") return true;
+  let k = 0, n = 0;
+  for (const l of S.lines || []) for (const c of l.text) { if (/[぀-ヿ]/.test(c)) { k++; n++; } else if (/[㐀-鿿]/.test(c)) n++; }
+  return n > 0 && k / n >= 0.15;
+}
+
+/* 平假名 → 羅馬拼音（平文式／Hepburn） */
+const ROMA = Object.fromEntries(("あa いi うu えe おo かka きki くku けke こko さsa しshi すsu せse そso たta ちchi つtsu てte とto "
+  + "なna にni ぬnu ねne のno はha ひhi ふfu へhe ほho まma みmi むmu めme もmo やya ゆyu よyo らra りri るru れre ろro "
+  + "わwa ゐi ゑe をo んn がga ぎgi ぐgu げge ごgo ざza じji ずzu ぜze ぞzo だda ぢji づzu でde どdo ばba びbi ぶbu べbe ぼbo "
+  + "ぱpa ぴpi ぷpu ぺpe ぽpo ぁa ぃi ぅu ぇe ぉo ゔvu ゃya ゅyu ょyo ゎwa").split(" ").map(x => [x[0], x.slice(1)]));
+function romaji(h, particle) {
+  h = toHira(h);
+  if (particle && ({ "は": "wa", "へ": "e", "を": "o" })[h]) return ({ "は": "wa", "へ": "e", "を": "o" })[h];
+  const out = [];
+  for (let i = 0; i < h.length; i++) {
+    const c = h[i], nx = h[i + 1];
+    if (c === "っ") { out.push("\u0000"); continue; }   // 下一個音的子音重複
+    if (c === "ー") { const m = (out.join("").match(/[aeiou](?=[^aeiou]*$)/) || [""])[0]; out.push(m); continue; }
+    let r = ROMA[c];
+    if (r == null) { out.push(c); continue; }
+    if (nx && "ゃゅょ".includes(nx) && r.endsWith("i") && r.length > 1) {   // きゃ kya、しゃ sha、ちゃ cha、じゃ ja
+      const v = ROMA[nx][1];
+      r = /^(sh|ch|j)/.test(r) ? r.slice(0, -1) + v : r.slice(0, -1) + "y" + v; i++;
+    } else if (nx && "ぁぃぅぇぉ".includes(nx) && "うふてでゔしちじつ".includes(c)) {   // ふぁ fa、てぃ ti、しぇ she
+      const base = { "う": "w", "ふ": "f", "て": "t", "で": "d", "ゔ": "v", "し": "sh", "ち": "ch", "じ": "j", "つ": "ts" }[c];
+      r = base + ROMA[nx]; i++;
+    } else if (c === "ん" && nx && /^[aeiouy]/.test(ROMA[nx] || "")) r = "n'";
+    out.push(r);
+  }
+  let s = "";
+  for (let i = 0; i < out.length; i++) {
+    if (out[i] === "\u0000") { const n = out[i + 1] || ""; s += n.startsWith("ch") ? "t" : (n[0] && !/[aeiou]/.test(n[0]) ? n[0] : ""); }
+    else s += out[i];
+  }
+  return s;
+}
+
+/* 套用這首歌修改過的讀音 */
+function fixedParts(tok) {
+  return tok.p.map(([b, r]) => [b, S.kanaFix[b] != null && KANJI_RE.test(b) ? S.kanaFix[b] : r]);
+}
+/* 一句歌詞要顯示的 [字, 標註] 清單（直播歌詞也用這份） */
+function kanaSegs(text) {
+  const toks = S.furiOn && text ? FURI.map.get(text) : null;
+  if (!toks) return null;
+  if (S.kanaMode === "romaji") {
+    return toks.map(t => {
+      const parts = fixedParts(t), surf = parts.map(p => p[0]).join("");
+      if (!JA_RE.test(surf)) return [surf, ""];
+      return [surf, romaji(parts.map(([b, r]) => r || b).join(""), t.pt)];
+    });
+  }
+  return toks.flatMap(fixedParts);
+}
+function furiHTML(text) {
+  const segs = kanaSegs(text);
+  if (!segs) return null;
+  const edit = S.kanaMode === "hira";
+  return segs.map(([b, t]) => t
+    ? `<ruby${edit && KANJI_RE.test(b) ? ` data-b="${escH(b)}" title="點一下修改讀音"` : ""}>${escH(b)}<rt>${escH(t)}</rt></ruby>`
+    : escH(b)).join("");
+}
+function setLyrNode(node, text) {
+  const h = furiHTML(text), key = (h ? S.kanaMode + JSON.stringify(S.kanaFix) : "T") + text;
+  if (node._t === key) return;
+  node._t = key;
+  if (h) node.innerHTML = h; else node.textContent = text;
+}
+function resetLyrNodes() { for (const id of ["#lyr-now", "#lyr-prev", "#lyr-next", "#lyr-next2", "#lyr-next3"]) $(id)._t = null; S.dirty = true; }
+function syncFuriBtn() {
+  const ja = !!S.song && jaSong();
+  S.furiOn = S.kanaMode !== "off" && ja;
+  $("#lyr-kana").hidden = !ja;
+  $("#lyr-kana").value = S.kanaMode;
+  $("#lyr").classList.toggle("furi", S.furiOn);
+  $("#lyr").classList.toggle("romaji", S.furiOn && S.kanaMode === "romaji");
+  resetLyrNodes();
+}
+function requestFuri() {
+  syncFuriBtn();
+  if (!S.furiOn) return;
+  clearTimeout(FURI.timer);
+  FURI.timer = setTimeout(async () => {
+    if (FURI.busy) return;
+    const need = [...new Set(S.lines.map(l => l.text))].filter(t => t && !FURI.map.has(t) && JA_RE.test(t));
+    if (!need.length) return;
+    FURI.busy = true;
+    let retry = false;
+    try {
+      const r = await api("/api/furigana", { json: { lines: need } });
+      if (r.ruby) { for (const [t, v] of Object.entries(r.ruby)) FURI.map.set(t, v); resetLyrNodes(); }
+      else if ((r.state || {}).state === "error") { if (!FURI.warned) toast("日文讀音字典安裝失敗：" + r.state.error, 6000); FURI.warned = true; }
+      else { if (!FURI.warned) toast("第一次使用讀音標註：正在下載日文讀音字典（約 45 MB），好了會自動顯示", 5000); FURI.warned = true; retry = true; }
+    } catch { }
+    FURI.busy = false;
+    if (retry) setTimeout(requestFuri, 4000);
+  }, 250);
+}
+$("#lyr-kana").onchange = e => {
+  S.kanaMode = e.target.value; store.set("kanaMode", S.kanaMode); requestFuri();
+  toast({ hira: "漢字上方標平假名；讀音不對可以點一下修改", romaji: "每個詞上方標羅馬拼音", off: "不標讀音" }[S.kanaMode], 2200);
+};
+
+/* 點讀音修改：只改這首歌，同一個詞在整首歌都會套用；清空＝恢復自動判斷 */
+$("#lyr").addEventListener("click", e => {
+  const rb = e.target.closest("ruby[data-b]");
+  if (!rb || !S.song || S.kanaMode !== "hira") return;
+  e.stopPropagation();
+  const base = rb.dataset.b, cur = rb.querySelector("rt")?.textContent || "";
+  document.querySelector(".kana-edit")?.remove();
+  const box = document.createElement("input");
+  box.className = "kana-edit"; box.value = cur; box.placeholder = "輸入讀音（平假名）";
+  box.setAttribute("aria-label", `「${base}」的讀音`);
+  const rc = rb.getBoundingClientRect();
+  box.style.left = Math.max(8, Math.min(innerWidth - 168, rc.left + rc.width / 2 - 80)) + "px";
+  box.style.top = Math.max(8, rc.top - 40) + "px";
+  document.body.appendChild(box); box.focus(); box.select();
+  let done = false;
+  const finish = async save => {
+    if (done) return; done = true; box.remove();
+    const v = toHira(box.value.trim());
+    if (!save || v === cur) return;
+    try {
+      const r = await api(`/api/songs/${S.song.id}/kana`, { json: { base, reading: v } });
+      S.kanaFix = r.kana_fix || {}; resetLyrNodes();
+      toast(v ? `「${base}」改唸「${v}」，整首歌都會套用` : `「${base}」恢復自動判斷的讀音`, 2500);
+    } catch (err) { toast(err.message); }
+  };
+  box.onkeydown = ev => { ev.stopPropagation(); if (ev.key === "Enter") finish(true); else if (ev.key === "Escape") finish(false); };
+  box.onblur = () => finish(true);
+}, true);
 $("#lyr-color").onclick = () => { S.charColor = !S.charColor; store.set("charColor", S.charColor); syncColorBtn(); toast(S.charColor ? "已開啟逐字上色" : "已關閉逐字上色：只標出正在唱的那一句", 2000); };
 syncColorBtn();
 $("#lyr-show").onclick = () => { S.showLyr = !S.showLyr; if (S.showLyr && !S.showMel) setShowMel(true); if (!S.showLyr) S.editLyr = false; store.set("showLyr", S.showLyr); syncLyrButtons(); };
@@ -2202,7 +2350,8 @@ function updateLyrics(t) {
   const next = S.lines[i + 1] || null;
   const el = $("#lyr-now");
   const text = now ? now.text : "";
-  if (el._t !== text) { $(".base", el).textContent = text; $(".fill", el).textContent = text; el._t = text; }
+  const h = furiHTML(text), key = (h ? S.kanaMode + JSON.stringify(S.kanaFix) : "T") + text;
+  if (el._t !== key) { for (const c of [$(".base", el), $(".fill", el)]) h ? (c.innerHTML = h) : (c.textContent = text); el._t = key; }
   let p = now ? clamp((t - now.t) / Math.max(0.3, now.end - now.t), 0, 1) : 0;
   if (now && now.chars && now.chars.length) {   // 有逐字時間時，跟著每個字變色
     const u = now.chars, n = u.length;
@@ -2215,7 +2364,7 @@ function updateLyrics(t) {
   const more = S.showMel ? [] : [["#lyr-next2", S.lines[i + 2] || null], ["#lyr-next3", S.lines[i + 3] || null]];
   for (const [id, l] of [["#lyr-prev", prev], ["#lyr-next", next], ...more]) {
     const node = $(id), tx = l ? l.text : (id === "#lyr-next" && !now && S.lines[0] ? S.lines[0].text : "");
-    if (node._t !== tx) { node.textContent = tx; node._t = tx; }
+    setLyrNode(node, tx);
   }
 }
 
@@ -2232,7 +2381,7 @@ function overlaySync() {
   if (OV.busy || (!changed && now - OV.last < (st.playing ? 2000 : 5000))) return;
   const body = { ...st, t, title: active ? S.song.title : "" };
   if (active) {
-    const lines = JSON.stringify(S.lines.map(l => ({ t: l.t, end: l.end, text: l.text, c: (l.chars || []).map(c => c.t) })));
+    const lines = JSON.stringify(S.lines.map(l => ({ t: l.t, end: l.end, text: l.text, c: (l.chars || []).map(c => c.t), r: kanaSegs(l.text) })));
     if (lines !== OV.lines) { body.lines = JSON.parse(lines); OV.lines = lines; }
   } else OV.lines = "";
   OV.busy = true; OV.last = now; OV.sent = { ...st, t, at: now };
@@ -2399,7 +2548,7 @@ async function openSettings(focusUsage) {
   $("#cfg-kq").value = cfg.karaoke_quality || "auto";
   $("#cfg-pitch").value = cfg.pitch_model;
   const m = st.modules;
-  const items = [["uvr", "AI 人聲分離"], ["crepe", "CREPE 音高"], ["whisper", "Whisper 歌詞辨識"], ["pedalboard", "高品質移調"], ["opencc", "台灣繁體轉換"], ["anthropic", "Claude 連線"], ["cuda", "顯示卡加速"]];
+  const items = [["uvr", "AI 人聲分離"], ["crepe", "CREPE 音高"], ["whisper", "Whisper 歌詞辨識"], ["pedalboard", "高品質移調"], ["opencc", "台灣繁體轉換"], ["anthropic", "Claude 連線"], ["kana", "日文假名標音"], ["cuda", "顯示卡加速"]];
   $("#mods").innerHTML = items.map(([k, l]) => `<span class="chip ${m[k] ? "ok" : ""}">${m[k] ? "✓" : "✕"} ${l}</span>`).join("")
     + (st.cuda_note ? `<div class="hint" id="cuda-note"></div>` : "");
   if (st.cuda_note) $("#cuda-note").textContent = st.cuda_note;

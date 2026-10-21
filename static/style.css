@@ -146,7 +146,18 @@ main { padding: 20px; max-width: 1280px; margin: 0 auto; }
 .lyr-size button { padding: 2px 7px; font-size: 12px; color: var(--muted); }
 .lyr-now { position: relative; display: inline-block; font-family: var(--lyric); font-size: calc(clamp(22px, 3.2vw, 34px) * var(--ls)); line-height: 1.35; }
 .lyr-now .base { color: var(--muted); }
-.lyr-now .fill { position: absolute; left: 0; top: 0; color: var(--melody); clip-path: inset(0 calc(100% - var(--p, 0%)) 0 0); white-space: nowrap; }
+.lyr-now .fill { position: absolute; left: 0; top: 0; color: var(--melody); clip-path: inset(-.8em calc(100% - var(--p, 0%)) -.3em 0); white-space: nowrap; }
+/* 日文假名標音：讀音放在漢字上方，行高加大讓讀音不會撞到上一行 */
+.lyr ruby { ruby-position: over; }
+.lyr rt { font-size: .45em; line-height: 1; letter-spacing: 0; font-weight: 400; }
+.lyr.furi .lyr-now, .lyr.furi .lyr-prev, .lyr.furi .lyr-next { line-height: 1.95; }
+.lyr.romaji rt { font-size: .42em; letter-spacing: .02em; }
+.lyr.romaji .lyr-prev rt, .lyr.romaji .lyr-next rt { font-size: .5em; }
+.lyr.romaji ruby { margin: 0 .08em; }
+.lyr ruby[data-b] { cursor: pointer; }
+.lyr ruby[data-b]:hover rt { color: var(--accent); text-decoration: underline; }
+.kana-edit { position: fixed; z-index: 50; width: 160px; padding: 6px 8px; font: 15px var(--sans); border: 1px solid var(--accent);
+  border-radius: 6px; background: var(--panel); color: var(--ink); box-shadow: 0 4px 16px rgba(0, 0, 0, .18); }
 .lyr-now .base { white-space: nowrap; }
 .lyr-next { font-family: var(--lyric); font-size: calc(17px * var(--ls)); color: var(--muted); min-height: 1.5em; }
 .transport {

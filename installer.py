@@ -479,6 +479,7 @@ CHECKS = [   # (名稱, 檢查程式, 壞掉時要重裝的套件)
      ["faster-whisper", "ctranslate2"]),
     ("音高分析", "import torchcrepe; print('ok')", ["torchcrepe"]),
     ("視窗介面", "import webview; print('ok')", ["pywebview", "pythonnet"]),
+    ("日文假名標音", "import sudachipy, sudachidict_small; print('ok')", ["sudachipy", "sudachidict_small"]),
     ("程式本體", "import app; print(app.VERSION)", ["flask", "numpy", "scipy", "soundfile", "librosa", "pedalboard",
                                                      "opencc-python-reimplemented", "anthropic", "imageio-ffmpeg"]),
 ]

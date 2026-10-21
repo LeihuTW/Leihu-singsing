@@ -44,9 +44,12 @@
   .prev { color: #a8a8a8; }
   .now .fill {
     position: absolute; left: 0; top: 0; color: var(--fill); white-space: nowrap;
-    clip-path: inset(-20% calc(100% - var(--p, 0%)) -20% -5%);
+    clip-path: inset(-50% calc(100% - var(--p, 0%)) -20% -5%);
   }
   .now.plain .fill { display: none; }
+  rt { font-size: .45em; line-height: 1; }
+  ruby { margin: 0 .06em; }
+  .wrap.furi .ln { line-height: 1.95; }
   .now.plain .base { color: var(--fill); }
 </style>
 </head>
@@ -86,7 +89,7 @@ async function poll() {
   try {
     const r = await fetch("/api/overlay" + (ST.ver != null ? "?ver=" + ST.ver : ""), { cache: "no-store" });
     const d = await r.json();
-    if (d.lines) { ST.lines = d.lines; ST.ver = d.ver; rows.forEach(r => (r.text = null)); }
+    if (d.lines) { ST.lines = d.lines; ST.ver = d.ver; rows.forEach(r => (r.text = null)); wrap.classList.toggle("furi", d.lines.some(l => l.r)); }
     ST.sid = d.sid; ST.color = d.color;
     const pred = nowT(), b = ST.base;
     // 播放中只在誤差夠大時才校正，避免上色抖動
@@ -98,6 +101,9 @@ async function poll() {
   }
   setTimeout(poll, 250);
 }
+
+const esc = s => String(s).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+function rubyHTML(r) { return r.map(([b, t]) => (t ? `<ruby>${esc(b)}<rt>${esc(t)}</rt></ruby>` : esc(b))).join(""); }
 
 function fit(el, fs) {
   // 太長的句子自動縮小，不超出畫面
@@ -117,7 +123,9 @@ function render() {
     const tx = l && !(r.off < 0 && i + r.off < 0) ? l.text : "";
     if (r.text !== tx) {
       r.text = tx;
-      if (r.off === 0) { r.el.querySelector(".base").textContent = tx; r.el.querySelector(".fill").textContent = tx; }
+      const h = l && l.r && tx ? rubyHTML(l.r) : null;
+      if (r.off === 0) { for (const c of [r.el.querySelector(".base"), r.el.querySelector(".fill")]) h ? (c.innerHTML = h) : (c.textContent = tx); }
+      else if (h) r.el.innerHTML = h;
       else r.el.textContent = tx;
       fit(r.el, r.off === 0 ? SIZE : SIZE * 0.62);
     }

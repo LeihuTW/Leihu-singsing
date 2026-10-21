@@ -21,3 +21,5 @@ yt-dlp
 pywebview==6.2.1
 pythonnet==3.2.1
 pillow==11.3.0
+sudachipy==0.7.0
+sudachidict_small==20261015

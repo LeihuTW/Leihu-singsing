@@ -8,7 +8,7 @@
 </head>
 <body>
 <header class="bar">
-  <span class="logo">雷虎練唱台<small id="ver">1.4.10</small></span>
+  <span class="logo">雷虎練唱台<small id="ver">1.5</small></span>
   <nav class="row">
     <button id="nav-lib" class="tab cur">歌曲庫</button>
     <button id="nav-practice" class="tab" disabled>練唱</button>
@@ -104,6 +104,7 @@
           <button id="lyr-show" title="在旋律上方逐字顯示歌詞">字在旋律上</button>
           <button id="lyr-edit" title="拖曳調整每句、每個字的時間">調整</button>
           <button id="lyr-color" title="唱到哪個字就把哪個字上色；歌詞時間沒對準時可以關掉">逐字上色</button>
+          <select id="lyr-kana" title="日文歌詞的讀音標註；平假名模式下讀音不對可以點一下修改" hidden><option value="hira">假名標音</option><option value="romaji">羅馬拼音</option><option value="off">不標讀音</option></select>
           <label for="lyr-size" title="旋律上歌詞的字級">字級</label>
           <input id="lyr-size" type="range" min="12" max="40" step="1" value="18" style="width:80px">
           <button id="ov-open" title="給 OBS 等直播軟體用的去背歌詞畫面">直播歌詞</button>
