@@ -86,6 +86,7 @@ async function loadSongs() {
   if (LIB.cur !== "__all__" && LIB.cur !== "__none__" && !cats.includes(LIB.cur)) LIB.cur = "__all__";
   songs.forEach(s => (titles[s.id] = s.title));
   renderCats(); renderSongs();
+  if (LIB.q) libSearch();
 }
 function renderCats() {
   const box = $("#cats"); box.innerHTML = "";
@@ -122,7 +123,23 @@ function renderCats() {
   $("#cat-tools").hidden = !real;
   if (real) $("#cat-hint").textContent = `匯入的歌會放進「${LIB.cur}」`;
 }
-$("#lib-q").addEventListener("input", e => { LIB.q = e.target.value.trim().toLowerCase(); renderSongs(); });
+/* 搜尋：伺服器端把繁體、簡體統一後比對（輸入繁體也找得到簡體歌名），另外推薦歌名相近的歌 */
+LIB.hits = null; LIB.similar = [];
+let libSearchTimer = 0, libSearchSeq = 0;
+function libSearch() {
+  clearTimeout(libSearchTimer);
+  if (!LIB.q) { LIB.hits = null; LIB.similar = []; renderSongs(); return; }
+  libSearchTimer = setTimeout(async () => {
+    const seq = ++libSearchSeq, q = LIB.q;
+    try {
+      const r = await api(`/api/songs/search?q=${encodeURIComponent(q)}`);
+      if (seq !== libSearchSeq) return;
+      LIB.hits = new Set(r.match); LIB.similar = r.similar || [];
+    } catch { LIB.hits = null; LIB.similar = []; }
+    renderSongs();
+  }, 180);
+}
+$("#lib-q").addEventListener("input", e => { LIB.q = e.target.value.trim().toLowerCase(); libSearch(); });
 $("#cat-rename").onclick = async () => {
   const name = LIB.cur;
   const btn = [...$$(".cat", $("#cats"))].find(b => $("span", b)?.textContent === name);
@@ -153,6 +170,7 @@ function songMatches(s) {
   if (LIB.cur === "__none__" && s.category) return false;
   if (LIB.cur !== "__all__" && LIB.cur !== "__none__" && s.category !== LIB.cur) return false;
   if (!LIB.q) return true;
+  if (LIB.hits) return LIB.hits.has(s.id);
   const hay = [s.title, s.yt_artist, s.yt_track, s.yt_uploader, s.category, s.lyrics_text,
     s.lyrics_online && s.lyrics_online.artist].filter(Boolean).join(" ").toLowerCase();
   return LIB.q.split(/\s+/).every(w => hay.includes(w));
@@ -165,11 +183,20 @@ function renderSongs() {
     return;
   }
   const list = LIB.songs.filter(songMatches);
-  if (!list.length) {
+  const inCat = s => !(LIB.cur === "__none__" && s.category) && (LIB.cur === "__all__" || LIB.cur === "__none__" || s.category === LIB.cur);
+  const sim = LIB.q ? LIB.similar.map(id => LIB.songs.find(s => s.id === id)).filter(s => s && inCat(s) && !list.includes(s)) : [];
+  if (!list.length && !sim.length) {
     box.innerHTML = `<div class="empty">${LIB.q ? "找不到符合的歌曲。" : "這個分類還沒有歌。匯入歌曲，或在其他歌的「分類」選單把歌放進來。"}</div>`;
     return;
   }
-  for (const s of list) {
+  for (const s of [...list, ...(sim.length ? ["__sim__", ...sim] : [])]) {
+    if (s === "__sim__") {
+      const h = document.createElement("div");
+      h.className = "sim-head";
+      h.textContent = list.length ? "歌名相近的歌" : "找不到完全符合的歌曲，以下是歌名相近的歌：";
+      box.appendChild(h);
+      continue;
+    }
     const el = document.createElement("div");
     el.className = "song";
     const st = s.steps || {};
@@ -177,6 +204,8 @@ function renderSongs() {
     if (s.duration) chips.push(`<span class="num">${fmt(s.duration, 0)}</span>`);
     if (st.separate) chips.push(`<span class="chip ${s.separation === "uvr" ? "ok" : "warn"}">${s.separation === "uvr" ? "AI 分軌" : "聲像分軌"}</span>`);
     if (s.acapella) chips.push(`<span class="chip acap">清唱</span>`);
+    if (s.dl_state === "failed" || s.dl_state === "cancelled" || s.dl_state === "paused")
+      chips.push(`<button class="chip warn chip-btn" data-a="redl" title="重新排隊從 YouTube 下載">重新下載</button>`);
     chips.push(`<span class="chip ${st.pitch ? "ok" : ""}">${st.pitch ? "旋律" : "旋律未完成"}</span>`);
     if (st.separate && s.separation === "uvr" && ST.hq && ST.hq.state === "ready" && (s.karaoke || "") !== ST.hqModel)
       chips.push(`<button class="chip warn chip-btn" data-a="hqsep" title="用高品質模型重新分離主唱與合音，並重新分析旋律（歌詞不變）">用高品質重新分軌</button>`);
@@ -219,6 +248,11 @@ function renderSongs() {
       try { await api(`/api/songs/${s.id}/process`, { json: { steps: ["separate", "pitch"] } }); toast("已加入處理佇列"); pollJobs(); }
       catch (e) { toast(e.message); }
     };
+    const rd = $('[data-a="redl"]', el);
+    if (rd) rd.onclick = async () => {
+      try { await api(`/api/songs/${s.id}/redownload`, { method: "POST", json: {} }); toast("已重新加入下載佇列"); loadSongs(); pollJobs(); }
+      catch (e) { toast(e.message); }
+    };
     const rp = $('[data-a="repitch"]', el);
     if (rp) rp.onclick = () => repitch(s.id);
     $('[data-a="rename"]', el).onclick = async () => {
@@ -252,6 +286,7 @@ function renderSongs() {
       if (S.song && S.song.id === s.id) { S.song = null; $("#nav-practice").disabled = true; }
       loadSongs();
     };
+    if (sim.includes(s)) el.classList.add("similar");
     box.appendChild(el);
   }
 }
@@ -281,8 +316,8 @@ $("#yt-form").addEventListener("submit", async e => {
   }
   btn.disabled = true; msg.textContent = "加入佇列…";
   try {
-    await api("/api/youtube", { json: { url, category: importCategory() } });
-    inp.value = ""; msg.textContent = "已開始下載，完成後會自動分離、分析旋律並辨識歌詞。";
+    const r = await api("/api/youtube", { json: { url, category: importCategory() } });
+    inp.value = ""; msg.textContent = r.retried ? "這首之前下載失敗或取消過，已用原本那一項重新下載。" : "已開始下載，完成後會自動分離、分析旋律並辨識歌詞。";
     loadSongs(); pollJobs();
   } catch (err) { msg.textContent = err.message; msg.classList.add("err"); }
   finally { btn.disabled = false; }
@@ -380,6 +415,7 @@ async function pollJobs() {
   try { st = await api("/api/status"); } catch { jobTimer = setTimeout(pollJobs, 3000); return; }
   updateClaudeChip(st.claude_ready, st.session_cost);
   remoteOpen(st.remote);
+  syncYtPause(st.yt_pause);
   if (st.version) { $("#ver").textContent = st.version; document.title = `雷虎練唱台 ${st.version}`; }
   const box = $("#jobs");
   box.innerHTML = "";
@@ -446,6 +482,20 @@ async function pollJobs() {
   if (finished && !$("#view-lib").hidden) loadSongs();
   jobTimer = setTimeout(pollJobs, busy ? 1000 : 5000);
 }
+/* YouTube 限制下載時的暫停提示 */
+let ytPauseOn = false;
+function syncYtPause(p) {
+  const on = !!(p && p.on);
+  const paused = LIB.songs.filter(s => s.dl_state === "paused").length;
+  $("#yt-pause").hidden = !on && !paused;
+  $("#yt-pause-n").textContent = paused ? `目前暫停 ${paused} 首。` : "";
+  if (on && !ytPauseOn) { toast("YouTube 暫時限制了下載，已暫停後面的下載", 6000); loadSongs(); }
+  ytPauseOn = on;
+}
+$("#yt-resume").onclick = async () => {
+  try { const r = await api("/api/youtube/resume", { method: "POST", json: {} }); toast(`已繼續下載 ${r.resumed} 首`); ytPauseOn = false; loadSongs(); pollJobs(); }
+  catch (e) { toast(e.message); }
+};
 /* 遠端開歌（/api/remote/open）：seq 變了就打開那首歌、切到指定 KEY（速度回到 100%） */
 let remoteSeq = null;
 async function remoteOpen(r) {

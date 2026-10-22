@@ -8,7 +8,7 @@
 </head>
 <body>
 <header class="bar">
-  <span class="logo">雷虎練唱台<small id="ver">1.5.2</small></span>
+  <span class="logo">雷虎練唱台<small id="ver">1.5.3</small></span>
   <nav class="row">
     <button id="nav-lib" class="tab cur">歌曲庫</button>
     <button id="nav-practice" class="tab" disabled>練唱</button>
@@ -45,6 +45,12 @@
       <span class="hint" id="cat-hint"></span>
       <button id="cat-rename" class="ghost">改名</button>
       <button id="cat-del" class="ghost danger">刪除分類</button>
+    </div>
+    <div id="yt-pause" class="yt-pause" role="alert" hidden>
+      <div><b>YouTube 暫時限制了下載，已自動暫停後面的下載。</b>
+        <span class="hint">短時間內下載太多次時 YouTube 會暫時擋住這個網路，通常幾小時到一天會恢復。請先不要再下載，也不要開 VPN 重試。</span>
+        <span id="yt-pause-n" class="hint"></span></div>
+      <button id="yt-resume">繼續下載</button>
     </div>
     <div id="songs" class="songs"></div>
   </section>

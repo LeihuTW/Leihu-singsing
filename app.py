@@ -18,7 +18,7 @@ import claude_api as C
 import pipeline as P
 import share as SH
 
-VERSION = "1.5.2"
+VERSION = "1.5.3"
 HOST, PORT = "127.0.0.1", int(os.environ.get("LIANTAI_PORT", "8765"))
 app = Flask(__name__, static_folder=str(P.ROOT / "static"), static_url_path="/static")
 app.config["MAX_CONTENT_LENGTH"] = 1024 * 1024 * 1024
@@ -48,7 +48,21 @@ def status():
                    hq_model=P.HQ_KARAOKE,
                    claude_ready=bool(cfg.get("anthropic_api_key") or os.environ.get("ANTHROPIC_API_KEY")),
                    session_cost=C.summary()["session"]["cost_usd"],
-                   jobs=jobs.active() + vjobs.active(), remote=dict(REMOTE))
+                   jobs=jobs.active() + vjobs.active(), remote=dict(REMOTE), yt_pause=dict(P.YT_PAUSE))
+
+
+@app.post("/api/youtube/resume")
+def youtube_resume():
+    """YouTube 限制解除後，繼續下載所有被暫停的歌。"""
+    P.YT_PAUSE.update(on=False, reason="")
+    n = 0
+    for m in sorted(P.pending_downloads(), key=lambda m: m.get("created") or 0):
+        if m["dl_state"] == "paused" and not _downloading(m["id"]):
+            P.set_dl_state(P.song_dir(m["id"]), "queued")
+            P.update_meta(P.song_dir(m["id"]), notes=[])
+            jobs.submit("process", m["id"], P.youtube_job(m["id"], m["source_url"]), label="youtube")
+            n += 1
+    return jsonify(resumed=n)
 
 
 # 遠端開歌：本機的其他程式（例如點歌系統）請練唱畫面打開某首歌並切到指定 KEY。
@@ -121,6 +135,12 @@ def songs():
     return jsonify(P.list_songs())
 
 
+@app.get("/api/songs/search")
+def songs_search():
+    """歌曲庫搜尋：繁體、簡體互相找得到，另外列出歌名相近的歌。"""
+    return jsonify(P.search_songs(request.args.get("q", "")[:200]))
+
+
 @app.post("/api/songs")
 def add_song():
     f = request.files.get("file")
@@ -144,14 +164,26 @@ def add_song():
 def add_youtube():
     url = P.clean_youtube_url((request.get_json(force=True) or {}).get("url", ""))
     for m in P.list_songs():
-        if m.get("source_url") == url and m.get("steps", {}).get("import"):
+        if m.get("source_url") != url:
+            continue
+        if m.get("steps", {}).get("import"):
             raise P.UserError(f"這首歌已經在歌曲庫裡：{m.get('title')}")
+        if _downloading(m["id"]) or m.get("dl_state") == "queued":
+            raise P.UserError(f"這首歌已經在下載佇列裡：{m.get('title')}")
+        # 之前下載失敗或取消的同一首：直接用原本那一項重新下載，不另外多一項
+        P.set_dl_state(P.song_dir(m["id"]), "queued")
+        jid = jobs.submit("process", m["id"], P.youtube_job(m["id"], url), label="youtube")
+        return jsonify(id=m["id"], job=jid, retried=True)
     sid = P.new_youtube_song(url)
     cat = (request.get_json(force=True) or {}).get("category") or None
     if cat in P.load_categories():
         P.update_meta(P.song_dir(sid), category=cat)
     jid = jobs.submit("process", sid, P.youtube_job(sid, url), label="youtube")
     return jsonify(id=sid, job=jid)
+
+
+def _downloading(sid: str) -> bool:
+    return any(j.get("song") == sid and j.get("status") in ("queued", "running") for j in jobs.active())
 
 
 @app.post("/api/youtube/resolve")
@@ -170,7 +202,10 @@ def youtube_batch():
     cat = body.get("category") or None
     if cat not in P.load_categories():
         cat = None
-    existing = {m.get("source_url") for m in P.list_songs() if m.get("steps", {}).get("import")}
+    songs = [m for m in P.list_songs() if m.get("source_url")]
+    existing = {m["source_url"] for m in songs
+                if m.get("steps", {}).get("import") or m.get("dl_state") == "queued" or _downloading(m["id"])}
+    retry = {m["source_url"]: m["id"] for m in songs if m["source_url"] not in existing}   # 失敗／取消過的
     added, skipped = [], 0
     for it in (body.get("items") or [])[:P.BATCH_MAX]:
         try:
@@ -182,6 +217,12 @@ def youtube_batch():
             skipped += 1
             continue
         existing.add(url)
+        if url in retry:   # 之前下載失敗或取消的同一首：用原本那一項重新下載
+            sid = retry[url]
+            P.set_dl_state(P.song_dir(sid), "queued")
+            jobs.submit("process", sid, P.youtube_job(sid, url), label="youtube")
+            added.append(sid)
+            continue
         sid = P.new_youtube_song(url, str(it.get("title") or "")[:100])
         if cat:
             P.update_meta(P.song_dir(sid), category=cat)
@@ -462,7 +503,41 @@ def job_cancel(jid):
     q = jobs if jobs.get(jid) else vjobs
     if not q.cancel(jid):
         raise P.UserError("這個工作已經結束了")
+    j = q.get(jid) or {}
+    if j.get("label") == "youtube":   # 還在排隊的 YouTube 下載被取消：歌名標成「已取消下載」，之後可以重新下載
+        try:
+            d = P.song_dir(j["song"])
+            if not P.read_meta(d).get("steps", {}).get("import"):
+                P.set_dl_state(d, "cancelled")
+        except Exception:
+            pass
     return jsonify(ok=True)
+
+
+@app.post("/api/songs/<sid>/redownload")
+def redownload(sid):
+    """下載失敗或取消的 YouTube 歌曲，重新排隊下載。"""
+    d = P.song_dir(sid)
+    meta = P.read_meta(d)
+    url = meta.get("source_url")
+    if not url or meta.get("steps", {}).get("import"):
+        raise P.UserError("這首歌不需要重新下載")
+    P.YT_PAUSE.update(on=False, reason="")   # 使用者手動重試：解除暫停
+    if any(j.get("song") == sid and j.get("status") in ("queued", "running") for j in jobs.active()):
+        raise P.UserError("這首歌已經在下載佇列裡")
+    P.set_dl_state(d, "queued")
+    jid = jobs.submit("process", sid, P.youtube_job(sid, url), label="youtube")
+    return jsonify(job=jid)
+
+
+def resume_downloads() -> None:
+    """程式關掉時還在排隊的 YouTube 下載，重新開啟後自動接著排隊（失敗、取消的不會自動重試）。"""
+    try:
+        for m in sorted(P.pending_downloads(), key=lambda m: m.get("created") or 0):
+            if m["dl_state"] == "queued":
+                jobs.submit("process", m["id"], P.youtube_job(m["id"], m["source_url"]), label="youtube")
+    except Exception as e:
+        P.log_error("resume_downloads", e)
 
 
 @app.get("/api/jobs/<jid>")
@@ -1039,6 +1114,7 @@ def watch_parent() -> None:
 def main():
     P.LIB.mkdir(exist_ok=True)
     watch_parent()
+    resume_downloads()
     url = f"http://{HOST}:{PORT}"
     print(f"\n  {P.APP_NAME} {VERSION} 已啟動：{url}\n  關閉這個視窗就會結束程式。\n")
     if "--no-browser" not in sys.argv:

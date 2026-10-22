@@ -208,6 +208,77 @@ def list_songs() -> list[dict]:
     return out
 
 
+# ---------------------------------------------------------------- 歌曲庫搜尋（繁簡互通＋相近歌名）
+
+_T2S = None
+_SKEY_CACHE: dict = {}
+
+
+def search_key(text: str) -> str:
+    """搜尋用的正規化：全形半形統一、轉小寫、繁體一律轉成簡體（繁簡多對一，兩邊都會對到同一個字）。"""
+    global _T2S
+    import unicodedata
+    t = unicodedata.normalize("NFKC", text or "").lower()
+    if re.search(r"[\u3400-\u9fff]", t):
+        if _T2S is None:
+            try:
+                from opencc import OpenCC
+                _T2S = OpenCC("t2s")
+            except Exception:
+                _T2S = False
+        if _T2S:
+            t = _T2S.convert(t)
+    return t
+
+
+def _song_search_key(m: dict) -> str:
+    hay = " ".join(str(x) for x in (m.get("title"), m.get("yt_artist"), m.get("yt_track"), m.get("yt_uploader"),
+                                    m.get("category"), m.get("lyrics_text"),
+                                    (m.get("lyrics_online") or {}).get("artist") if isinstance(m.get("lyrics_online"), dict) else None)
+                   if x)
+    k = _SKEY_CACHE.get(hay)
+    if k is None:
+        k = _SKEY_CACHE[hay] = search_key(hay)
+        if len(_SKEY_CACHE) > 5000:
+            _SKEY_CACHE.clear()
+    return k
+
+
+def _bigrams(s: str) -> set:
+    return {s[i:i + 2] for i in range(len(s) - 1)} or ({s} if s else set())
+
+
+def search_songs(q: str) -> dict:
+    """回傳完全符合的歌曲（每個關鍵字都要出現，繁簡互通），以及歌名相近的推薦。"""
+    from difflib import SequenceMatcher
+    nq = search_key(q).strip()
+    if not nq:
+        return {"match": [], "similar": []}
+    words = nq.split()
+    squash = lambda s: re.sub(r"[\W_]+", "", s)
+    qq = squash(nq)
+    match, sim = [], []
+    for m in list_songs():
+        key = _song_search_key(m)
+        if all(w in key for w in words):
+            match.append(m["id"])
+            continue
+        if len(qq) < 2:
+            continue
+        best = 0.0
+        for name in (m.get("title"), m.get("yt_track")):
+            tk = squash(search_key(name or ""))
+            if not tk:
+                continue
+            ratio = SequenceMatcher(None, qq, tk).ratio()
+            cover = len(_bigrams(qq) & _bigrams(tk)) / len(_bigrams(qq))   # 輸入的字有多少出現在歌名裡
+            best = max(best, ratio, cover * 0.9)
+        if best >= 0.45:
+            sim.append((best, m["id"]))
+    sim.sort(reverse=True)
+    return {"match": match, "similar": [i for _, i in sim[:6]]}
+
+
 def _blank_song(title: str, **extra) -> str:
     LIB.mkdir(exist_ok=True)
     sid = uuid.uuid4().hex[:10]
@@ -331,7 +402,9 @@ def resolve_lines(lines: list[str]) -> list[dict]:
     """多行一起解析（同時查 4 行）。每一行的結果依原本順序排好；失敗的行也會列出來，附上原因。"""
     from concurrent.futures import ThreadPoolExecutor
     lines = [l for l in (x.strip() for x in lines) if l][:BATCH_MAX]
-    existing = {m.get("source_url"): m.get("title") for m in list_songs() if m.get("source_url")}
+    # 已經下載好或正在排隊的算重複；之前下載失敗／取消的不算（勾選後會用原本那一項重新下載）
+    existing = {m.get("source_url"): m.get("title") for m in list_songs()
+                if m.get("source_url") and ((m.get("steps") or {}).get("import") or m.get("dl_state") not in ("failed", "cancelled"))}
 
     def one(line):
         try:
@@ -427,8 +500,55 @@ def read_sheet(data: bytes, name: str) -> list[str]:
     return out[:BATCH_MAX]
 
 
+# YouTube 下載的狀態：排隊中／失敗／取消。寫在 meta 的 dl_state，歌名後面也標出來；下載成功就拿掉
+DL_SUFFIX = {"queued": "（排隊下載）", "failed": "（下載失敗）", "cancelled": "（已取消下載）", "paused": "（暫停下載）"}
+_DL_RE = re.compile("（(?:排隊下載|下載失敗|已取消下載|暫停下載)）$")
+
+# YouTube 暫時限制這個 IP（429、要求登入確認不是機器人）時，暫停後面所有的下載，不再繼續送請求；
+# 使用者確認後按「繼續下載」才會接著下載。只記在記憶體：程式重開時暫停的歌會留著「重新下載」按鈕。
+YT_PAUSE: dict = {"on": False, "at": 0.0, "reason": ""}
+_RATE_LIMIT_RE = re.compile(r"HTTP Error 429|Too Many Requests|Sign in to confirm you(?:'|’)re not a bot|"
+                            r"confirm you(?:'|’)re not a bot|rate[- ]limit|try again later", re.I)
+
+
+class YouTubeRateLimited(UserError):
+    pass
+
+
+def set_dl_state(d: Path, state: str | None) -> None:
+    meta = read_meta(d)
+    base = _DL_RE.sub("", meta.get("title") or "").strip()
+    if base.startswith("YouTube 下載"):
+        base = ""
+    if state:
+        meta["dl_state"] = state
+        meta["title"] = (base or "YouTube 影片") + DL_SUFFIX[state]
+    else:
+        meta.pop("dl_state", None)
+        meta["title"] = base or "YouTube 歌曲"
+    write_meta(d, meta)
+
+
+def pending_downloads() -> list[dict]:
+    """還沒下載完成的 YouTube 歌曲（程式關掉時還在排隊的、失敗的、取消的）。
+    舊版沒有記錄狀態：歌名結尾是（排隊下載）的就當作排隊中，有錯誤訊息的當作失敗。"""
+    out = []
+    for m in list_songs():
+        if not m.get("source_url") or (m.get("steps") or {}).get("import"):
+            continue
+        st = m.get("dl_state")
+        if not st:
+            title = m.get("title") or ""
+            if not (title.endswith("（排隊下載）") or title.startswith("YouTube 下載")):
+                continue
+            st = "failed" if m.get("notes") else "queued"
+            set_dl_state(song_dir(m["id"]), st)
+        out.append({**m, "dl_state": st})
+    return out
+
+
 def new_youtube_song(url: str, title: str = "") -> str:
-    return _blank_song((title + "（排隊下載）") if title else "YouTube 下載中…", source_url=url)
+    return _blank_song((title or "YouTube 影片") + DL_SUFFIX["queued"], source_url=url, dl_state="queued")
 
 
 def _upgrade_ytdlp() -> None:
@@ -476,8 +596,12 @@ def step_youtube(d: Path, url: str, report) -> None:
         p.wait()
         return p.returncode, title, err
 
+    if YT_PAUSE["on"]:
+        raise YouTubeRateLimited("YouTube 下載暫停中")
     report("取得影片資訊", 0.01)
     code, title, err = attempt()
+    if code and _RATE_LIMIT_RE.search(err):   # 被限制時不要再更新 yt-dlp 重試，避免送更多請求
+        raise YouTubeRateLimited(err.strip()[-200:])
     if code:
         if re.search(r"Private video|Video unavailable|This video is unavailable|members-only|"
                      r"confirm your age|age-restricted|age restricted", err):
@@ -485,6 +609,8 @@ def step_youtube(d: Path, url: str, report) -> None:
         report("下載失敗，更新 yt-dlp 後重試", 0.02)
         _upgrade_ytdlp()
         code, title, err = attempt()
+        if code and _RATE_LIMIT_RE.search(err):
+            raise YouTubeRateLimited(err.strip()[-200:])
         if code:
             raise UserError(f"YouTube 下載失敗：{err.strip()[-240:]}")
     for f in d.glob("original.*"):
@@ -493,6 +619,7 @@ def step_youtube(d: Path, url: str, report) -> None:
     if not (d / "original.wav").exists():
         raise UserError("YouTube 下載完成，但找不到轉換後的音訊檔")
     update_meta(d, title=(title or "YouTube 歌曲")[:120], source_url=url)
+    set_dl_state(d, None)
 
 
 def youtube_job(song_id: str, url: str):
@@ -500,14 +627,22 @@ def youtube_job(song_id: str, url: str):
 
     def run(report):
         d = song_dir(song_id)
+        update_meta(d, notes=[])
         try:
             step_youtube(d, url, report)
+        except JobCancelled:
+            set_dl_state(d, "cancelled")
+            raise
+        except YouTubeRateLimited as e:
+            if not YT_PAUSE["on"]:
+                YT_PAUSE.update(on=True, at=time.time(), reason=str(e))
+                log_error("youtube rate limited", e)
+            set_dl_state(d, "paused")
+            update_meta(d, notes=["YouTube 暫時限制下載，已暫停。過幾小時後按「繼續下載」或「重新下載」。"])
+            return   # 不算錯誤：後面排隊的歌也會照樣停下來，不會再連到 YouTube
         except Exception as e:
-            meta = read_meta(d)
-            if meta.get("title", "").startswith("YouTube 下載中"):
-                meta["title"] = "YouTube 下載失敗"
-            meta["notes"] = [f"{e}　可以刪除這一項後重試。"]
-            write_meta(d, meta)
+            set_dl_state(d, "failed")
+            update_meta(d, notes=[f"{e}　可以按「重新下載」再試一次，或刪除這一項。"])
             raise
         process(report)
     return run
@@ -2358,7 +2493,7 @@ def similarity(recognized: str, candidate: str) -> float | None:
     return round(sum(x.size for x in m.get_matching_blocks()) / len(a), 3)
 
 
-USER_AGENT = "LeihuLiantai/1.5.2 (+https://github.com/LeihuTW/Leihu-singsing)"   # HTTP 標頭只能用英文字
+USER_AGENT = "LeihuLiantai/1.5.3 (+https://github.com/LeihuTW/Leihu-singsing)"   # HTTP 標頭只能用英文字
 
 
 def _http_json(url: str, headers: dict | None = None, timeout: int = 8):
