@@ -8,7 +8,7 @@
 </head>
 <body>
 <header class="bar">
-  <span class="logo">雷虎練唱台<small id="ver">1.5.3</small></span>
+  <span class="logo">雷虎練唱台<small id="ver">1.6</small></span>
   <nav class="row">
     <button id="nav-lib" class="tab cur">歌曲庫</button>
     <button id="nav-practice" class="tab" disabled>練唱</button>
@@ -39,7 +39,10 @@
     <div id="jobs" class="jobs"></div>
     <div class="lib-tools">
       <nav id="cats" class="cats" aria-label="分類"></nav>
-      <input id="lib-q" type="search" placeholder="搜尋歌名、歌手、歌詞" aria-label="搜尋歌曲">
+      <span class="lib-right">
+        <select id="lib-sort" aria-label="排序"><option value="new">最新加入</option><option value="title">依曲名</option><option value="artist">依歌手</option></select>
+        <input id="lib-q" type="search" placeholder="搜尋曲名、歌手、歌詞" aria-label="搜尋歌曲">
+      </span>
     </div>
     <div id="cat-tools" class="row cat-tools" hidden>
       <span class="hint" id="cat-hint"></span>
@@ -343,11 +346,12 @@
 <div id="batch-dlg" class="modal" hidden>
   <div class="sheet batch-sheet" role="dialog" aria-modal="true" aria-labelledby="batch-title">
     <h1 id="batch-title">批次加入歌曲</h1>
-    <p class="hint">每行一首，可以混著輸入：YouTube 影片網址、歌單網址（會加入歌單裡的每一首），或「歌手 歌名」（會到 YouTube 搜尋第一筆結果）。也可以直接從 Excel 複製「歌手、曲名」兩欄貼上，或匯入 .xlsx／.csv 檔。</p>
+    <p class="hint">每行一首，可以混著輸入：YouTube 影片網址、歌單網址（會加入歌單裡的每一首），或「歌手 歌名」（會到 YouTube 搜尋第一筆結果）。也可以直接從 Excel 複製「歌手、曲名」兩欄貼上，或匯入 .xlsx／.csv 檔：匯入檔案時會一起讀「歌手」「曲名」「KEY（或備註）」「語言」和 YouTube 網址欄，有網址的直接用、不另外搜尋；歌曲庫已經有的歌只會更新這些資訊，不會重新下載。格式可以參考「下載範本」或說明頁的「建議的匯入表格格式」。</p>
     <textarea id="batch-text" rows="7" placeholder="https://www.youtube.com/watch?v=…&#10;https://www.youtube.com/playlist?list=…&#10;周杰倫 晴天&#10;YOASOBI 夜に駆ける"></textarea>
     <div class="row">
       <button id="batch-resolve" class="primary">查詢</button>
       <label class="btn ghost">匯入 Excel／CSV<input id="batch-file" type="file" accept=".xlsx,.csv,.txt,.tsv" hidden></label>
+      <button id="batch-template" class="ghost" title="歌手、曲名、KEY、語言、YouTube 五欄的範例表格">下載範本</button>
       <span id="batch-msg" class="hint"></span>
     </div>
     <div id="batch-list" class="batch-list"></div>
@@ -357,6 +361,21 @@
       <span class="hint">依清單順序下載與處理，之後也可以在歌曲庫上方用 ▲▼ 調整順序。請只下載你有權使用的內容。</span>
     </div>
     <div class="row" style="justify-content:flex-end"><button id="batch-close" class="ghost">關閉</button></div>
+  </div>
+</div>
+
+<div id="edit-dlg" class="modal" hidden>
+  <div class="sheet" role="dialog" aria-modal="true" aria-labelledby="edit-title">
+    <h1 id="edit-title">編輯歌曲資訊</h1>
+    <label class="field"><span>曲名</span><input id="ed-title" type="text" maxlength="120"></label>
+    <label class="field"><span>歌手</span><input id="ed-artist" type="text" maxlength="80"></label>
+    <label class="field"><span>預設 KEY（打開這首歌時自動切到這個 KEY，並先做好移調版本）</span>
+      <select id="ed-key"></select></label>
+    <p class="hint" id="ed-yt"></p>
+    <div class="row">
+      <button id="ed-save" class="primary">儲存</button>
+      <button id="ed-close" class="ghost">取消</button>
+    </div>
   </div>
 </div>
 

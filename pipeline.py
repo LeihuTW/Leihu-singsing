@@ -232,7 +232,7 @@ def search_key(text: str) -> str:
 
 
 def _song_search_key(m: dict) -> str:
-    hay = " ".join(str(x) for x in (m.get("title"), m.get("yt_artist"), m.get("yt_track"), m.get("yt_uploader"),
+    hay = " ".join(str(x) for x in (m.get("title"), m.get("artist"), m.get("yt_title"), m.get("yt_artist"), m.get("yt_track"), m.get("yt_uploader"),
                                     m.get("category"), m.get("lyrics_text"),
                                     (m.get("lyrics_online") or {}).get("artist") if isinstance(m.get("lyrics_online"), dict) else None)
                    if x)
@@ -398,18 +398,28 @@ def resolve_line(line: str) -> list[dict]:
         return items[:1]
 
 
-def resolve_lines(lines: list[str]) -> list[dict]:
-    """多行一起解析（同時查 4 行）。每一行的結果依原本順序排好；失敗的行也會列出來，附上原因。"""
+def resolve_lines(lines: list, rows: dict | None = None) -> list[dict]:
+    """多行一起解析（同時查 4 行）。每一行的結果依原本順序排好；失敗的行也會列出來，附上原因。
+    rows：從表單讀到的資料（以 line 對應）。表單有 YouTube 網址的直接用，不去搜尋；
+    歌曲庫裡已經有同一個網址的歌，標成「更新資訊」（套用表單的歌手、曲名、KEY，不重新下載）。"""
     from concurrent.futures import ThreadPoolExecutor
-    lines = [l for l in (x.strip() for x in lines) if l][:BATCH_MAX]
+    rows = rows or {}
+    lines = [l for l in (str(x).strip() for x in lines) if l][:BATCH_MAX]
+    by_url = {m.get("source_url"): m for m in list_songs() if m.get("source_url") and (m.get("steps") or {}).get("import")}
     # 已經下載好或正在排隊的算重複；之前下載失敗／取消的不算（勾選後會用原本那一項重新下載）
     existing = {m.get("source_url"): m.get("title") for m in list_songs()
                 if m.get("source_url") and ((m.get("steps") or {}).get("import") or m.get("dl_state") not in ("failed", "cancelled"))}
 
     def one(line):
+        row = rows.get(line) or {}
+        meta = {k: row.get(k) for k in ("artist", "song", "key", "lang", "category") if row.get(k) not in (None, "")}
         try:
-            items = resolve_line(line)
-            return [dict(it, input=line) for it in items] or [{"input": line, "error": "找不到符合的影片"}]
+            if row.get("url"):
+                items = [{"id": row["url"][-11:], "url": row["url"], "title": row.get("song") or line,
+                          "duration": None, "channel": row.get("artist") or "", "from": "表單網址"}]
+            else:
+                items = resolve_line(line)
+            return [dict(it, input=line, sheet=meta or None) for it in items] or [{"input": line, "error": "找不到符合的影片"}]
         except UserError as e:
             return [{"input": line, "error": str(e)}]
         except Exception as e:
@@ -422,13 +432,18 @@ def resolve_lines(lines: list[str]) -> list[dict]:
         for it in g:
             if it.get("url"):
                 it["dup"] = existing.get(it["url"]) or ("（清單裡重複）" if it["url"] in seen else None)
+                old = by_url.get(it["url"])
+                if old and it.get("sheet") and it["url"] not in seen:   # 舊歌：用表單資料更新
+                    it["dup"] = None
+                    it["update"] = {"id": old["id"], "title": old.get("title")}
                 seen.add(it["url"])
             out.append(it)
     return out[:BATCH_MAX]
 
 
-def read_sheet(data: bytes, name: str) -> list[str]:
-    """讀 Excel（.xlsx）或 CSV：有「歌手」「曲名」欄位就組成「歌手 曲名」，否則把每一列的文字接起來。"""
+def read_sheet(data: bytes, name: str) -> list[dict]:
+    """讀 Excel（.xlsx）或 CSV。認得「歌手」「曲名」「備註／KEY」「語言」和 YouTube 網址欄：
+    回傳每一列 {line, artist, song, key, lang, url}。line 是給搜尋用的「歌手 曲名」（沒有網址時才會去搜尋）。"""
     import csv
     import io
     ext = Path(name).suffix.lower()
@@ -489,15 +504,85 @@ def read_sheet(data: bytes, name: str) -> list[str]:
     find = lambda keys: next((i for i, c in enumerate(head) if any(k in c for k in keys)), None)
     ai = find(["歌手", "演唱", "藝人", "artist", "singer"])
     ti = find(["曲名", "歌名", "歌曲", "標題", "title", "song", "name"])
+    ki = find(["key", "升降", "調"])
+    if ki is None:
+        ki = find(["備註", "note", "memo"])   # 雷虎的歌單：備註欄放的是升降 KEY
+    li = find(["語言", "language", "lang"])
+    ui = find(["ytlink", "youtube", "yt"])
+    cell = lambda r, i: r[i].strip() if i is not None and i < len(r) else ""
+    yt_re = re.compile(r"(https?://)?([\w-]+\.)*(youtube\.com|youtu\.be)/\S+", re.I)
     out = []
     if ai is not None or ti is not None:
         for r in rows[1:]:
-            parts = [r[i] for i in (ai, ti) if i is not None and i < len(r) and r[i]]
-            if parts:
-                out.append(" ".join(parts))
+            artist, song = cell(r, ai), cell(r, ti)
+            if not (artist or song):
+                continue
+            url = ""
+            for c in ([cell(r, ui)] if ui is not None else []) + list(r):   # 先看網址欄，沒有再找整列
+                m = yt_re.search(c or "")
+                if m:
+                    try:
+                        url = clean_youtube_url(m.group(0))
+                        break
+                    except UserError:
+                        continue
+            lang = sheet_language(cell(r, li))
+            out.append({"line": " ".join(x for x in (artist, song) if x), "artist": artist, "song": song,
+                        "key": parse_key(cell(r, ki)), "lang": lang[0] if lang else None,
+                        "category": lang[1] if lang else None, "url": url})
     else:
-        out = [" ".join(c for c in r if c) for r in rows]
+        out = [{"line": " ".join(c for c in r if c)} for r in rows]
     return out[:BATCH_MAX]
+
+
+# ---------------------------------------------------------------- 曲名／歌手／預設 KEY
+
+LANG_FROM_SHEET = [   # 表單「語言」欄 → 歌詞辨識語言、分類名稱
+    (("國語", "華語", "中文", "普通話", "mandarin", "chinese"), "zh", "中文歌"),
+    (("台語", "閩南語", "台灣話", "taiwanese", "hokkien"), "zh", "台語歌"),
+    (("粵語", "廣東話", "cantonese"), "yue", "粵語歌"),
+    (("日語", "日文", "日本", "japanese"), "ja", "日文歌"),
+    (("英語", "英文", "english"), "en", "英文歌"),
+    (("韓語", "韓文", "韓國", "korean"), "ko", "韓文歌"),
+]
+
+
+def sheet_language(text: str) -> tuple[str, str] | None:
+    t = (text or "").strip().lower()
+    for words, code, cat in LANG_FROM_SHEET:
+        if t and any(w in t for w in words):
+            return code, cat
+    return None
+
+
+def parse_key(text) -> int | None:
+    """表單裡的 KEY：-4、+2、4、＋３ 這類純數字才算，超過 ±6 的不採用。"""
+    import unicodedata
+    t = unicodedata.normalize("NFKC", str(text or "")).strip().replace("−", "-")
+    if not re.fullmatch(r"[+-]?\d{1,2}(?:\.0+)?", t):
+        return None
+    k = int(float(t))
+    return k if -6 <= k <= 6 else None
+
+
+_NOISE_RE = re.compile(r"\s*[\(（\[【「]?\s*(?:official\s*(?:music\s*)?(?:video|mv|audio|lyric(?:s)?\s*video)|"
+                       r"music\s*video|lyric(?:s)?\s*video|官方\s*(?:完整版\s*)?(?:mv|音樂錄影帶|版)?|完整版|"
+                       r"動態歌詞(?:版)?|歌詞版|高音質|hd|4k|mv|audio)\s*[\)）\]】」]?\s*", re.I)
+
+
+def split_artist_title(yt_title: str, track: str = "", artist: str = "") -> tuple[str, str]:
+    """從 YouTube 的資訊拆出（歌手, 曲名）。YouTube 有提供曲名就用；沒有就從標題常見寫法拆，拆不出來歌手留空。"""
+    if track:
+        return (artist or "").split(",")[0].strip(), track.strip()
+    t = (yt_title or "").strip()
+    m = re.match(r"^(.+?)\s*[【《「『〈]([^】》」』〉]+)[】》」』〉](.*)$", t)
+    if m and not _NOISE_RE.fullmatch(m.group(2)):
+        return m.group(1).strip(" -｜|/"), m.group(2).strip()
+    clean = _NOISE_RE.sub(" ", t).strip()
+    m = re.match(r"^(.+?)\s+[-–—｜|]\s+(.+)$", clean)
+    if m:
+        return m.group(1).strip(), m.group(2).strip()
+    return "", re.sub(r"\s+", " ", clean).strip() or t
 
 
 # YouTube 下載的狀態：排隊中／失敗／取消。寫在 meta 的 dl_state，歌名後面也標出來；下載成功就拿掉
@@ -582,7 +667,8 @@ def step_youtube(d: Path, url: str, report) -> None:
             line = line.strip()
             if line.startswith("TITLE "):
                 title = line[6:]
-                update_meta(d, title=title[:120])
+                if not read_meta(d).get("title_locked"):
+                    update_meta(d, title=title[:120])
             elif line.startswith("META "):
                 track, artist, uploader = (line[5:].split("\t") + ["", "", ""])[:3]
                 clean = lambda v: "" if v in ("NA", "None") else v.strip()
@@ -618,11 +704,19 @@ def step_youtube(d: Path, url: str, report) -> None:
             f.unlink(missing_ok=True)
     if not (d / "original.wav").exists():
         raise UserError("YouTube 下載完成，但找不到轉換後的音訊檔")
-    update_meta(d, title=(title or "YouTube 歌曲")[:120], source_url=url)
+    meta = read_meta(d)
+    yt = (title or "YouTube 歌曲")[:120]
+    if meta.get("title_locked"):   # 從表單匯入：曲名、歌手用表單的寫法
+        update_meta(d, yt_title=yt, source_url=url)
+    else:
+        artist, song = split_artist_title(yt, meta.get("yt_track", ""), meta.get("yt_artist", ""))
+        update_meta(d, title=(song or yt)[:120], artist=(meta.get("artist") or artist)[:80], yt_title=yt,
+                    source_url=url)
     set_dl_state(d, None)
 
 
-def youtube_job(song_id: str, url: str):
+def youtube_job(song_id: str, url: str, after=None):
+    """after(song_id)：整首處理完後要做的事（例如先把預設 KEY 的移調版本做好）。"""
     process = process_song(song_id, ["import", "separate", "pitch", "lyrics"])
 
     def run(report):
@@ -645,6 +739,11 @@ def youtube_job(song_id: str, url: str):
             update_meta(d, notes=[f"{e}　可以按「重新下載」再試一次，或刪除這一項。"])
             raise
         process(report)
+        if after:
+            try:
+                after(song_id)
+            except Exception as e:
+                log_error("youtube_job after", e)
     return run
 
 
@@ -2493,7 +2592,7 @@ def similarity(recognized: str, candidate: str) -> float | None:
     return round(sum(x.size for x in m.get_matching_blocks()) / len(a), 3)
 
 
-USER_AGENT = "LeihuLiantai/1.5.3 (+https://github.com/LeihuTW/Leihu-singsing)"   # HTTP 標頭只能用英文字
+USER_AGENT = "LeihuLiantai/1.6 (+https://github.com/LeihuTW/Leihu-singsing)"   # HTTP 標頭只能用英文字
 
 
 def _http_json(url: str, headers: dict | None = None, timeout: int = 8):

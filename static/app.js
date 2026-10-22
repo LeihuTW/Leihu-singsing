@@ -140,6 +140,35 @@ function libSearch() {
   }, 180);
 }
 $("#lib-q").addEventListener("input", e => { LIB.q = e.target.value.trim().toLowerCase(); libSearch(); });
+LIB.sort = store.get("libSort", "new");
+$("#lib-sort").value = LIB.sort;
+$("#lib-sort").onchange = e => { LIB.sort = e.target.value; store.set("libSort", LIB.sort); renderSongs(); };
+
+/* 編輯歌曲資訊：曲名、歌手、預設 KEY */
+let EDIT = null;
+for (let k = 6; k >= -6; k--) { const o = document.createElement("option"); o.value = k; o.textContent = k ? `${k > 0 ? "+" : ""}${k}` : "0（原調）"; $("#ed-key").append(o); }
+function openEdit(s) {
+  EDIT = s;
+  $("#ed-title").value = s.title || ""; $("#ed-artist").value = s.artist || ""; $("#ed-key").value = s.key || 0;
+  $("#ed-yt").textContent = s.yt_title ? `YouTube 標題：${s.yt_title}` : "";
+  $("#edit-dlg").hidden = false; $("#ed-title").focus();
+}
+$("#ed-close").onclick = () => ($("#edit-dlg").hidden = true);
+$("#ed-save").onclick = async () => {
+  if (!EDIT) return;
+  const title = $("#ed-title").value.trim(), artist = $("#ed-artist").value.trim(), key = +$("#ed-key").value;
+  if (!title) return toast("曲名不能是空的");
+  const body = {};
+  if (title !== EDIT.title) body.title = title;
+  if (artist !== (EDIT.artist || "")) body.artist = artist;
+  if (key !== (EDIT.key || 0)) body.key = key;
+  try {
+    if (Object.keys(body).length) await api(`/api/songs/${EDIT.id}`, { method: "PATCH", json: body });
+    $("#edit-dlg").hidden = true;
+    if (body.key !== undefined && key) toast(`預設 KEY 改成 ${key > 0 ? "+" : ""}${key}，正在準備移調版本`, 2500);
+    loadSongs(); pollJobs();
+  } catch (e) { toast(e.message); }
+};
 $("#cat-rename").onclick = async () => {
   const name = LIB.cur;
   const btn = [...$$(".cat", $("#cats"))].find(b => $("span", b)?.textContent === name);
@@ -189,7 +218,19 @@ function renderSongs() {
     box.innerHTML = `<div class="empty">${LIB.q ? "找不到符合的歌曲。" : "這個分類還沒有歌。匯入歌曲，或在其他歌的「分類」選單把歌放進來。"}</div>`;
     return;
   }
+  const sortBy = LIB.sort || "new";
+  const cmp = (a, b) => (a || "").localeCompare(b || "", "zh-Hant");
+  if (sortBy === "title") list.sort((a, b) => cmp(a.title, b.title));
+  if (sortBy === "artist") list.sort((a, b) => (!a.artist - !b.artist) || cmp(a.artist, b.artist) || cmp(a.title, b.title));
+  let lastArtist = null;
   for (const s of [...list, ...(sim.length ? ["__sim__", ...sim] : [])]) {
+    if (sortBy === "artist" && s !== "__sim__" && !sim.includes(s) && (s.artist || "") !== lastArtist) {
+      lastArtist = s.artist || "";
+      const h = document.createElement("div");
+      h.className = "artist-head";
+      h.textContent = lastArtist || "（未填歌手）";
+      box.appendChild(h);
+    }
     if (s === "__sim__") {
       const h = document.createElement("div");
       h.className = "sim-head";
@@ -217,11 +258,11 @@ function renderSongs() {
     if (s.takes) chips.push(`<span>${s.takes} 次錄音</span>`);
     if (s.best != null) chips.push(`<span>最佳 <b class="num">${Math.round(s.best * 100)}%</b></span>`);
     el.innerHTML = `
-      <div><div class="t"></div><div class="m">${chips.join("")}</div></div>
+      <div><div class="t"></div><div class="sub"></div><div class="m">${chips.join("")}</div></div>
       <div class="acts">
         <button class="primary" data-a="open" ${st.pitch ? "" : "disabled"}>練唱</button>
         <select class="catsel" data-a="cat" aria-label="分類"></select>
-        <button data-a="rename">改名</button>
+        <button data-a="rename">編輯資訊</button>
         <select data-a="redo" aria-label="重新處理">
           <option value="">重新處理…</option>
           <option value="separate,pitch,lyrics">全部重做</option>
@@ -232,6 +273,11 @@ function renderSongs() {
       </div>
       ${(s.notes || []).map(n => `<div class="note"></div>`).join("")}`;
     $(".t", el).textContent = s.title;
+    if (s.yt_title && s.yt_title !== s.title) $(".t", el).title = `YouTube 標題：${s.yt_title}`;
+    const sub = $(".sub", el);
+    if (s.artist) sub.append(s.artist);
+    if (s.key) { const k = document.createElement("span"); k.className = "k"; k.textContent = `KEY ${s.key > 0 ? "+" : ""}${s.key}`; sub.append(k); }
+    sub.hidden = !s.artist && !s.key;
     $$(".note", el).forEach((n, i) => (n.textContent = s.notes[i]));
     const sel = $('[data-a="cat"]', el);
     sel.innerHTML = `<option value="">未分類</option>` + LIB.cats.map(() => `<option></option>`).join("");
@@ -255,20 +301,7 @@ function renderSongs() {
     };
     const rp = $('[data-a="repitch"]', el);
     if (rp) rp.onclick = () => repitch(s.id);
-    $('[data-a="rename"]', el).onclick = async () => {
-      const t = $(".t", el);
-      const inp = document.createElement("input");
-      inp.type = "text"; inp.value = s.title; inp.style.width = "100%";
-      t.replaceWith(inp); inp.focus(); inp.select();
-      const done = async ok => {
-        if (ok && inp.value.trim() && inp.value.trim() !== s.title) {
-          try { await api(`/api/songs/${s.id}`, { method: "PATCH", json: { title: inp.value.trim() } }); } catch (e) { toast(e.message); }
-        }
-        loadSongs();
-      };
-      inp.onkeydown = e => { if (e.key === "Enter") done(true); if (e.key === "Escape") done(false); };
-      inp.onblur = () => done(true);
-    };
+    $('[data-a="rename"]', el).onclick = () => openEdit(s);
     $('[data-a="redo"]', el).onchange = async e => {
       const v = e.target.value; e.target.value = "";
       if (!v) return;
@@ -323,7 +356,7 @@ $("#yt-form").addEventListener("submit", async e => {
   finally { btn.disabled = false; }
 });
 /* 1.4.8：批次加入（多個網址、歌單、歌手＋歌名、Excel） */
-const BATCH = { items: [] };
+const BATCH = { items: [], rows: {} };   // rows：從表單讀到的歌手、曲名、KEY、語言、網址（以每一行的文字對應）
 function fmtDur(v) { return v ? `${Math.floor(v / 60)}:${String(Math.round(v % 60)).padStart(2, "0")}` : ""; }
 function renderBatch() {
   const box = $("#batch-list"); box.innerHTML = "";
@@ -333,9 +366,13 @@ function renderBatch() {
     el.innerHTML = `<input type="checkbox" ${it.on ? "checked" : ""} ${it.error ? "disabled" : ""} aria-label="加入這首">
       <span class="mv"><button class="ghost" data-d="-1" aria-label="往前">▲</button><button class="ghost" data-d="1" aria-label="往後">▼</button></span>
       <div><div class="t"></div><div class="s"></div></div><span class="num hint"></span>`;
-    $(".t", el).textContent = it.error ? it.input : (it.title || it.url);
+    const sh = it.sheet || {};
+    $(".t", el).textContent = it.error ? it.input : (sh.song ? `${sh.song}${sh.artist ? " — " + sh.artist : ""}` : (it.title || it.url));
     $(".s", el).textContent = it.error ? it.error
-      : [it.channel, it.from, it.dup ? `已在歌曲庫：${it.dup}` : ""].filter(Boolean).join("・");
+      : [sh.song && it.title !== sh.song ? `YouTube：${it.title}` : it.channel, it.from,
+        sh.key ? `KEY ${sh.key > 0 ? "+" : ""}${sh.key}` : "", sh.category || "",
+        it.update ? `已在歌曲庫（${it.update.title}）：只更新曲名、歌手、KEY，不重新下載` : "",
+        it.dup ? `已在歌曲庫：${it.dup}` : ""].filter(Boolean).join("・");
     $(".num", el).textContent = fmtDur(it.duration);
     $("input", el).onchange = e => { it.on = e.target.checked; syncBatch(); };
     $$(".mv button", el).forEach(b => (b.onclick = () => {
@@ -348,9 +385,9 @@ function renderBatch() {
   syncBatch();
 }
 function syncBatch() {
-  const n = BATCH.items.filter(it => it.on && !it.error).length;
+  const sel = BATCH.items.filter(it => it.on && !it.error), n = sel.length, up = sel.filter(it => it.update).length;
   $("#batch-actions").hidden = !BATCH.items.length;
-  $("#batch-add").textContent = `加入下載佇列（${n} 首）`;
+  $("#batch-add").textContent = up ? `確定（下載 ${n - up} 首、更新 ${up} 首）` : `加入下載佇列（${n} 首）`;
   $("#batch-add").disabled = !n;
 }
 $("#batch-open").onclick = () => { $("#batch-dlg").hidden = false; $("#batch-text").focus(); };
@@ -362,7 +399,8 @@ $("#batch-resolve").onclick = async () => {
   const btn = $("#batch-resolve"); btn.disabled = true;
   $("#batch-msg").textContent = `查詢 ${lines.length} 行中，歌單和搜尋需要一點時間…`;
   try {
-    const r = await api("/api/youtube/resolve", { json: { lines } });
+    const rows = lines.map(l => BATCH.rows[l]).filter(Boolean);
+    const r = await api("/api/youtube/resolve", { json: { lines, rows } });
     BATCH.items = r.items.map(it => ({ ...it, on: !it.error && !it.dup }));
     const bad = r.items.filter(it => it.error).length, dup = r.items.filter(it => it.dup).length;
     $("#batch-msg").textContent = `找到 ${r.items.length - bad} 首` + (dup ? `，${dup} 首已經有了（預設不勾）` : "") + (bad ? `，${bad} 行找不到` : "") + "。搜尋到的歌請確認標題是不是你要的版本。";
@@ -377,17 +415,24 @@ $("#batch-file").onchange = async e => {
   try {
     const r = await api("/api/youtube/sheet", { method: "POST", body: fd });
     if (!r.lines.length) return toast("檔案裡沒有讀到歌曲");
+    for (const row of r.rows || []) if (row.line) BATCH.rows[row.line] = row;
     const cur = $("#batch-text").value.trim();
     $("#batch-text").value = (cur ? cur + "\n" : "") + r.lines.join("\n");
-    $("#batch-msg").textContent = `從「${f.name}」讀到 ${r.lines.length} 首，按「查詢」到 YouTube 找對應的影片。`;
+    const withUrl = (r.rows || []).filter(x => x.url).length, withKey = (r.rows || []).filter(x => x.key != null).length;
+    $("#batch-msg").textContent = `從「${f.name}」讀到 ${r.lines.length} 首` + (withUrl ? `（${withUrl} 首有 YouTube 網址，直接使用）` : "")
+      + (withKey ? `，${withKey} 首有升降 KEY` : "") + "。按「查詢」確認清單。";
   } catch (err) { toast(err.message); }
 };
+$("#batch-template").onclick = async () => {
+  try { const r = await api("/api/sheet-template", { method: "POST", json: {} }); toast(`範本已存到 ${r.path}`, 5000); }
+  catch (e) { toast(e.message); }
+};
 $("#batch-add").onclick = async () => {
-  const items = BATCH.items.filter(it => it.on && !it.error).map(it => ({ url: it.url, title: it.title }));
+  const items = BATCH.items.filter(it => it.on && !it.error).map(it => ({ url: it.url, title: it.title, sheet: it.sheet || null, update: it.update ? it.update.id : null }));
   try {
     const r = await api("/api/youtube/batch", { json: { items, category: importCategory() } });
-    toast(`已加入 ${r.added} 首到下載佇列` + (r.skipped ? `（${r.skipped} 首已經有了，略過）` : ""), 4000);
-    BATCH.items = []; renderBatch(); $("#batch-text").value = ""; $("#batch-msg").textContent = "";
+    toast(`已加入 ${r.added} 首到下載佇列` + (r.updated ? `，更新 ${r.updated} 首舊歌的資訊` : "") + (r.skipped ? `（${r.skipped} 首已經有了，略過）` : ""), 4000);
+    BATCH.items = []; BATCH.rows = {}; renderBatch(); $("#batch-text").value = ""; $("#batch-msg").textContent = "";
     $("#batch-dlg").hidden = true; loadSongs(); pollJobs();
   } catch (e) { toast(e.message); }
 };
@@ -504,7 +549,7 @@ async function remoteOpen(r) {
   if (r.seq === remoteSeq) return;
   remoteSeq = r.seq;
   if (!r.id) return;
-  store.set(`song:${r.id}`, { ...store.get(`song:${r.id}`, {}), key: r.key, speed: 1 });
+  store.set(`song:${r.id}`, { ...store.get(`song:${r.id}`, {}), key: r.key, speed: 1, at: Date.now() });
   try { await openSong(r.id); }
   catch (e) { toast(e.message); }
 }
@@ -585,12 +630,14 @@ async function openSong(id) {
   $("#lrc").value = lyr.lrc;
   setLines(lyr.lrc);
   const saved = store.get(`song:${id}`, {});
-  S.key = clamp(saved.key || 0, -6, 6); S.speed = saved.speed || 1;
+  // 歌曲資料裡的預設 KEY 比這台電腦上次記住的新（例如剛從表單匯入或改了預設 KEY）就用預設 KEY
+  const useDefault = song.key_set_at && !(saved.at > song.key_set_at * 1000);
+  S.key = clamp((useDefault ? song.key : saved.key) || 0, -6, 6); S.speed = useDefault ? 1 : saved.speed || 1;
   if (saved.vol) Object.assign(S.vol, saved.vol);
   S.t = 0; S.loopA = S.loopB = null; S.live = []; S.take = null; S.takeBuf = null;
   keyHintReset();
   computeRange();
-  $("#p-title").textContent = song.title;
+  $("#p-title").textContent = song.title + (song.artist ? ` — ${song.artist}` : "");
   $("#p-chips").innerHTML = `<span class="chip ${song.separation === "uvr" ? "ok" : "warn"}">${song.separation === "uvr" ? "AI 分軌" : "聲像分軌"}</span>`
     + (song.acapella ? `<span class="chip acap">清唱／純人聲</span>` : "")
     + (song.steps?.pitch && !(song.pitch_algo >= 2) ? `<button class="chip warn chip-btn" id="p-repitch" title="這首歌的旋律是舊版分析的，重新分析可以補上斷掉的旋律、修正句尾忽然跳高的音">更新旋律分析</button>` : "");
@@ -874,7 +921,7 @@ async function changeVariant(key, speed) {
   sel.onchange = () => changeVariant(+sel.value, S.speed);
 })();
 $("#speed").onchange = e => changeVariant(S.key, +e.target.value);
-function saveSongPrefs() { if (S.song) store.set(`song:${S.song.id}`, { key: S.key, speed: S.speed, vol: S.vol }); }
+function saveSongPrefs() { if (S.song) store.set(`song:${S.song.id}`, { key: S.key, speed: S.speed, vol: S.vol, at: Date.now() }); }
 
 /* 混音 */
 const PRESETS = {

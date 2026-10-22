@@ -18,7 +18,7 @@ import claude_api as C
 import pipeline as P
 import share as SH
 
-VERSION = "1.5.3"
+VERSION = "1.6"
 HOST, PORT = "127.0.0.1", int(os.environ.get("LIANTAI_PORT", "8765"))
 app = Flask(__name__, static_folder=str(P.ROOT / "static"), static_url_path="/static")
 app.config["MAX_CONTENT_LENGTH"] = 1024 * 1024 * 1024
@@ -60,7 +60,7 @@ def youtube_resume():
         if m["dl_state"] == "paused" and not _downloading(m["id"]):
             P.set_dl_state(P.song_dir(m["id"]), "queued")
             P.update_meta(P.song_dir(m["id"]), notes=[])
-            jobs.submit("process", m["id"], P.youtube_job(m["id"], m["source_url"]), label="youtube")
+            yt_submit(m["id"], m["source_url"])
             n += 1
     return jsonify(resumed=n)
 
@@ -172,27 +172,85 @@ def add_youtube():
             raise P.UserError(f"這首歌已經在下載佇列裡：{m.get('title')}")
         # 之前下載失敗或取消的同一首：直接用原本那一項重新下載，不另外多一項
         P.set_dl_state(P.song_dir(m["id"]), "queued")
-        jid = jobs.submit("process", m["id"], P.youtube_job(m["id"], url), label="youtube")
+        jid = yt_submit(m["id"], url)
         return jsonify(id=m["id"], job=jid, retried=True)
     sid = P.new_youtube_song(url)
     cat = (request.get_json(force=True) or {}).get("category") or None
     if cat in P.load_categories():
         P.update_meta(P.song_dir(sid), category=cat)
-    jid = jobs.submit("process", sid, P.youtube_job(sid, url), label="youtube")
+    jid = yt_submit(sid, url)
     return jsonify(id=sid, job=jid)
+
+
+def prerender_key(sid: str) -> str | None:
+    """這首歌有預設 KEY（例如表單的 -4）時，先把那個 KEY 的移調版本做好，打開就能直接唱。"""
+    d = P.song_dir(sid)
+    meta = P.read_meta(d)
+    key = meta.get("key") or 0
+    if not key or not meta.get("steps", {}).get("separate") or P.variant_ready(d, key, 1.0):
+        return None
+    label = f"{key}:1.0"
+    j = vjobs.find("variant", sid, label)
+    return j["id"] if j else vjobs.submit("variant", sid, lambda report: P.step_variant(d, key, 1.0, report), label=label)
+
+
+def yt_submit(sid: str, url: str) -> str:
+    return jobs.submit("process", sid, P.youtube_job(sid, url, after=prerender_key), label="youtube")
+
+
+def apply_sheet(sid: str, info: dict, batch_cat: str | None = None) -> None:
+    """把表單的歌手、曲名、KEY、語言（＋分類）寫進歌曲資料。曲名有填就鎖住，下載完不會被 YouTube 標題蓋掉。"""
+    d = P.song_dir(sid)
+    meta = P.read_meta(d)
+    ch: dict = {}
+    if info.get("song"):
+        ch.update(title=str(info["song"])[:120], title_locked=True)
+    if info.get("artist"):
+        ch["artist"] = str(info["artist"])[:80]
+    if info.get("key") is not None:
+        k = P.parse_key(info["key"])
+        if k is not None and k != (meta.get("key") or 0):
+            ch.update(key=k, key_set_at=time.time())
+    if info.get("lang") in ("zh", "ja", "en", "ko", "yue"):
+        ch["lyrics_language"] = info["lang"]
+    cat = batch_cat or (info.get("category") if not meta.get("category") else None)
+    if cat:
+        cats = P.load_categories()
+        if cat not in cats:
+            P.save_categories(cats + [cat])
+        ch["category"] = cat
+    if ch:
+        P.update_meta(d, **ch)
+        if meta.get("dl_state"):   # 還沒下載完：歌名後面繼續標（排隊下載）等狀態
+            P.set_dl_state(d, meta["dl_state"])
 
 
 def _downloading(sid: str) -> bool:
     return any(j.get("song") == sid and j.get("status") in ("queued", "running") for j in jobs.active())
 
 
+@app.post("/api/sheet-template")
+def sheet_template():
+    """批次加入的「下載範本」：把建議格式的歌單 .csv 存到「下載\雷虎練唱台」並在檔案總管裡顯示
+    （視窗程式裡的網頁不能直接下載檔案）。Excel 開啟不會亂碼。"""
+    out = P.downloads_dir() / P.APP_NAME / "歌單範本.csv"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(P.ROOT / "static" / "song-list-template.csv", out)
+    if sys.platform == "win32":
+        import subprocess
+        subprocess.Popen(["explorer", "/select,", str(out)])
+    return jsonify(path=str(out))
+
+
 @app.post("/api/youtube/resolve")
 def youtube_resolve():
     """批次匯入：把多行輸入（影片網址、歌單網址、歌手＋歌名）解析成影片清單，讓使用者確認。"""
-    lines = (request.get_json(force=True) or {}).get("lines") or []
+    body = request.get_json(force=True) or {}
+    lines = body.get("lines") or []
     if not isinstance(lines, list):
         raise P.UserError("格式不正確")
-    return jsonify(items=P.resolve_lines([str(x) for x in lines]))
+    rows = {str(r.get("line")): r for r in (body.get("rows") or []) if isinstance(r, dict) and r.get("line")}
+    return jsonify(items=P.resolve_lines([str(x) for x in lines], rows))
 
 
 @app.post("/api/youtube/batch")
@@ -207,7 +265,17 @@ def youtube_batch():
                 if m.get("steps", {}).get("import") or m.get("dl_state") == "queued" or _downloading(m["id"])}
     retry = {m["source_url"]: m["id"] for m in songs if m["source_url"] not in existing}   # 失敗／取消過的
     added, skipped = [], 0
+    updated = 0
     for it in (body.get("items") or [])[:P.BATCH_MAX]:
+        sheet = it.get("sheet") if isinstance(it.get("sheet"), dict) else None
+        if it.get("update") and sheet:   # 歌曲庫已經有的歌：只更新資訊，不重新下載
+            try:
+                apply_sheet(str(it["update"]), sheet, cat)
+                prerender_key(str(it["update"]))
+                updated += 1
+            except Exception as e:
+                P.log_error("batch update", e)
+            continue
         try:
             url = P.clean_youtube_url(it.get("url", ""))
         except P.UserError:
@@ -219,16 +287,20 @@ def youtube_batch():
         existing.add(url)
         if url in retry:   # 之前下載失敗或取消的同一首：用原本那一項重新下載
             sid = retry[url]
+            if sheet:
+                apply_sheet(sid, sheet, cat)
             P.set_dl_state(P.song_dir(sid), "queued")
-            jobs.submit("process", sid, P.youtube_job(sid, url), label="youtube")
+            yt_submit(sid, url)
             added.append(sid)
             continue
-        sid = P.new_youtube_song(url, str(it.get("title") or "")[:100])
-        if cat:
+        sid = P.new_youtube_song(url, str((sheet or {}).get("song") or it.get("title") or "")[:100])
+        if sheet:
+            apply_sheet(sid, sheet, cat)
+        elif cat:
             P.update_meta(P.song_dir(sid), category=cat)
-        jobs.submit("process", sid, P.youtube_job(sid, url), label="youtube")
+        yt_submit(sid, url)
         added.append(sid)
-    return jsonify(added=len(added), skipped=skipped)
+    return jsonify(added=len(added), skipped=skipped, updated=updated)
 
 
 @app.post("/api/youtube/sheet")
@@ -239,7 +311,8 @@ def youtube_sheet():
     data = f.read()
     if len(data) > 10_000_000:
         raise P.UserError("檔案太大")
-    return jsonify(lines=P.read_sheet(data, f.filename or ""))
+    rows = P.read_sheet(data, f.filename or "")
+    return jsonify(lines=[r["line"] for r in rows if r.get("line")], rows=rows)
 
 
 @app.post("/api/songs/<sid>/mixdown")
@@ -321,10 +394,20 @@ def rename(sid):
         if cat and cat not in P.load_categories():
             raise P.UserError("找不到這個分類")
         changes["category"] = cat
+    if "artist" in body:
+        changes["artist"] = (body.get("artist") or "").strip()[:80]
+    if "title" in body:
+        changes["title_locked"] = True
+    if "key" in body:   # 預設 KEY：打開這首歌時自動切到這個 KEY，並先做好移調版本
+        k = P.parse_key(body.get("key"))
+        changes.update(key=k or 0, key_set_at=time.time())
     if "lyrics_language" in body:   # 這首歌的辨識語言；null＝依設定
         v = body.get("lyrics_language")
         changes["lyrics_language"] = v if v in ("", "zh", "ja", "en", "ko", "yue") else None
-    return jsonify(P.update_meta(d, **changes))
+    meta = P.update_meta(d, **changes)
+    if "key" in changes:
+        prerender_key(sid)
+    return jsonify(meta)
 
 
 @app.delete("/api/songs/<sid>")
@@ -526,7 +609,7 @@ def redownload(sid):
     if any(j.get("song") == sid and j.get("status") in ("queued", "running") for j in jobs.active()):
         raise P.UserError("這首歌已經在下載佇列裡")
     P.set_dl_state(d, "queued")
-    jid = jobs.submit("process", sid, P.youtube_job(sid, url), label="youtube")
+    jid = yt_submit(sid, url)
     return jsonify(job=jid)
 
 
@@ -535,7 +618,7 @@ def resume_downloads() -> None:
     try:
         for m in sorted(P.pending_downloads(), key=lambda m: m.get("created") or 0):
             if m["dl_state"] == "queued":
-                jobs.submit("process", m["id"], P.youtube_job(m["id"], m["source_url"]), label="youtube")
+                yt_submit(m["id"], m["source_url"])
     except Exception as e:
         P.log_error("resume_downloads", e)
 

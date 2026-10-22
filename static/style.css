@@ -60,6 +60,7 @@ h2 { font-size: 13px; margin: 0; font-weight: 600; letter-spacing: .08em; color:
   padding: 5px 11px; cursor: pointer; white-space: nowrap;
 }
 button:hover, .btn:hover { border-color: var(--muted); }
+a.btn { color: inherit; text-decoration: none; }
 button:focus-visible, select:focus-visible, input:focus-visible, textarea:focus-visible, .btn:focus-within {
   outline: 2px solid var(--accent); outline-offset: 1px;
 }
@@ -116,6 +117,10 @@ main { padding: 20px; max-width: 1280px; margin: 0 auto; }
 .yt-pause { display: flex; gap: 12px; align-items: center; justify-content: space-between; margin: 10px 0; padding: 12px 14px;
   border: 1px solid var(--bad); border-radius: 10px; background: var(--panel); }
 .yt-pause .hint { display: block; margin-top: 4px; }
+.lib-right { display: flex; gap: 8px; align-items: center; }
+.song .sub { font-size: 12.5px; color: var(--muted); margin: 1px 0 3px; }
+.song .sub .k { font-family: var(--mono); color: var(--melody); margin-left: 6px; }
+.artist-head { margin: 16px 2px 2px; font-size: 13px; font-weight: 600; color: var(--muted); border-bottom: 1px solid var(--line); padding-bottom: 4px; }
 .sim-head { margin: 14px 2px 4px; font-size: 13px; color: var(--muted); }
 .song.similar { opacity: .85; }
 .song .m { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; color: var(--muted); font-size: 12px; }
