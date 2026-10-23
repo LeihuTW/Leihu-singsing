@@ -6,17 +6,17 @@ ManifestDPIAware true
 !include "LogicLib.nsh"
 
 !define APPNAME "雷虎練唱台"
-!define VERSION "1.6.1"
+!define VERSION "1.6.2"
 !define REGKEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\LeihuLiantai"
 
 Name "${APPNAME} ${VERSION}"
-OutFile "out\雷虎練唱台1.6.1.exe"
+OutFile "out\雷虎練唱台1.6.2.exe"
 InstallDir "$LOCALAPPDATA\LeihuLiantai"
 InstallDirRegKey HKCU "${REGKEY}" "InstallLocation"
 RequestExecutionLevel user
 SetCompressor /SOLID lzma
 BrandingText "${APPNAME} ${VERSION}"
-VIProductVersion "1.6.1.0"
+VIProductVersion "1.6.2.0"
 VIAddVersionKey /LANG=1028 "ProductName" "${APPNAME}"
 VIAddVersionKey /LANG=1028 "FileDescription" "${APPNAME} ${VERSION} 安裝程式"
 VIAddVersionKey /LANG=1028 "FileVersion" "${VERSION}"

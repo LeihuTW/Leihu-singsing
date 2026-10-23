@@ -180,7 +180,46 @@ _META_LOCK = threading.RLock()
 def read_meta(d: Path) -> dict:
     p = d / "meta.json"
     with _META_LOCK:
-        return json.loads(p.read_text("utf-8")) if p.exists() else {}
+        if not p.exists():
+            return {}
+        text = p.read_text("utf-8", errors="replace")
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError as e:
+            meta = _repair_meta(d, text, e)
+            write_meta(d, meta)   # 修好後存回去，下次就正常了
+            return meta
+
+
+def _repair_meta(d: Path, text: str, err: Exception) -> dict:
+    """1.6.1 以前同時寫入可能留下壞掉的 meta.json（兩份內容疊在一起）。
+    先試著取出第一份完整的內容；完全讀不出來時，依資料夾裡的檔案重建基本資料，歌曲和錄音都不會不見。"""
+    log_error(f"meta.json 壞掉，自動修復：{d.name}", err)
+    try:
+        meta, _ = json.JSONDecoder().raw_decode(text.lstrip())
+        if isinstance(meta, dict) and meta.get("id"):
+            return meta
+    except Exception:
+        pass
+    m = re.search(r'"title"\s*:\s*"((?:[^"\\]|\\.)*)"', text)
+    title = json.loads(f'"{m.group(1)}"') if m else f"（資料損壞的歌曲 {d.name}）"
+    has = lambda n: any((d / f"{n}{e}").exists() for e in (".flac", ".wav"))
+    meta = {"id": d.name, "title": title[:120], "created": d.stat().st_mtime, "duration": None,
+            "steps": {"import": has("mix"), "separate": has("lead") and has("back") and has("inst"),
+                      "pitch": (d / "pitch.json").exists(), "lyrics": (d / "lyrics.lrc").exists()},
+            "separation": "uvr" if has("lead") else None, "lyrics_source": None,
+            "notes": ["這首歌的資料檔曾經損壞，已自動修復；如果歌名或設定不對，可以用「編輯資訊」修改。"]}
+    for key in ("source_url", "artist"):   # 能找到的欄位盡量救回來（還沒下載的歌靠 source_url 才能接著下載）
+        m = re.search(rf'"{key}"\s*:\s*"((?:[^"\\]|\\.)*)"', text)
+        if m:
+            meta[key] = json.loads(f'"{m.group(1)}"')
+    m = re.search(r'"key"\s*:\s*(-?\d+)', text)
+    if m and -6 <= int(m.group(1)) <= 6:
+        meta["key"] = int(m.group(1))
+    if meta.get("source_url") and not meta["steps"]["import"]:
+        meta["dl_state"] = "failed"   # 還沒下載的歌：標成下載失敗，按「重新下載」就能接著下載
+        meta["title"] = _DL_RE.sub("", meta["title"]) + "（下載失敗）"
+    return meta
 
 
 def write_meta(d: Path, meta: dict) -> None:
@@ -206,7 +245,11 @@ def list_songs() -> list[dict]:
     out = []
     for d in LIB.iterdir():
         if d.is_dir() and (d / "meta.json").exists():
-            m = read_meta(d)
+            try:
+                m = read_meta(d)
+            except Exception as e:   # 一首歌的資料讀不出來，不要讓整個歌曲庫打不開
+                log_error(f"list_songs {d.name}", e)
+                continue
             takes = list_takes(d)
             m["takes"] = len(takes)
             scored = [t["acc"] for t in takes if t.get("acc") is not None]
@@ -2872,7 +2915,7 @@ def similarity(recognized: str, candidate: str) -> float | None:
     return round(sum(x.size for x in m.get_matching_blocks()) / len(a), 3)
 
 
-USER_AGENT = "LeihuLiantai/1.6.1 (+https://github.com/LeihuTW/Leihu-singsing)"   # HTTP 標頭只能用英文字
+USER_AGENT = "LeihuLiantai/1.6.2 (+https://github.com/LeihuTW/Leihu-singsing)"   # HTTP 標頭只能用英文字
 
 
 def _http_json(url: str, headers: dict | None = None, timeout: int = 8):
