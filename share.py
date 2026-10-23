@@ -70,8 +70,8 @@ def _stems(d: Path, info: dict):
     if not P.variant_ready(d, key, speed):
         raise P.UserError("需要先準備錄音時的 KEY／速度版本")
     vd = P.variant_dir(d, key, speed)
-    back, sr = sf.read(str(vd / "back.wav"), dtype="float32", always_2d=True)
-    inst, _ = sf.read(str(vd / "inst.wav"), dtype="float32", always_2d=True)
+    back, sr = sf.read(str(P.stem_path(vd, "back")), dtype="float32", always_2d=True)
+    inst, _ = sf.read(str(P.stem_path(vd, "inst")), dtype="float32", always_2d=True)
     back, inst = back.T, inst.T
     if back.shape[0] == 1:
         back, inst = np.repeat(back, 2, 0), np.repeat(inst, 2, 0)
@@ -141,8 +141,8 @@ def master_db(d: Path, key: int, speed: float) -> float:
         return float(json.loads(cache.read_text("utf-8"))["master_db"])
     except Exception:
         pass
-    back, sr = sf.read(str(vd / "back.wav"), dtype="float32", always_2d=True)
-    inst, _ = sf.read(str(vd / "inst.wav"), dtype="float32", always_2d=True)
+    back, sr = sf.read(str(P.stem_path(vd, "back")), dtype="float32", always_2d=True)
+    inst, _ = sf.read(str(P.stem_path(vd, "inst")), dtype="float32", always_2d=True)
     n = min(len(back), len(inst))
     bed = (back[:n] * _db(-3) + inst[:n]).T
     lufs = P.integrated_loudness(bed, sr)

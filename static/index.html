@@ -8,7 +8,7 @@
 </head>
 <body>
 <header class="bar">
-  <span class="logo">雷虎練唱台<small id="ver">1.6</small></span>
+  <span class="logo">雷虎練唱台<small id="ver">1.6.1</small></span>
   <nav class="row">
     <button id="nav-lib" class="tab cur">歌曲庫</button>
     <button id="nav-practice" class="tab" disabled>練唱</button>
@@ -439,9 +439,15 @@
     <label class="field"><span>人聲分離模型</span><input id="cfg-sep" type="text"></label>
     <label class="field"><span>主唱／合音分離品質（合音多的歌，高品質的旋律會準很多）</span>
       <select id="cfg-kq"><option value="auto">自動（有顯示卡用高品質）</option><option value="high">高品質（沒有顯示卡會非常慢）</option><option value="standard">標準（快）</option></select></label>
+    <label class="field"><span>高品質分離的速度（大量匯入時建議「快速」）</span>
+      <select id="cfg-kov"><option value="2">快速（建議，結果幾乎相同）</option><option value="4">最精細（約慢一倍）</option></select></label>
+    <label class="row"><input id="cfg-autofine" type="checkbox" checked> 合音多、需要更精細處理的歌，自動再用最精細的方式分一次（排在佇列最後，不影響其他歌的處理）</label>
     <label class="field"><span>主唱／合音分離模型（標準）</span><input id="cfg-kara" type="text"></label>
     <label class="field"><span>音高模型</span>
       <select id="cfg-pitch"><option value="auto">自動（有顯示卡用 full）</option><option value="full">full（準、CPU 很慢）</option><option value="tiny">tiny（快）</option></select></label>
+    <div class="field"><span>儲存空間</span>
+      <div class="hint" id="storage-info"></div>
+      <div><button id="storage-compact" hidden>轉成 FLAC 節省空間</button></div></div>
     <div class="row">
       <button id="cfg-save" class="primary">儲存</button>
       <button id="cfg-close" class="ghost">關閉</button>

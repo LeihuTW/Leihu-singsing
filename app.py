@@ -18,7 +18,7 @@ import claude_api as C
 import pipeline as P
 import share as SH
 
-VERSION = "1.6"
+VERSION = "1.6.1"
 HOST, PORT = "127.0.0.1", int(os.environ.get("LIANTAI_PORT", "8765"))
 app = Flask(__name__, static_folder=str(P.ROOT / "static"), static_url_path="/static")
 app.config["MAX_CONTENT_LENGTH"] = 1024 * 1024 * 1024
@@ -156,7 +156,12 @@ def add_song():
     if cat in P.load_categories():
         P.update_meta(P.song_dir(sid), category=cat)
     steps = ["import", "separate", "pitch", "lyrics"]
-    jid = jobs.submit("process", sid, P.process_song(sid, steps), label="all")
+    proc = P.process_song(sid, steps)
+
+    def run(report, sid=sid):
+        proc(report)
+        after_process(sid)
+    jid = jobs.submit("process", sid, run, label="all")
     return jsonify(id=sid, job=jid)
 
 
@@ -190,12 +195,42 @@ def prerender_key(sid: str) -> str | None:
     if not key or not meta.get("steps", {}).get("separate") or P.variant_ready(d, key, 1.0):
         return None
     label = f"{key}:1.0"
-    j = vjobs.find("variant", sid, label)
-    return j["id"] if j else vjobs.submit("variant", sid, lambda report: P.step_variant(d, key, 1.0, report), label=label)
+    return vjobs.find("variant", sid, label) or vjobs.submit(
+        "variant", sid, lambda report: P.step_variant(d, key, 1.0, report), label=label)
+
+
+def after_process(sid: str) -> None:
+    """一首歌處理完：先做好預設 KEY 的移調版本；合音多的歌，依設定自動排一次精細處理（排在佇列最後）。"""
+    meta = P.read_meta(P.song_dir(sid))
+    if meta.get("fine_suggest") and not meta.get("fine_done") and P.load_config().get("auto_fine", True):
+        queue_fine(sid)   # 精細處理完才做移調版本（重新分軌會清掉舊的移調版本）
+    else:
+        prerender_key(sid)
+
+
+def queue_fine(sid: str) -> str:
+    jid = jobs.find("process", sid, "fine")
+    if jid:
+        return jid
+    P.update_meta(P.song_dir(sid), fine_queued=True)
+    return jobs.submit("process", sid, P.fine_job(sid, after=prerender_key), label="fine")
 
 
 def yt_submit(sid: str, url: str) -> str:
-    return jobs.submit("process", sid, P.youtube_job(sid, url, after=prerender_key), label="youtube")
+    return jobs.submit("process", sid, P.youtube_job(sid, url, after=after_process), label="youtube")
+
+
+def prefetcher() -> None:
+    """背景預先下載：佇列裡接下來的兩首 YouTube 歌，趁顯示卡在處理別首時先下載好。"""
+    while True:
+        time.sleep(3)
+        try:
+            if P.YT_PAUSE["on"]:
+                continue
+            for sid in jobs.upcoming("youtube", 2):
+                P.prefetch_youtube(sid)
+        except Exception as e:
+            P.log_error("prefetcher", e)
 
 
 def apply_sheet(sid: str, info: dict, batch_cat: str | None = None) -> None:
@@ -249,8 +284,9 @@ def youtube_resolve():
     lines = body.get("lines") or []
     if not isinstance(lines, list):
         raise P.UserError("格式不正確")
-    rows = {str(r.get("line")): r for r in (body.get("rows") or []) if isinstance(r, dict) and r.get("line")}
-    return jsonify(items=P.resolve_lines([str(x) for x in lines], rows))
+    if isinstance(body.get("sheet"), list):   # 匯入的表單：每一列直接對應，不經過文字框
+        return jsonify(items=P.resolve_lines([], body["sheet"]))
+    return jsonify(items=P.resolve_lines([str(x) for x in lines]))
 
 
 @app.post("/api/youtube/batch")
@@ -344,7 +380,7 @@ def mixdown(sid):
         for k, g in gains.items():
             if g <= 0:
                 continue
-            y, sr = sf.read(str(vd / f"{k}.wav"), dtype="float32", always_2d=True)
+            y, sr = sf.read(str(P.stem_path(vd, k)), dtype="float32", always_2d=True)
             y = y.T if y.shape[1] == 2 else np.repeat(y.T, 2, 0)
             parts.append(y * g)
         n = min(p.shape[1] for p in parts)
@@ -370,7 +406,7 @@ def job_move(jid):
 def song(sid):
     d = P.song_dir(sid)
     meta = P.read_meta(d)
-    if "acapella" not in meta and (d / "inst.wav").exists() and (d / "lead.wav").exists():
+    if "acapella" not in meta and P.stem_path(d, "inst").exists() and P.stem_path(d, "lead").exists():
         meta = P.update_meta(d, acapella=P.is_acapella(d))   # 舊歌曲補上清唱判斷
     if meta.get("lufs") is None and meta.get("steps", {}).get("import"):
         meta = P.measure_loudness(d)   # 舊歌曲第一次開啟時補量響度（約 1 秒）
@@ -556,6 +592,29 @@ def variant(sid):
     return jsonify(ready=False, job=jid)
 
 
+@app.post("/api/songs/<sid>/fine")
+def song_fine(sid):
+    """手動排一次精細處理（最精細的主唱分離＋重新分析旋律）。"""
+    P.song_dir(sid)
+    return jsonify(job=queue_fine(sid))
+
+
+@app.get("/api/storage")
+def storage():
+    return jsonify(P.storage_report())
+
+
+@app.post("/api/storage/compact")
+def storage_compact():
+    """把舊歌曲的 WAV 分軌轉成 FLAC（無損）、刪掉不需要的原始檔。排進處理佇列，和處理歌曲不會同時進行。"""
+    j = jobs.find("process", "", "compact")
+    if j:
+        return jsonify(job=j)
+    busy = lambda sid: any(x.get("song") == sid and x.get("status") in ("queued", "running") for x in vjobs.active())
+    jid = jobs.submit("process", "", lambda report: P.compact_library(report, busy), label="compact")
+    return jsonify(job=jid)
+
+
 @app.get("/api/songs/<sid>/audio/<stem>")
 def audio(sid, stem):
     d = P.song_dir(sid)
@@ -563,10 +622,10 @@ def audio(sid, stem):
         abort(404)
     key, speed = _key_speed()
     base = d if stem == "mix" else P.variant_dir(d, key, speed)
-    p = base / f"{stem}.wav"
+    p = P.stem_path(base, stem)
     if not p.exists():
         abort(404)
-    return send_file(p, mimetype="audio/wav", conditional=True, max_age=0)
+    return send_file(p, mimetype="audio/flac" if p.suffix == ".flac" else "audio/wav", conditional=True, max_age=0)
 
 
 @app.get("/api/debug/stacks")
@@ -732,7 +791,7 @@ def take_mixprep(sid, tid):
     opts = _share_opts()
     info = SH.load_take(d, tid)
     key, speed = SH.variant_needed(d, info)
-    back = P.variant_dir(d, key, speed) / "back.wav"
+    back = P.stem_path(P.variant_dir(d, key, speed), "back")
     sr, n = sf_info(back)
     tag = f"v2_{int(opts['polish'])}_{opts['reverb']}"   # v2：1.4.9 改了人聲處理，舊的暫存要重做
     vp = d / "takes" / f"{tid}.vocal_{tag}.wav"
@@ -1198,6 +1257,7 @@ def main():
     P.LIB.mkdir(exist_ok=True)
     watch_parent()
     resume_downloads()
+    threading.Thread(target=prefetcher, daemon=True, name="prefetch").start()
     url = f"http://{HOST}:{PORT}"
     print(f"\n  {P.APP_NAME} {VERSION} 已啟動：{url}\n  關閉這個視窗就會結束程式。\n")
     if "--no-browser" not in sys.argv:

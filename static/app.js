@@ -250,6 +250,10 @@ function renderSongs() {
     chips.push(`<span class="chip ${st.pitch ? "ok" : ""}">${st.pitch ? "旋律" : "旋律未完成"}</span>`);
     if (st.separate && s.separation === "uvr" && ST.hq && ST.hq.state === "ready" && (s.karaoke || "") !== ST.hqModel)
       chips.push(`<button class="chip warn chip-btn" data-a="hqsep" title="用高品質模型重新分離主唱與合音，並重新分析旋律（歌詞不變）">用高品質重新分軌</button>`);
+    if (s.fine_queued) chips.push(`<span class="chip" title="用最精細的方式重新分主唱與合音，排在佇列最後">精細處理排隊中</span>`);
+    else if (s.fine_suggest && !s.fine_done && st.separate)
+      chips.push(`<button class="chip warn chip-btn" data-a="fine" title="這首合音比較多（合音約是主唱的 ${Math.round((s.harmony || 0) * 100)}%），用最精細的方式重新分主唱與合音，旋律會更準（歌詞不變）">建議精細處理</button>`);
+    else if (s.fine_done) chips.push(`<span class="chip ok" title="已用最精細的方式分離主唱與合音">精細處理</span>`);
     if (st.pitch && !(s.pitch_algo >= 2)) chips.push(`<button class="chip warn chip-btn" data-a="repitch" title="用 1.4.2 改良的方式重新分析旋律（約 1 分鐘，不影響歌詞與錄音）">更新旋律分析</button>`);
     if (s.lyrics_unreliable && !["online", "import", "manual", "claude"].includes(s.lyrics_source))
       chips.push(`<span class="chip warn" title="自動辨識不夠準確，已先留白">建議找線上歌詞</span>`);
@@ -297,6 +301,11 @@ function renderSongs() {
     const rd = $('[data-a="redl"]', el);
     if (rd) rd.onclick = async () => {
       try { await api(`/api/songs/${s.id}/redownload`, { method: "POST", json: {} }); toast("已重新加入下載佇列"); loadSongs(); pollJobs(); }
+      catch (e) { toast(e.message); }
+    };
+    const fn = $('[data-a="fine"]', el);
+    if (fn) fn.onclick = async () => {
+      try { await api(`/api/songs/${s.id}/fine`, { method: "POST", json: {} }); toast("已排入精細處理（排在佇列最後）"); loadSongs(); pollJobs(); }
       catch (e) { toast(e.message); }
     };
     const rp = $('[data-a="repitch"]', el);
@@ -356,7 +365,7 @@ $("#yt-form").addEventListener("submit", async e => {
   finally { btn.disabled = false; }
 });
 /* 1.4.8：批次加入（多個網址、歌單、歌手＋歌名、Excel） */
-const BATCH = { items: [], rows: {} };   // rows：從表單讀到的歌手、曲名、KEY、語言、網址（以每一行的文字對應）
+const BATCH = { items: [] };
 function fmtDur(v) { return v ? `${Math.floor(v / 60)}:${String(Math.round(v % 60)).padStart(2, "0")}` : ""; }
 function renderBatch() {
   const box = $("#batch-list"); box.innerHTML = "";
@@ -368,11 +377,12 @@ function renderBatch() {
       <div><div class="t"></div><div class="s"></div></div><span class="num hint"></span>`;
     const sh = it.sheet || {};
     $(".t", el).textContent = it.error ? it.input : (sh.song ? `${sh.song}${sh.artist ? " — " + sh.artist : ""}` : (it.title || it.url));
-    $(".s", el).textContent = it.error ? it.error
-      : [sh.song && it.title !== sh.song ? `YouTube：${it.title}` : it.channel, it.from,
-        sh.key ? `KEY ${sh.key > 0 ? "+" : ""}${sh.key}` : "", sh.category || "",
+    $(".s", el).textContent = (it.row ? `第 ${it.row} 列・` : "") + (it.error ? it.error
+      : [sh.song && it.title !== sh.song ? `YouTube：${it.title}` : it.channel,
+        it.from === "表單網址" ? `網址 ${(it.url || "").replace("https://www.youtube.com/watch?v=", "youtu.be/")}` : it.from,
+        sh.song ? (sh.key ? `KEY ${sh.key > 0 ? "+" : ""}${sh.key}` : "KEY 原調") : "", sh.category || "",
         it.update ? `已在歌曲庫（${it.update.title}）：只更新曲名、歌手、KEY，不重新下載` : "",
-        it.dup ? `已在歌曲庫：${it.dup}` : ""].filter(Boolean).join("・");
+        it.dup ? (it.dup === "（清單裡重複）" ? "和清單裡另一首的網址相同" : `已在歌曲庫：${it.dup}`) : ""].filter(Boolean).join("・"));
     $(".num", el).textContent = fmtDur(it.duration);
     $("input", el).onchange = e => { it.on = e.target.checked; syncBatch(); };
     $$(".mv button", el).forEach(b => (b.onclick = () => {
@@ -399,8 +409,7 @@ $("#batch-resolve").onclick = async () => {
   const btn = $("#batch-resolve"); btn.disabled = true;
   $("#batch-msg").textContent = `查詢 ${lines.length} 行中，歌單和搜尋需要一點時間…`;
   try {
-    const rows = lines.map(l => BATCH.rows[l]).filter(Boolean);
-    const r = await api("/api/youtube/resolve", { json: { lines, rows } });
+    const r = await api("/api/youtube/resolve", { json: { lines } });
     BATCH.items = r.items.map(it => ({ ...it, on: !it.error && !it.dup }));
     const bad = r.items.filter(it => it.error).length, dup = r.items.filter(it => it.dup).length;
     $("#batch-msg").textContent = `找到 ${r.items.length - bad} 首` + (dup ? `，${dup} 首已經有了（預設不勾）` : "") + (bad ? `，${bad} 行找不到` : "") + "。搜尋到的歌請確認標題是不是你要的版本。";
@@ -415,12 +424,23 @@ $("#batch-file").onchange = async e => {
   try {
     const r = await api("/api/youtube/sheet", { method: "POST", body: fd });
     if (!r.lines.length) return toast("檔案裡沒有讀到歌曲");
-    for (const row of r.rows || []) if (row.line) BATCH.rows[row.line] = row;
-    const cur = $("#batch-text").value.trim();
-    $("#batch-text").value = (cur ? cur + "\n" : "") + r.lines.join("\n");
-    const withUrl = (r.rows || []).filter(x => x.url).length, withKey = (r.rows || []).filter(x => x.key != null).length;
-    $("#batch-msg").textContent = `從「${f.name}」讀到 ${r.lines.length} 首` + (withUrl ? `（${withUrl} 首有 YouTube 網址，直接使用）` : "")
-      + (withKey ? `，${withKey} 首有升降 KEY` : "") + "。按「查詢」確認清單。";
+    const rows = r.rows || [];
+    if (!rows.some(x => x.artist || x.song)) {   // 沒有「歌手」「曲名」欄：當成一般文字，放進文字框
+      const cur = $("#batch-text").value.trim();
+      $("#batch-text").value = (cur ? cur + "\n" : "") + r.lines.join("\n");
+      $("#batch-msg").textContent = `從「${f.name}」讀到 ${r.lines.length} 行，按「查詢」到 YouTube 找對應的影片。`;
+      return;
+    }
+    // 有欄位的表單：直接列出確認清單（有網址的不用查詢），每一列都顯示讀到的 KEY 和網址
+    const noUrl = rows.filter(x => !x.url).length, withKey = rows.filter(x => x.key != null).length;
+    $("#batch-msg").textContent = `從「${f.name}」讀到 ${rows.length} 首` + (noUrl ? `，其中 ${noUrl} 首沒有網址，正在 YouTube 搜尋…` : "，整理中…");
+    const res = await api("/api/youtube/resolve", { json: { sheet: rows } });
+    BATCH.items = res.items.map(it => ({ ...it, on: !it.error && !it.dup }));
+    const bad = res.items.filter(it => it.error).length, dup = res.items.filter(it => it.dup).length, up = res.items.filter(it => it.update).length;
+    $("#batch-msg").textContent = `「${f.name}」共 ${rows.length} 首：${rows.length - noUrl} 首用表單的網址` + (noUrl ? `、${noUrl} 首用搜尋` : "")
+      + `，${withKey} 首有升降 KEY` + (up ? `，${up} 首已在歌曲庫（只更新資訊）` : "") + (dup ? `，${dup} 首重複（預設不勾）` : "")
+      + (bad ? `，${bad} 首找不到` : "") + "。每一列下方會顯示讀到的 KEY 和網址，確認後按下方按鈕。";
+    renderBatch();
   } catch (err) { toast(err.message); }
 };
 $("#batch-template").onclick = async () => {
@@ -432,7 +452,7 @@ $("#batch-add").onclick = async () => {
   try {
     const r = await api("/api/youtube/batch", { json: { items, category: importCategory() } });
     toast(`已加入 ${r.added} 首到下載佇列` + (r.updated ? `，更新 ${r.updated} 首舊歌的資訊` : "") + (r.skipped ? `（${r.skipped} 首已經有了，略過）` : ""), 4000);
-    BATCH.items = []; BATCH.rows = {}; renderBatch(); $("#batch-text").value = ""; $("#batch-msg").textContent = "";
+    BATCH.items = []; renderBatch(); $("#batch-text").value = ""; $("#batch-msg").textContent = "";
     $("#batch-dlg").hidden = true; loadSongs(); pollJobs();
   } catch (e) { toast(e.message); }
 };
@@ -500,7 +520,7 @@ async function pollJobs() {
         pollJobs();
       };
     }
-    $(".lbl", el).textContent = `${j.status === "queued" && j.order != null ? `#${j.order + 1} ` : ""}${songTitle(j.song)}：${j.status === "queued" ? "排隊中" : j.step}`;
+    $(".lbl", el).textContent = `${j.status === "queued" && j.order != null ? `#${j.order + 1} ` : ""}${j.label === "compact" ? "整理歌曲檔案" : songTitle(j.song)}：${j.status === "queued" ? "排隊中" : j.step}`;
     if (j.error) $(".err", el).textContent = j.error;
     box.appendChild(el);
   }
@@ -2657,6 +2677,8 @@ async function openSettings(focusUsage) {
   $("#cfg-sep").value = cfg.separation_model;
   $("#cfg-kara").value = cfg.karaoke_model;
   $("#cfg-kq").value = cfg.karaoke_quality || "auto";
+  $("#cfg-kov").value = String(cfg.karaoke_overlap === 4 ? 4 : 2);
+  $("#cfg-autofine").checked = cfg.auto_fine !== false;
   $("#cfg-pitch").value = cfg.pitch_model;
   const m = st.modules;
   const items = [["uvr", "AI 人聲分離"], ["crepe", "CREPE 音高"], ["whisper", "Whisper 歌詞辨識"], ["pedalboard", "高品質移調"], ["opencc", "台灣繁體轉換"], ["anthropic", "Claude 連線"], ["kana", "日文假名標音"], ["cuda", "顯示卡加速"]];
@@ -2664,14 +2686,28 @@ async function openSettings(focusUsage) {
     + (st.cuda_note ? `<div class="hint" id="cuda-note"></div>` : "");
   if (st.cuda_note) $("#cuda-note").textContent = st.cuda_note;
   $("#settings").hidden = false;
+  renderStorage();
 }
+async function renderStorage() {
+  const gb = v => (v / 1e9).toFixed(1) + " GB";
+  try {
+    const r = await api("/api/storage");
+    $("#storage-info").textContent = `歌曲庫 ${r.songs} 首，佔用 ${gb(r.bytes)}。` + (r.saving > 2e8
+      ? `舊格式的檔案轉成 FLAC（無損，音質不變）並刪掉不需要的原始檔，大約可以省下 ${gb(r.saving)}。` : "檔案都已經是節省空間的格式。");
+    $("#storage-compact").hidden = !(r.saving > 2e8);
+  } catch { $("#storage-info").textContent = ""; }
+}
+$("#storage-compact").onclick = async () => {
+  try { await api("/api/storage/compact", { method: "POST", json: {} }); toast("已開始轉換，進度顯示在歌曲庫上方；轉換時可以照常練唱", 4000); $("#storage-compact").hidden = true; pollJobs(); }
+  catch (e) { toast(e.message); }
+};
 async function saveSettings(extra = {}) {
   try {
     await api("/api/config", { json: {
       anthropic_api_key: $("#cfg-key").value, claude_model: $("#cfg-model").value.trim(),
       whisper_model: $("#cfg-whisper").value, lyrics_language: $("#cfg-lang").value,
       convert_to_taiwan: $("#cfg-tw").checked, font: $("#cfg-font").value, separation_model: $("#cfg-sep").value.trim(),
-      karaoke_model: $("#cfg-kara").value.trim(), karaoke_quality: $("#cfg-kq").value, pitch_model: $("#cfg-pitch").value,
+      karaoke_model: $("#cfg-kara").value.trim(), karaoke_quality: $("#cfg-kq").value, karaoke_overlap: +$("#cfg-kov").value, auto_fine: $("#cfg-autofine").checked, pitch_model: $("#cfg-pitch").value,
       balance_usd: $("#cfg-balance").value.trim().replace(/^US\$|^\$/, ""), ...extra,
     } });
     applyFont($("#cfg-font").value);
