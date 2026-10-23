@@ -18,10 +18,23 @@ import claude_api as C
 import pipeline as P
 import share as SH
 
-VERSION = "1.6.2"
+VERSION = "1.6.3"
 HOST, PORT = "127.0.0.1", int(os.environ.get("LIANTAI_PORT", "8765"))
 app = Flask(__name__, static_folder=str(P.ROOT / "static"), static_url_path="/static")
 app.config["MAX_CONTENT_LENGTH"] = 1024 * 1024 * 1024
+_SETTINGS_LOCK = threading.Lock()   # 設定檔、分類清單：讀出→修改→存回 之間不讓別的請求插進來
+
+
+def _locked(fn):
+    import functools
+
+    @functools.wraps(fn)
+    def wrap(*a, **k):
+        with _SETTINGS_LOCK:
+            return fn(*a, **k)
+    return wrap
+
+
 jobs = P.Jobs()
 vjobs = P.Jobs()   # 移調／變速另外排隊：不會被分軌、評分卡住，也不會卡住它們
 
@@ -48,7 +61,23 @@ def status():
                    hq_model=P.HQ_KARAOKE,
                    claude_ready=bool(cfg.get("anthropic_api_key") or os.environ.get("ANTHROPIC_API_KEY")),
                    session_cost=C.summary()["session"]["cost_usd"],
-                   jobs=jobs.active() + vjobs.active(), remote=dict(REMOTE), yt_pause=dict(P.YT_PAUSE))
+                   remote=dict(REMOTE), yt_pause=dict(P.YT_PAUSE), **_jobs_for_ui())
+
+
+UI_QUEUE_SHOWN = 30
+
+
+def _jobs_for_ui() -> dict:
+    """畫面每秒會問一次進度。排隊的歌有好幾百首時，只送前 30 首（其餘只給數量），
+    不然每秒都要傳、畫面也要重畫幾百列，介面會變得很卡。"""
+    out, queued = [], 0
+    for j in jobs.active() + vjobs.active():
+        if j["status"] == "queued" and j["kind"] == "process":
+            queued += 1
+            if queued > UI_QUEUE_SHOWN:
+                continue
+        out.append(j)
+    return {"jobs": out, "queued_total": queued}
 
 
 @app.post("/api/youtube/resume")
@@ -101,6 +130,7 @@ def get_config():
 
 
 @app.post("/api/config")
+@_locked
 def set_config():
     body = request.get_json(force=True) or {}
     cfg = P.load_config()
@@ -160,7 +190,10 @@ def add_song():
 
     def run(report, sid=sid):
         proc(report)
-        after_process(sid)
+        try:
+            after_process(sid)
+        except Exception as e:   # 移調預跑等後續工作失敗，不影響這首歌已經處理好
+            P.log_error("after_process", e)
     jid = jobs.submit("process", sid, run, label="all")
     return jsonify(id=sid, job=jid)
 
@@ -250,9 +283,10 @@ def apply_sheet(sid: str, info: dict, batch_cat: str | None = None) -> None:
         ch["lyrics_language"] = info["lang"]
     cat = batch_cat or (info.get("category") if not meta.get("category") else None)
     if cat:
-        cats = P.load_categories()
-        if cat not in cats:
-            P.save_categories(cats + [cat])
+        with _SETTINGS_LOCK:
+            cats = P.load_categories()
+            if cat not in cats:
+                P.save_categories(cats + [cat])
         ch["category"] = cat
     if ch:
         P.update_meta(d, **ch)
@@ -483,7 +517,7 @@ def get_lyrics(sid):
         if P.is_japanese(t):   # 1.5 以前把日文歌詞轉成了台灣繁體（来→來）：改回日文字形並存回去
             j = P.tw_to_ja(t)
             if j != t:
-                (d / n).write_text(j, "utf-8")
+                P.atomic_write_text(d / n, j)
                 t = j
         return t
     meta = P.read_meta(d)
@@ -520,14 +554,15 @@ def set_kana(sid):
     if not base:
         raise P.UserError("缺少要修改的字")
     d = P.song_dir(sid)
-    meta = P.read_meta(d)
-    fix = meta.get("kana_fix") or {}
-    if reading:
-        fix[base] = reading
-    else:
-        fix.pop(base, None)
-    meta["kana_fix"] = fix
-    P.write_meta(d, meta)
+    with P._META_LOCK:   # 讀出到寫回之間不讓別的執行緒改這首歌的資料
+        meta = P.read_meta(d)
+        fix = meta.get("kana_fix") or {}
+        if reading:
+            fix[base] = reading
+        else:
+            fix.pop(base, None)
+        meta["kana_fix"] = fix
+        P.write_meta(d, meta)
     return jsonify(kana_fix=fix)
 
 
@@ -540,12 +575,13 @@ def use_lyrics(sid):
     if not src or not (d / src).exists():
         raise P.UserError("沒有這份歌詞")
     lrc = (d / src).read_text("utf-8")
-    (d / "lyrics.lrc").write_text(lrc, "utf-8")
-    meta = P.read_meta(d)
-    meta["lyrics_source"] = "online" if which == "online" else "whisper"
-    meta["lyrics_pending"] = False
-    meta["steps"]["lyrics"] = True
-    P.write_meta(d, meta)
+    P.atomic_write_text(d / "lyrics.lrc", lrc)
+    with P._META_LOCK:   # 讀出到寫回之間不讓別的執行緒改這首歌的資料
+        meta = P.read_meta(d)
+        meta["lyrics_source"] = "online" if which == "online" else "whisper"
+        meta["lyrics_pending"] = False
+        meta["steps"]["lyrics"] = True
+        P.write_meta(d, meta)
     return jsonify(lrc=lrc, source=meta["lyrics_source"])
 
 
@@ -553,16 +589,17 @@ def use_lyrics(sid):
 def put_lyrics(sid):
     d = P.song_dir(sid)
     lrc = (request.get_json(force=True) or {}).get("lrc", "")
-    (d / "lyrics.lrc").write_text(lrc, "utf-8")
-    meta = P.read_meta(d)
-    meta["steps"]["lyrics"] = bool(lrc.strip())
-    if meta.get("lyrics_source") == "online" and lrc.strip():
-        (d / "lyrics_online.lrc").write_text(lrc, "utf-8")   # 調整線上歌詞的時間：存回線上歌詞那一份
-    else:
-        meta["lyrics_source"] = "manual"
-    if lrc.strip():
-        meta["notes"] = [x for x in meta.get("notes", []) if "歌詞辨識沒有完成" not in x]
-    P.write_meta(d, meta)
+    P.atomic_write_text(d / "lyrics.lrc", lrc)
+    with P._META_LOCK:   # 讀出到寫回之間不讓別的執行緒改這首歌的資料
+        meta = P.read_meta(d)
+        meta["steps"]["lyrics"] = bool(lrc.strip())
+        if meta.get("lyrics_source") == "online" and lrc.strip():
+            P.atomic_write_text(d / "lyrics_online.lrc", lrc)   # 調整線上歌詞的時間：存回線上歌詞那一份
+        else:
+            meta["lyrics_source"] = "manual"
+        if lrc.strip():
+            meta["notes"] = [x for x in meta.get("notes", []) if "歌詞辨識沒有完成" not in x]
+        P.write_meta(d, meta)
     return jsonify(ok=True)
 
 
@@ -711,7 +748,7 @@ def add_take(sid):
         "speed": float(request.form.get("speed", 1)),
         "duration": float(request.form.get("duration", 0)),
     }
-    (td / f"{tid}.json").write_text(json.dumps(info, ensure_ascii=False), "utf-8")
+    P.atomic_write_text(td / f"{tid}.json", json.dumps(info, ensure_ascii=False))
     jid = jobs.submit("take", sid, lambda report: _score(d, tid, report), label=tid)
     return jsonify(id=tid, job=jid)
 
@@ -725,7 +762,7 @@ def _score(d, tid, report):
         try:
             info = json.loads(j.read_text("utf-8"))
             info.update(status="error", error=f"評分失敗：{e}")
-            j.write_text(json.dumps(info, ensure_ascii=False), "utf-8")
+            P.atomic_write_text(j, json.dumps(info, ensure_ascii=False))
         except Exception:
             pass
         raise
@@ -954,10 +991,9 @@ def claude_align(sid):
         clean.append(round(t, 2))
         prev = t
     lrc = P.to_lrc([{"t": t, "text": txt} for t, txt in zip(clean, ref_lines)])
-    (d / "lyrics.lrc").write_text(lrc, "utf-8")
-    meta["steps"]["lyrics"] = True
-    meta["lyrics_source"] = "claude"
-    P.write_meta(d, meta)
+    P.atomic_write_text(d / "lyrics.lrc", lrc)
+    steps = dict(P.read_meta(d).get("steps") or {}, lyrics=True)
+    P.update_meta(d, steps=steps, lyrics_source="claude")   # Claude 回應要等一陣子，不能整段鎖住
     return jsonify(lrc=lrc, usage=usage)
 
 
@@ -986,7 +1022,7 @@ def claude_coach(sid):
     )
     text, usage = C.ask_text(prompt, 3000, "coach", title)
     t["coach"] = text
-    j.write_text(json.dumps(t, ensure_ascii=False), "utf-8")
+    P.atomic_write_text(j, json.dumps(t, ensure_ascii=False))
     return jsonify(text=text, usage=usage)
 
 
@@ -1050,6 +1086,7 @@ def categories():
 
 
 @app.post("/api/categories")
+@_locked
 def edit_categories():
     body = request.get_json(force=True) or {}
     act, name, new = body.get("action"), (body.get("name") or "").strip(), (body.get("new") or "").strip()

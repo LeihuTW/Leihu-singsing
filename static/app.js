@@ -524,6 +524,12 @@ async function pollJobs() {
     if (j.error) $(".err", el).textContent = j.error;
     box.appendChild(el);
   }
+  if (st.queued_total > 30) {   // 排隊很多首時只列出前 30 首
+    const more = document.createElement("div");
+    more.className = "job hint";
+    more.textContent = `……還有 ${st.queued_total - 30} 首排隊中（共 ${st.queued_total} 首）`;
+    box.appendChild(more);
+  }
   // 高品質主唱分離模型在背景下載時，顯示下載進度
   ST.hq = st.hq; ST.hqModel = st.hq_model;
   if (st.hq && (st.hq.state === "downloading" || st.hq.state === "error")) {

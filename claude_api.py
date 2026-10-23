@@ -60,7 +60,9 @@ def record(model: str, usage, purpose: str, song: str) -> dict:
         data = _load()
         data["calls"].append(entry)
         data["calls"] = data["calls"][-2000:]
-        USAGE_PATH.write_text(json.dumps(data, ensure_ascii=False, indent=1), "utf-8")
+        tmp = USAGE_PATH.with_name(USAGE_PATH.name + ".tmp")   # 已經在 _lock 裡，同一時間只有一個人寫
+        tmp.write_text(json.dumps(data, ensure_ascii=False, indent=1), "utf-8")
+        tmp.replace(USAGE_PATH)
     return entry
 
 

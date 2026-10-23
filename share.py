@@ -148,7 +148,7 @@ def master_db(d: Path, key: int, speed: float) -> float:
     lufs = P.integrated_loudness(bed, sr)
     m = 0.0 if lufs is None else float(np.clip(BED_TARGET_LUFS - lufs, -20.0, 12.0))
     try:
-        cache.write_text(json.dumps({"bed_lufs": lufs, "master_db": round(m, 2)}), "utf-8")
+        P.atomic_write_text(cache, json.dumps({"bed_lufs": lufs, "master_db": round(m, 2)}))
     except OSError:
         pass
     return round(m, 2)

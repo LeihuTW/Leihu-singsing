@@ -84,7 +84,7 @@ def load_config() -> dict:
 
 
 def save_config(cfg: dict) -> None:
-    CONFIG_PATH.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), "utf-8")
+    atomic_write_text(CONFIG_PATH, json.dumps(cfg, ensure_ascii=False, indent=2))
 
 
 def module_status() -> dict:
@@ -177,6 +177,28 @@ def song_dir(song_id: str) -> Path:
 _META_LOCK = threading.RLock()
 
 
+def _replace_retry(src: Path, dst: Path) -> None:
+    """Windows 上目標檔剛好被別的程式（防毒、雲端同步、其他讀取）開著時，取代會失敗；稍等重試幾次。"""
+    for i in range(6):
+        try:
+            src.replace(dst)
+            return
+        except PermissionError:
+            if i == 5:
+                raise
+            time.sleep(0.05 * (i + 1))
+
+
+def atomic_write_text(path: Path, text: str, encoding: str = "utf-8") -> None:
+    """先寫到自己專用的暫存檔，再一次取代正式檔：寫到一半當機或同時寫入，都不會留下壞掉的檔案。"""
+    tmp = path.with_name(f"{path.name}.{uuid.uuid4().hex[:8]}.tmp")
+    try:
+        tmp.write_text(text, encoding)
+        _replace_retry(tmp, path)
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
 def read_meta(d: Path) -> dict:
     p = d / "meta.json"
     with _META_LOCK:
@@ -223,13 +245,8 @@ def _repair_meta(d: Path, text: str, err: Exception) -> dict:
 
 
 def write_meta(d: Path, meta: dict) -> None:
-    tmp = d / f"meta.json.{uuid.uuid4().hex[:8]}.tmp"
     with _META_LOCK:
-        try:
-            tmp.write_text(json.dumps(meta, ensure_ascii=False, indent=2), "utf-8")
-            tmp.replace(d / "meta.json")
-        finally:
-            tmp.unlink(missing_ok=True)
+        atomic_write_text(d / "meta.json", json.dumps(meta, ensure_ascii=False, indent=2))
 
 
 def update_meta(d: Path, **kw) -> dict:
@@ -240,27 +257,47 @@ def update_meta(d: Path, **kw) -> dict:
         return meta
 
 
+_SONG_CACHE: dict = {}   # 歌曲編號 → (檔案時間, 整理好的資料)
+
+
+def _song_entry(d: Path) -> dict | None:
+    """一首歌在歌曲庫清單裡的資料。資料檔、歌詞、錄音都沒變時直接用上次整理好的（幾百首歌時差很多）。"""
+    def mt(p: Path) -> int:
+        try:
+            return p.stat().st_mtime_ns
+        except OSError:
+            return 0
+    stamp = (mt(d / "meta.json"), mt(d / "lyrics.lrc"), mt(d / "takes"))
+    hit = _SONG_CACHE.get(d.name)
+    if hit and hit[0] == stamp:
+        return dict(hit[1])
+    try:
+        m = read_meta(d)
+    except Exception as e:   # 一首歌的資料讀不出來，不要讓整個歌曲庫打不開
+        log_error(f"list_songs {d.name}", e)
+        return None
+    takes = list_takes(d)
+    m["takes"] = len(takes)
+    scored = [t["acc"] for t in takes if t.get("acc") is not None]
+    m["best"] = max(scored) if scored else None
+    lp = d / "lyrics.lrc"
+    if lp.exists():
+        try:
+            m["lyrics_text"] = " ".join(l["text"] for l in parse_lrc(lp.read_text("utf-8")))[:3000]
+        except Exception:
+            pass
+    _SONG_CACHE[d.name] = (stamp, m)
+    return dict(m)
+
+
 def list_songs() -> list[dict]:
     LIB.mkdir(exist_ok=True)
     out = []
     for d in LIB.iterdir():
         if d.is_dir() and (d / "meta.json").exists():
-            try:
-                m = read_meta(d)
-            except Exception as e:   # 一首歌的資料讀不出來，不要讓整個歌曲庫打不開
-                log_error(f"list_songs {d.name}", e)
-                continue
-            takes = list_takes(d)
-            m["takes"] = len(takes)
-            scored = [t["acc"] for t in takes if t.get("acc") is not None]
-            m["best"] = max(scored) if scored else None
-            lp = d / "lyrics.lrc"
-            if lp.exists():
-                try:
-                    m["lyrics_text"] = " ".join(l["text"] for l in parse_lrc(lp.read_text("utf-8")))[:3000]
-                except Exception:
-                    pass
-            out.append(m)
+            m = _song_entry(d)
+            if m is not None:
+                out.append(m)
     out.sort(key=lambda m: m.get("created", 0), reverse=True)
     return out
 
@@ -674,6 +711,10 @@ def set_dl_state(d: Path, state: str | None) -> None:
         base = _DL_RE.sub("", meta.get("title") or "").strip()
         if base.startswith("YouTube 下載"):
             base = ""
+        if state == "cancelled":
+            meta["dl_cancelled"] = True   # 預先下載剛好在進行中時，下載完也要維持「已取消」
+        elif state == "queued":
+            meta.pop("dl_cancelled", None)
         if state:
             meta["dl_state"] = state
             meta["title"] = (base or "YouTube 影片") + DL_SUFFIX[state]
@@ -820,7 +861,8 @@ def prefetch_youtube(song_id: str) -> bool:
             set_dl_state(d, "queued")
             return False
         update_meta(d, prefetched=True)
-        set_dl_state(d, "queued")   # 還沒處理，維持「排隊」；程式重開也會接著處理
+        # 還沒處理，維持「排隊」；程式重開也會接著處理。下載途中被取消的，維持「已取消」
+        set_dl_state(d, "cancelled" if read_meta(d).get("dl_cancelled") else "queued")
         return True
     finally:
         lock.release()
@@ -974,7 +1016,7 @@ def save_stem(base: Path, name: str, y: np.ndarray, sr: int = SR) -> Path:
     out = base / f"{name}{STEM_EXT}"
     tmp = base / f"{name}.tmp{STEM_EXT}"
     write_wav(tmp, y, sr)
-    tmp.replace(out)
+    _replace_retry(tmp, out)
     if STEM_EXT != ".wav":
         (base / f"{name}.wav").unlink(missing_ok=True)
     return out
@@ -1565,9 +1607,10 @@ def separate_uvr(d: Path, cfg: dict, report) -> None:
         ensure_model(kara, _dl_report(report, "主唱分離模型", 0.35))
         sep.load_model(model_filename=kara)
         outs2 = run_kara("把人聲分成主唱與合音（標準）")
-    meta = read_meta(d)
-    meta["karaoke"] = kara
-    write_meta(d, meta)
+    with _META_LOCK:   # 讀出到寫回之間不讓別的執行緒改這首歌的資料
+        meta = read_meta(d)
+        meta["karaoke"] = kara
+        write_meta(d, meta)
     lead_p = _pick(outs2, "vocals")
     back_p = _pick(outs2, "instrumental")
 
@@ -1650,12 +1693,14 @@ def step_separate(d: Path, cfg: dict, report) -> None:
         separate_dsp(d, report)
     for old in [*d.glob("v_*"), *d.glob("v2_*")]:
         shutil.rmtree(old, ignore_errors=True)
-    meta = read_meta(d)
-    meta["steps"]["separate"] = True
-    meta["separation"] = method
-    meta["acapella"] = is_acapella(d)
-    meta["notes"] = [x for x in meta.get("notes", []) if "分離" not in x] + notes
-    write_meta(d, meta)
+    acap = is_acapella(d)   # 要讀音訊，先在鎖外面算好
+    with _META_LOCK:   # 讀出到寫回之間不讓別的執行緒改這首歌的資料
+        meta = read_meta(d)
+        meta["steps"]["separate"] = True
+        meta["separation"] = method
+        meta["acapella"] = acap
+        meta["notes"] = [x for x in meta.get("notes", []) if "分離" not in x] + notes
+        write_meta(d, meta)
 
 
 # ---------------------------------------------------------------- 音高
@@ -1944,12 +1989,13 @@ def step_pitch(d: Path, cfg: dict, report) -> None:
         "midi": [None if np.isnan(v) else round(float(v), 2) for v in midi],
         "notes": notes,
     }
-    (d / "pitch.json").write_text(json.dumps(data, separators=(",", ":")), "utf-8")
+    atomic_write_text(d / "pitch.json", json.dumps(data, separators=(",", ":")))
     free_gpu()
-    meta = read_meta(d)
-    meta["steps"]["pitch"] = True
-    meta["pitch_algo"] = PITCH_ALGO
-    write_meta(d, meta)
+    with _META_LOCK:   # 讀出到寫回之間不讓別的執行緒改這首歌的資料
+        meta = read_meta(d)
+        meta["steps"]["pitch"] = True
+        meta["pitch_algo"] = PITCH_ALGO
+        write_meta(d, meta)
 
 
 def load_pitch(d: Path) -> tuple[np.ndarray, list]:
@@ -2193,30 +2239,31 @@ def step_lyrics(d: Path, cfg: dict, report) -> None:
     lrc = to_lrc(lines)
     q = lyric_quality(stats, words, d, lines)
     print(f"[lyrics] 辨識可信度 {q}", flush=True)
-    (d / "lyrics_auto.lrc").write_text(lrc, "utf-8")      # 辨識結果一律保留，之後可以叫出來看
-    meta = read_meta(d)
-    keep_user = meta.get("lyrics_source") in ("online", "import", "claude") and (d / "lyrics.lrc").exists() \
-        and (d / "lyrics.lrc").read_text("utf-8").strip()
-    notes = [x for x in meta.get("notes", []) if "歌詞" not in x and "辨識" not in x]
-    if lang_note:
-        notes.append(lang_note + "。")
-    if q["ok"]:
-        if not keep_user:   # 使用者已經換成線上／匯入的歌詞時，重新辨識不覆蓋
-            (d / "lyrics.lrc").write_text(lrc, "utf-8")
-            meta["lyrics_source"] = "whisper"
-        meta["lyrics_unreliable"] = False
-    else:
-        # 辨識不可靠：不要把錯的歌詞放上去，留白並建議找線上歌詞
-        if not keep_user:
-            (d / "lyrics.lrc").write_text("", "utf-8")
-            meta["lyrics_source"] = None
-        meta["lyrics_unreliable"] = True
-        notes.append("自動辨識的歌詞不夠準確（" + "、".join(q["reasons"]) + "），已先留白。建議用練唱畫面的「搜尋線上歌詞」或匯入歌詞檔。")
-    meta["notes"] = notes
-    meta["steps"]["lyrics"] = True
-    meta["language"] = language
-    meta["lyrics_quality"] = q
-    write_meta(d, meta)
+    atomic_write_text(d / "lyrics_auto.lrc", lrc)      # 辨識結果一律保留，之後可以叫出來看
+    with _META_LOCK:   # 讀出到寫回之間不讓別的執行緒改這首歌的資料
+        meta = read_meta(d)
+        keep_user = meta.get("lyrics_source") in ("online", "import", "claude") and (d / "lyrics.lrc").exists() \
+            and (d / "lyrics.lrc").read_text("utf-8").strip()
+        notes = [x for x in meta.get("notes", []) if "歌詞" not in x and "辨識" not in x]
+        if lang_note:
+            notes.append(lang_note + "。")
+        if q["ok"]:
+            if not keep_user:   # 使用者已經換成線上／匯入的歌詞時，重新辨識不覆蓋
+                atomic_write_text(d / "lyrics.lrc", lrc)
+                meta["lyrics_source"] = "whisper"
+            meta["lyrics_unreliable"] = False
+        else:
+            # 辨識不可靠：不要把錯的歌詞放上去，留白並建議找線上歌詞
+            if not keep_user:
+                atomic_write_text(d / "lyrics.lrc", "")
+                meta["lyrics_source"] = None
+            meta["lyrics_unreliable"] = True
+            notes.append("自動辨識的歌詞不夠準確（" + "、".join(q["reasons"]) + "），已先留白。建議用練唱畫面的「搜尋線上歌詞」或匯入歌詞檔。")
+        meta["notes"] = notes
+        meta["steps"]["lyrics"] = True
+        meta["language"] = language
+        meta["lyrics_quality"] = q
+        write_meta(d, meta)
 
 
 # ---------------------------------------------------------------- 移調／變速
@@ -2600,7 +2647,7 @@ def score_take(d: Path, take_id: str, report) -> None:
                      "error": "沒有偵測到歌聲" + ("：錄音幾乎沒有聲音，請確認麥克風選對、音量表有動" if peak < 0.02
                                                 else "：這段時間原唱沒有旋律，或沒有唱到")})
         info.pop("pitch", None)
-        (td / f"{take_id}.json").write_text(json.dumps(info, ensure_ascii=False), "utf-8")
+        atomic_write_text(td / f"{take_id}.json", json.dumps(info, ensure_ascii=False))
         return
     info.update({
         "offset": round(best_off, 2),
@@ -2618,7 +2665,7 @@ def score_take(d: Path, take_id: str, report) -> None:
         "algo": TAKE_ALGO,
         "key_hint": key_hint,
     })
-    (td / f"{take_id}.json").write_text(json.dumps(info, ensure_ascii=False), "utf-8")
+    atomic_write_text(td / f"{take_id}.json", json.dumps(info, ensure_ascii=False))
 
 
 # ---------------------------------------------------------------- 背景工作
@@ -2790,17 +2837,19 @@ def process_song(song_id: str, steps: list[str]):
             try:
                 step_lyrics(d, cfg, report)   # 歌詞相關的提示由 step_lyrics 自己更新
             except JobCancelled:
-                meta = read_meta(d)
-                meta["notes"] = [x for x in meta.get("notes", []) if "歌詞" not in x] + [
-                    "已停止辨識歌詞。可以在練唱畫面貼上或搜尋歌詞，或用「重新處理 → 只重新辨識歌詞」再試一次。"]
-                write_meta(d, meta)
+                with _META_LOCK:   # 讀出到寫回之間不讓別的執行緒改這首歌的資料
+                    meta = read_meta(d)
+                    meta["notes"] = [x for x in meta.get("notes", []) if "歌詞" not in x] + [
+                        "已停止辨識歌詞。可以在練唱畫面貼上或搜尋歌詞，或用「重新處理 → 只重新辨識歌詞」再試一次。"]
+                    write_meta(d, meta)
                 raise
             except Exception as e:
                 traceback.print_exc()
-                meta = read_meta(d)
-                meta["notes"] = [x for x in meta.get("notes", []) if "歌詞" not in x] + [
-                    f"歌詞辨識沒有完成：{e}。可以在練唱畫面貼上歌詞。"]
-                write_meta(d, meta)
+                with _META_LOCK:   # 讀出到寫回之間不讓別的執行緒改這首歌的資料
+                    meta = read_meta(d)
+                    meta["notes"] = [x for x in meta.get("notes", []) if "歌詞" not in x] + [
+                        f"歌詞辨識沒有完成：{e}。可以在練唱畫面貼上歌詞。"]
+                    write_meta(d, meta)
             # 線上歌詞搜尋要等網站回應（網站忙的時候可能要幾十秒），改在背景做，不卡住下一首歌的處理
             report("排入線上歌詞搜尋（背景進行）", 0.97)
             search_lyrics_later(d, cfg)
@@ -2915,7 +2964,7 @@ def similarity(recognized: str, candidate: str) -> float | None:
     return round(sum(x.size for x in m.get_matching_blocks()) / len(a), 3)
 
 
-USER_AGENT = "LeihuLiantai/1.6.2 (+https://github.com/LeihuTW/Leihu-singsing)"   # HTTP 標頭只能用英文字
+USER_AGENT = "LeihuLiantai/1.6.3 (+https://github.com/LeihuTW/Leihu-singsing)"   # HTTP 標頭只能用英文字
 
 
 def _http_json(url: str, headers: dict | None = None, timeout: int = 8):
@@ -3100,7 +3149,7 @@ def find_and_store_candidates(d: Path, cfg: dict, check=None) -> None:
         likely = [c for c in cands if c["similarity"] is None or c["similarity"] >= 0.25]
     else:
         likely = [c for c in cands if c.get("title_match", 0) >= 0.5 or (c["diff"] is not None and c["diff"] <= 5)]
-    (d / "lyrics_candidates.json").write_text(json.dumps(cands, ensure_ascii=False), "utf-8")
+    atomic_write_text(d / "lyrics_candidates.json", json.dumps(cands, ensure_ascii=False))
     if meta.get("lyrics_source") in (None, "whisper"):
         update_meta(d, lyrics_pending=bool(likely))
 
@@ -3294,13 +3343,14 @@ def import_lyrics(d: Path, text: str, cfg: dict, filename: str = "") -> tuple[st
         raise UserError("讀不到歌詞內容，請確認檔案格式（LRC、SRT 或 TXT）")
     if cfg.get("convert_to_taiwan", True) and re.search(r"[\u4e00-\u9fff]", lrc):
         lrc = to_taiwan(lrc)
-    (d / "lyrics.lrc").write_text(lrc, "utf-8")
-    meta = read_meta(d)
-    meta["steps"]["lyrics"] = True
-    meta["lyrics_source"] = "import"
-    meta["lyrics_pending"] = False
-    meta["notes"] = [x for x in meta.get("notes", []) if "歌詞辨識沒有完成" not in x]
-    write_meta(d, meta)
+    atomic_write_text(d / "lyrics.lrc", lrc)
+    with _META_LOCK:   # 讀出到寫回之間不讓別的執行緒改這首歌的資料
+        meta = read_meta(d)
+        meta["steps"]["lyrics"] = True
+        meta["lyrics_source"] = "import"
+        meta["lyrics_pending"] = False
+        meta["notes"] = [x for x in meta.get("notes", []) if "歌詞辨識沒有完成" not in x]
+        write_meta(d, meta)
     return lrc, how
 
 
@@ -3328,15 +3378,16 @@ def apply_candidate(d: Path, cand: dict) -> tuple[str, str]:
             lines = align_by_voice(plain_lines, d)
             how = "依主唱有聲音的段落分配時間（建議用「對準目前位置」和逐句調整微調）"
     lrc = to_lrc(lines)
-    (d / "lyrics.lrc").write_text(lrc, "utf-8")
-    (d / "lyrics_online.lrc").write_text(lrc, "utf-8")   # 線上歌詞另外保存，和辨識結果互不影響
-    meta = read_meta(d)
-    meta["steps"]["lyrics"] = True
-    meta["lyrics_source"] = "online"
-    meta["lyrics_pending"] = False
-    meta["lyrics_online"] = {"source": cand.get("source"), "track": cand.get("track"), "artist": cand.get("artist")}
-    meta["notes"] = [x for x in meta.get("notes", []) if "歌詞辨識沒有完成" not in x]
-    write_meta(d, meta)
+    atomic_write_text(d / "lyrics.lrc", lrc)
+    atomic_write_text(d / "lyrics_online.lrc", lrc)   # 線上歌詞另外保存，和辨識結果互不影響
+    with _META_LOCK:   # 讀出到寫回之間不讓別的執行緒改這首歌的資料
+        meta = read_meta(d)
+        meta["steps"]["lyrics"] = True
+        meta["lyrics_source"] = "online"
+        meta["lyrics_pending"] = False
+        meta["lyrics_online"] = {"source": cand.get("source"), "track": cand.get("track"), "artist": cand.get("artist")}
+        meta["notes"] = [x for x in meta.get("notes", []) if "歌詞辨識沒有完成" not in x]
+        write_meta(d, meta)
     return lrc, how
 
 
@@ -3354,4 +3405,4 @@ def load_categories() -> list[str]:
 
 def save_categories(cats: list[str]) -> None:
     LIB.mkdir(exist_ok=True)
-    CATS_PATH.write_text(json.dumps(cats, ensure_ascii=False), "utf-8")
+    atomic_write_text(CATS_PATH, json.dumps(cats, ensure_ascii=False))
