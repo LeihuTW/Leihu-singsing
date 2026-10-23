@@ -171,22 +171,34 @@ def song_dir(song_id: str) -> Path:
     return d
 
 
+# meta.json 會被好幾個執行緒同時讀寫（處理佇列、預先下載、背景歌詞搜尋、網頁請求）。
+# 同時寫入同一個暫存檔會把兩份內容疊在一起，留下壞掉的 JSON，整個歌曲庫就讀不出來；
+# 所以讀寫都排隊進行，每次寫入也用自己的暫存檔。
+_META_LOCK = threading.RLock()
+
+
 def read_meta(d: Path) -> dict:
     p = d / "meta.json"
-    return json.loads(p.read_text("utf-8")) if p.exists() else {}
+    with _META_LOCK:
+        return json.loads(p.read_text("utf-8")) if p.exists() else {}
 
 
 def write_meta(d: Path, meta: dict) -> None:
-    tmp = d / "meta.json.tmp"
-    tmp.write_text(json.dumps(meta, ensure_ascii=False, indent=2), "utf-8")
-    tmp.replace(d / "meta.json")
+    tmp = d / f"meta.json.{uuid.uuid4().hex[:8]}.tmp"
+    with _META_LOCK:
+        try:
+            tmp.write_text(json.dumps(meta, ensure_ascii=False, indent=2), "utf-8")
+            tmp.replace(d / "meta.json")
+        finally:
+            tmp.unlink(missing_ok=True)
 
 
 def update_meta(d: Path, **kw) -> dict:
-    meta = read_meta(d)
-    meta.update(kw)
-    write_meta(d, meta)
-    return meta
+    with _META_LOCK:   # 讀出、修改、寫回之間不讓別的執行緒插進來，免得蓋掉對方的修改
+        meta = read_meta(d)
+        meta.update(kw)
+        write_meta(d, meta)
+        return meta
 
 
 def list_songs() -> list[dict]:
@@ -614,17 +626,18 @@ class YouTubeRateLimited(UserError):
 
 
 def set_dl_state(d: Path, state: str | None) -> None:
-    meta = read_meta(d)
-    base = _DL_RE.sub("", meta.get("title") or "").strip()
-    if base.startswith("YouTube 下載"):
-        base = ""
-    if state:
-        meta["dl_state"] = state
-        meta["title"] = (base or "YouTube 影片") + DL_SUFFIX[state]
-    else:
-        meta.pop("dl_state", None)
-        meta["title"] = base or "YouTube 歌曲"
-    write_meta(d, meta)
+    with _META_LOCK:
+        meta = read_meta(d)
+        base = _DL_RE.sub("", meta.get("title") or "").strip()
+        if base.startswith("YouTube 下載"):
+            base = ""
+        if state:
+            meta["dl_state"] = state
+            meta["title"] = (base or "YouTube 影片") + DL_SUFFIX[state]
+        else:
+            meta.pop("dl_state", None)
+            meta["title"] = base or "YouTube 歌曲"
+        write_meta(d, meta)
 
 
 def pending_downloads() -> list[dict]:
