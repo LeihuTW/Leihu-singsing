@@ -49,6 +49,7 @@ DEFAULT_CONFIG = {
     "whisper_model": "large-v3-turbo",
     "lyrics_language": "",   # 空字串＝自動判斷
     "convert_to_taiwan": True,
+    "audio_out": "",   # 音樂輸出裝置名稱；空字串＝系統預設
     "font": "huninn",   # 介面與歌詞字體：huninn（內建 jf open 粉圓）／kai（楷書）／sans（黑體）
     "pitch_model": "auto",
     "claude_model": "claude-sonnet-5-5",
@@ -2964,7 +2965,7 @@ def similarity(recognized: str, candidate: str) -> float | None:
     return round(sum(x.size for x in m.get_matching_blocks()) / len(a), 3)
 
 
-USER_AGENT = "LeihuLiantai/1.6.3 (+https://github.com/LeihuTW/Leihu-singsing)"   # HTTP 標頭只能用英文字
+USER_AGENT = "LeihuLiantai/1.6.4 (+https://github.com/LeihuTW/Leihu-singsing)"   # HTTP 標頭只能用英文字
 
 
 def _http_json(url: str, headers: dict | None = None, timeout: int = 8):

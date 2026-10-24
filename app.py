@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 import threading
@@ -18,7 +19,7 @@ import claude_api as C
 import pipeline as P
 import share as SH
 
-VERSION = "1.6.3"
+VERSION = "1.6.4"
 HOST, PORT = "127.0.0.1", int(os.environ.get("LIANTAI_PORT", "8765"))
 app = Flask(__name__, static_folder=str(P.ROOT / "static"), static_url_path="/static")
 app.config["MAX_CONTENT_LENGTH"] = 1024 * 1024 * 1024
@@ -1233,6 +1234,41 @@ def open_overlay():
         raise P.UserError("網址格式不正確")
     webbrowser.open(f"http://{HOST}:{PORT}/overlay?{q}")
     return jsonify(ok=True)
+
+
+def _app_browser() -> str | None:
+    """找 Edge 或 Chrome（Windows 內建 Edge，通常一定找得到）。"""
+    if sys.platform != "win32":
+        return None
+    for env, rel in (("ProgramFiles(x86)", r"Microsoft\Edge\Application\msedge.exe"),
+                     ("ProgramFiles", r"Microsoft\Edge\Application\msedge.exe"),
+                     ("ProgramFiles", r"Google\Chrome\Application\chrome.exe"),
+                     ("ProgramFiles(x86)", r"Google\Chrome\Application\chrome.exe"),
+                     ("LOCALAPPDATA", r"Google\Chrome\Application\chrome.exe")):
+        base = os.environ.get(env)
+        if base and (Path(base) / rel).is_file():
+            return str(Path(base) / rel)
+    return None
+
+
+@app.post("/api/open-app")
+def open_app():
+    """開一個獨立的練唱台視窗（Edge 應用程式模式，沒有網址列）。
+    桌面版視窗的聲音由 WebView2 的背景程式播出，Discord「分享應用程式」抓不到；
+    這個視窗是一般瀏覽器程式，分享它時畫面和音樂會一起送出。
+    用獨立的設定資料夾，所以是自己一個程式，不會混到其他分頁的聲音。"""
+    url = f"http://{HOST}:{PORT}/"
+    exe = _app_browser()
+    if exe:
+        prof = P.ROOT / ".appwin"
+        prof.mkdir(exist_ok=True)
+        subprocess.Popen([exe, f"--app={url}", f"--user-data-dir={prof}", "--window-size=1380,920",
+                          "--no-first-run", "--no-default-browser-check", "--autoplay-policy=no-user-gesture-required"],
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    else:
+        import webbrowser
+        webbrowser.open(url)
+    return jsonify(ok=True, app=bool(exe))
 
 
 @app.post("/api/open-url")

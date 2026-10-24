@@ -8,7 +8,7 @@
 </head>
 <body>
 <header class="bar">
-  <span class="logo">雷虎練唱台<small id="ver">1.6.3</small></span>
+  <span class="logo">雷虎練唱台<small id="ver">1.6.4</small></span>
   <nav class="row">
     <button id="nav-lib" class="tab cur">歌曲庫</button>
     <button id="nav-practice" class="tab" disabled>練唱</button>
@@ -434,6 +434,10 @@
         <option value="en">英文</option><option value="ja">日文</option><option value="ko">韓文</option>
       </select></label>
     <label class="row"><input id="cfg-tw" type="checkbox"> 中文歌詞轉成台灣繁體用字</label>
+    <div class="field" id="out-field"><span>音樂輸出裝置（練唱、試聽的聲音從這裡播出）</span>
+      <select id="cfg-out"><option value="">系統預設</option></select>
+      <span class="hint">Discord「分享應用程式」分享這個桌面視窗時沒有聲音。要給朋友看畫面又聽到音樂，按下面的按鈕開一個直播分享用的練唱台視窗（外觀一樣），Discord 分享那個視窗，畫面和音樂會一起送出。</span>
+      <div><button id="open-in-browser" type="button">開啟直播分享用視窗</button></div></div>
     <label class="field"><span>字體（練唱畫面、歌詞與匯出的影片／成績卡）</span>
       <select id="cfg-font"><option value="huninn">粉圓（內建 jf open 粉圓）</option><option value="kai">楷書（歌詞楷書、介面黑體）</option><option value="sans">黑體（微軟正黑體）</option></select></label>
     <label class="field"><span>人聲分離模型</span><input id="cfg-sep" type="text"></label>

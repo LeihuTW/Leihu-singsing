@@ -19,7 +19,7 @@ function applyFont(f) {
   if (f === "huninn" && document.fonts) document.fonts.load('20px "jf open huninn"').catch(() => {});
 }
 applyFont(store.get("font", "huninn"));
-fetch("/api/config").then(r => r.json()).then(c => applyFont(c.font)).catch(() => {});
+fetch("/api/config").then(r => r.json()).then(c => { applyFont(c.font); OUT_LABEL = c.audio_out || ""; applySink(); }).catch(() => {});
 
 async function api(path, opts = {}) {
   const o = { ...opts };
@@ -47,7 +47,27 @@ const S = {
   tap: null, dirty: true, loadingAudio: false,
 };
 let ctx = null, micCtx = null;
-const ac = () => (ctx ||= new (window.AudioContext || window.webkitAudioContext)());
+const ac = () => { if (!ctx) { ctx = new (window.AudioContext || window.webkitAudioContext)(); applySink(); } return ctx; };
+/* 音樂輸出裝置。記住裝置名稱（裝置 ID 換瀏覽器就會變），找不到時用系統預設 */
+let OUT_LABEL = "";
+async function outDevices() {
+  if (!navigator.mediaDevices?.enumerateDevices) return [];
+  let list = (await navigator.mediaDevices.enumerateDevices()).filter(d => d.kind === "audiooutput");
+  if (list.length && !list.some(d => d.label)) {   // 還沒允許麥克風時看不到裝置名稱
+    try { (await navigator.mediaDevices.getUserMedia({ audio: true })).getTracks().forEach(t => t.stop()); } catch {}
+    list = (await navigator.mediaDevices.enumerateDevices()).filter(d => d.kind === "audiooutput");
+  }
+  return list.filter(d => d.label && d.deviceId !== "default" && d.deviceId !== "communications");
+}
+async function applySink() {
+  if (!ctx || typeof ctx.setSinkId !== "function") return;
+  try {
+    const d = OUT_LABEL ? (await outDevices()).find(x => x.label === OUT_LABEL) : null;
+    if (OUT_LABEL && !d) toast(`找不到輸出裝置「${OUT_LABEL}」，先用系統預設播放`, 4000);
+    const id = d ? d.deviceId : "";
+    if ((ctx.sinkId || "") !== id) await ctx.setSinkId(id);
+  } catch (e) { toast("切換輸出裝置失敗：" + e.message); }
+}
 /* 1.4.6：麥克風用另一個獨立的 AudioContext。
    麥克風和耳機是不同裝置時（例如 USB 麥克風），兩邊的時脈不同步；放在播放音樂的同一個 context 裡，
    Windows 上會讓音樂週期性斷音、破音。分開之後，麥克風只負責收音、音高和錄音，不會影響音樂播放。 */
@@ -2680,6 +2700,7 @@ async function openSettings(focusUsage) {
   $("#cfg-lang").value = cfg.lyrics_language || "";
   $("#cfg-tw").checked = !!cfg.convert_to_taiwan;
   $("#cfg-font").value = cfg.font || "huninn";
+  fillOutDevices(cfg.audio_out || "");
   $("#cfg-sep").value = cfg.separation_model;
   $("#cfg-kara").value = cfg.karaoke_model;
   $("#cfg-kq").value = cfg.karaoke_quality || "auto";
@@ -2712,14 +2733,28 @@ async function saveSettings(extra = {}) {
     await api("/api/config", { json: {
       anthropic_api_key: $("#cfg-key").value, claude_model: $("#cfg-model").value.trim(),
       whisper_model: $("#cfg-whisper").value, lyrics_language: $("#cfg-lang").value,
-      convert_to_taiwan: $("#cfg-tw").checked, font: $("#cfg-font").value, separation_model: $("#cfg-sep").value.trim(),
+      convert_to_taiwan: $("#cfg-tw").checked, font: $("#cfg-font").value, audio_out: $("#cfg-out").value, separation_model: $("#cfg-sep").value.trim(),
       karaoke_model: $("#cfg-kara").value.trim(), karaoke_quality: $("#cfg-kq").value, karaoke_overlap: +$("#cfg-kov").value, auto_fine: $("#cfg-autofine").checked, pitch_model: $("#cfg-pitch").value,
       balance_usd: $("#cfg-balance").value.trim().replace(/^US\$|^\$/, ""), ...extra,
     } });
     applyFont($("#cfg-font").value);
+    OUT_LABEL = $("#cfg-out").value; applySink();
     $("#settings").hidden = true; toast("設定已儲存"); pollJobs();
   } catch (e) { toast(e.message); }
 }
+async function fillOutDevices(saved) {
+  const sel = $("#cfg-out");
+  if (!("setSinkId" in AudioContext.prototype)) { sel.disabled = true; sel.title = "這個瀏覽器不支援選擇輸出裝置"; }
+  const list = await outDevices().catch(() => []);
+  const opts = [["", "系統預設"], ...list.map(d => [d.label, d.label])];
+  if (saved && !list.some(d => d.label === saved)) opts.push([saved, `${saved}（目前沒有連接）`]);
+  sel.innerHTML = "";
+  for (const [v, t] of opts) { const o = document.createElement("option"); o.value = v; o.textContent = t; sel.append(o); }
+  sel.value = saved;
+}
+$("#open-in-browser").onclick = () => api("/api/open-app", { method: "POST", json: {} })
+  .then(r => { $("#settings").hidden = true; toast(r.app ? "已開啟分享用視窗；Discord 分享時選那個視窗，第一次用麥克風時按「允許」" : "已用瀏覽器開啟練唱台；Discord 分享時選那個瀏覽器視窗", 6000); })
+  .catch(e => toast(e.message));
 $("#btn-settings").onclick = openSettings;
 $("#cfg-close").onclick = () => ($("#settings").hidden = true);
 $("#cfg-save").onclick = () => saveSettings();

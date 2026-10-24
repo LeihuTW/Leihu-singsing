@@ -16,3 +16,5 @@ python/
 installer/payload/
 installer/out/
 *.exe
+.appwin/
+.webview/
