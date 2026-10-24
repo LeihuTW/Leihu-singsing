@@ -19,7 +19,7 @@ import claude_api as C
 import pipeline as P
 import share as SH
 
-VERSION = "1.6.4"
+VERSION = "1.6.5"
 HOST, PORT = "127.0.0.1", int(os.environ.get("LIANTAI_PORT", "8765"))
 app = Flask(__name__, static_folder=str(P.ROOT / "static"), static_url_path="/static")
 app.config["MAX_CONTENT_LENGTH"] = 1024 * 1024 * 1024
@@ -402,7 +402,7 @@ def mixdown(sid):
         raise P.UserError("所有音軌都是靜音，沒有東西可以匯出")
     fmt = "wav" if body.get("fmt") == "wav" else "mp3"
     meta = P.read_meta(d)
-    norm = P.norm_gain_db(meta) if body.get("norm") else 0.0
+    norm = P.norm_gain_db(meta, gains) if body.get("norm") else 0.0
     kname = f"KEY{key:+d}" if key else "原調"
     sname = f"_{int(round(speed * 100))}%" if abs(speed - 1) > 1e-3 else ""
     vname = "伴奏" if gains["lead"] == 0 else "混音"
@@ -445,7 +445,11 @@ def song(sid):
         meta = P.update_meta(d, acapella=P.is_acapella(d))   # 舊歌曲補上清唱判斷
     if meta.get("lufs") is None and meta.get("steps", {}).get("import"):
         meta = P.measure_loudness(d)   # 舊歌曲第一次開啟時補量響度（約 1 秒）
+    if meta.get("steps", {}).get("separate"):
+        meta = P.measure_stem_loudness(d)   # 各音軌組合的響度（只算一次，分軌重新處理後重算）
     meta["norm_gain_db"] = P.norm_gain_db(meta)
+    meta["norm_target"] = P.TARGET_LUFS
+    meta["norm_range"] = [P.NORM_MIN_DB, P.NORM_MAX_DB]
     meta["takes"] = P.list_takes(d)
     return jsonify(meta)
 
@@ -525,6 +529,7 @@ def get_lyrics(sid):
     return jsonify(lrc=rd("lyrics.lrc"), auto=rd("lyrics_auto.lrc"), online=rd("lyrics_online.lrc"),
                    source=meta.get("lyrics_source"), online_info=meta.get("lyrics_online"),
                    unreliable=not P.recognition_reliable(meta),
+                   recognized=meta.get("lyrics_recognized") is not False or (d / "lyrics_auto.lrc").exists(),
                    reasons=(meta.get("lyrics_quality") or {}).get("reasons", []),
                    language=meta.get("language"), song_language=meta.get("lyrics_language"),
                    kana_fix=meta.get("kana_fix") or {})
@@ -1326,11 +1331,32 @@ def watch_parent() -> None:
     threading.Thread(target=wait, daemon=True).start()
 
 
+def loudness_backfill() -> None:
+    """舊歌曲在背景補量各音軌組合的響度（每首約 2～3 秒）。
+    有處理工作在跑時先暫停，不和分軌、辨識搶資源；沒補到的歌第一次開啟時會當場量。"""
+    time.sleep(60)
+    try:
+        dirs = [d for d in P.LIB.iterdir() if d.is_dir() and (d / "meta.json").exists()]
+    except OSError:
+        return
+    for d in dirs:
+        while any(j["status"] == "running" for j in jobs.active() + vjobs.active()):
+            time.sleep(30)
+        try:
+            meta = P.read_meta(d)
+            if meta.get("steps", {}).get("separate") and not meta.get("combo_lufs"):
+                P.measure_stem_loudness(d)
+                time.sleep(1)
+        except Exception as e:
+            P.log_error("loudness_backfill", e)
+
+
 def main():
     P.LIB.mkdir(exist_ok=True)
     watch_parent()
     resume_downloads()
     threading.Thread(target=prefetcher, daemon=True, name="prefetch").start()
+    threading.Thread(target=loudness_backfill, daemon=True, name="loudness").start()
     url = f"http://{HOST}:{PORT}"
     print(f"\n  {P.APP_NAME} {VERSION} 已啟動：{url}\n  關閉這個視窗就會結束程式。\n")
     if "--no-browser" not in sys.argv:

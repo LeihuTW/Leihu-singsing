@@ -8,7 +8,7 @@
 </head>
 <body>
 <header class="bar">
-  <span class="logo">雷虎練唱台<small id="ver">1.6.4</small></span>
+  <span class="logo">雷虎練唱台<small id="ver">1.6.5</small></span>
   <nav class="row">
     <button id="nav-lib" class="tab cur">歌曲庫</button>
     <button id="nav-practice" class="tab" disabled>練唱</button>
@@ -181,7 +181,7 @@
       <div class="panel">
         <h2>歌詞</h2>
         <div id="lyr-warn" class="cand warn-box" hidden>
-          <b>自動辨識的歌詞不夠準確，已先留白</b>
+          <b id="lyr-warn-title">自動辨識的歌詞不夠準確，已先留白</b>
           <span id="lyr-warn-why" class="hint"></span>
           <div class="row"><button id="lyr-warn-search" class="primary">搜尋線上歌詞</button><button id="lyr-warn-import" class="ghost">匯入歌詞檔</button><button id="lyr-warn-show" class="ghost">仍然使用辨識結果</button></div>
         </div>
@@ -433,6 +433,7 @@
         <option value="">自動判斷（建議）</option><option value="zh">中文</option>
         <option value="en">英文</option><option value="ja">日文</option><option value="ko">韓文</option>
       </select></label>
+    <label class="row"><input id="cfg-autorec" type="checkbox"> 匯入時自動辨識歌詞（關閉時直接套用線上搜尋到的第一個版本，處理也比較快）</label>
     <label class="row"><input id="cfg-tw" type="checkbox"> 中文歌詞轉成台灣繁體用字</label>
     <div class="field" id="out-field"><span>音樂輸出裝置（練唱、試聽的聲音從這裡播出）</span>
       <select id="cfg-out"><option value="">系統預設</option></select>

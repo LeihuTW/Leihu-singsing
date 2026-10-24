@@ -49,6 +49,7 @@ DEFAULT_CONFIG = {
     "whisper_model": "large-v3-turbo",
     "lyrics_language": "",   # 空字串＝自動判斷
     "convert_to_taiwan": True,
+    "auto_recognize_lyrics": False,   # 匯入時自動辨識歌詞（關閉時直接套用線上搜尋到的第一個版本）
     "audio_out": "",   # 音樂輸出裝置名稱；空字串＝系統預設
     "font": "huninn",   # 介面與歌詞字體：huninn（內建 jf open 粉圓）／kai（楷書）／sans（黑體）
     "pitch_model": "auto",
@@ -1067,20 +1068,38 @@ def _k_weight(sr: int):
     return sh, hp
 
 
-def integrated_loudness(y: np.ndarray, sr: int) -> float | None:
-    """整首歌的響度（LUFS）。y 為 (聲道, 取樣) 或單聲道。太安靜量不到時回傳 None。"""
+def _block_power(y: np.ndarray, sr: int) -> np.ndarray | None:
+    """K 加權後每個 400 ms 區塊（重疊 75%）的功率，左右聲道相加。"""
     from scipy.signal import lfilter
     x = np.atleast_2d(np.asarray(y, dtype=np.float64))
     (b1, a1), (b2, a2) = _k_weight(sr)
     x = lfilter(b2, a2, lfilter(b1, a1, x, axis=1), axis=1)
-    block, step = int(0.4 * sr), int(0.1 * sr)   # 400 ms 區塊、重疊 75%
+    block, step = int(0.4 * sr), int(0.1 * sr)
     if x.shape[1] < block:
         return None
     n = 1 + (x.shape[1] - block) // step
     p2 = np.cumsum(np.concatenate([np.zeros((x.shape[0], 1)), x ** 2], axis=1), axis=1)
     idx = np.arange(n) * step
     z = (p2[:, idx + block] - p2[:, idx]) / block          # 每個區塊、每個聲道的均方值
-    zsum = z.sum(axis=0)                                    # 左右聲道權重都是 1
+    return z.sum(axis=0)                                    # 左右聲道權重都是 1
+
+
+def _gate(zsum: np.ndarray) -> np.ndarray | None:
+    """BS.1770 的兩段門檻，回傳要計入的區塊。"""
+    lk = -0.691 + 10 * np.log10(np.maximum(zsum, 1e-12))
+    keep = lk > -70
+    if not keep.any():
+        return None
+    rel = -0.691 + 10 * np.log10(zsum[keep].mean()) - 10
+    keep &= lk > rel
+    return keep if keep.any() else None
+
+
+def integrated_loudness(y: np.ndarray, sr: int) -> float | None:
+    """整首歌的響度（LUFS）。y 為 (聲道, 取樣) 或單聲道。太安靜量不到時回傳 None。"""
+    zsum = _block_power(y, sr)
+    if zsum is None:
+        return None
     lk = -0.691 + 10 * np.log10(np.maximum(zsum, 1e-12))
     keep = lk > -70                                         # 絕對門檻：去掉靜音
     if not keep.any():
@@ -1107,12 +1126,53 @@ def measure_loudness(d: Path) -> dict:
         return meta
 
 
-def norm_gain_db(meta: dict) -> float:
-    """播放時要加減幾 dB 才會到目標響度。小聲的歌最多加 10 dB（超過的部分由播放端的限幅器處理）。"""
+NORM_MIN_DB, NORM_MAX_DB = -15.0, 12.0
+
+
+def _stems_sig(d: Path) -> str:
+    try:
+        return "|".join(str(stem_path(d, k).stat().st_mtime_ns) for k in ("mix", *STEMS))
+    except OSError:
+        return ""
+
+
+def measure_stem_loudness(d: Path) -> dict:
+    """1.6.5：量「主唱／合音／伴奏」每一種開關組合的響度（共 7 種）。
+    只用整首歌的響度來調音量時，關掉原唱（卡拉OK）後的音量會差很多：
+    人聲很突出的歌，拿掉人聲後伴奏會小聲很多。分軌之間有相關性，不能把各軌響度直接相加，
+    所以每種組合實際混起來量。分軌重新處理過（例如精細處理）會自動重算。"""
+    meta = read_meta(d)
+    sig = _stems_sig(d)
+    if not sig or (meta.get("combo_lufs") and meta.get("combo_lufs_sig") == sig):
+        return meta
+    try:
+        y = {k: read_audio(stem_path(d, k)) for k in STEMS}
+        n = min(v.shape[1] for v in y.values())
+        out = {}
+        for mask in range(1, 8):
+            key = "".join("1" if mask >> (2 - i) & 1 else "0" for i in range(3))   # 順序：主唱、合音、伴奏
+            mix = sum(y[k][:, :n] for k, b in zip(STEMS, key) if b == "1")
+            v = integrated_loudness(mix, SR)
+            out[key] = None if v is None else round(float(v), 2)
+        return update_meta(d, combo_lufs=out, combo_lufs_sig=sig)
+    except Exception:
+        traceback.print_exc()
+        return meta
+
+
+def norm_gain_db(meta: dict, gains: dict | None = None) -> float:
+    """播放時要加減幾 dB 才會到目標響度。小聲的歌最多加 12 dB（超過的部分由播放端的限幅器處理）。
+    gains 是各音軌的音量：有組合響度時，用開著的音軌（音量 ≥ 0.5）那一種組合的響度計算，
+    所以卡拉OK（關掉原唱）時伴奏也會調到一致的大小；拉桿的細部調整仍然照你設的比例。"""
+    combo = meta.get("combo_lufs") or {}
+    if gains is not None and combo:
+        key = "".join("1" if (gains.get(k, 1) or 0) >= 0.5 else "0" for k in STEMS)
+        if combo.get(key) is not None:
+            return round(float(np.clip(TARGET_LUFS - combo[key], NORM_MIN_DB, NORM_MAX_DB)), 2)
     lufs = meta.get("lufs")
     if lufs is None:
         return 0.0
-    return round(float(np.clip(TARGET_LUFS - lufs, -15.0, 10.0)), 2)
+    return round(float(np.clip(TARGET_LUFS - lufs, NORM_MIN_DB, NORM_MAX_DB)), 2)
 
 
 def step_import(d: Path, report) -> None:
@@ -2832,9 +2892,21 @@ def process_song(song_id: str, steps: list[str]):
             step_import(d, report)
         if "separate" in steps:
             step_separate(d, cfg, report)
+            measure_stem_loudness(d)   # 各音軌響度，播放時依開著的音軌調整音量
         if "pitch" in steps:
             step_pitch(d, cfg, report)
-        if "lyrics" in steps:
+        if "lyrics" in steps and "import" in steps and not cfg.get("auto_recognize_lyrics", False):
+            # 1.6.5：匯入時預設不自動辨識（準度不穩、又佔顯示卡），直接套用線上搜尋到的第一個版本
+            report("排入線上歌詞搜尋（背景進行）", 0.97)
+            with _META_LOCK:   # 讀出到寫回之間不讓別的執行緒改這首歌的資料
+                meta = read_meta(d)
+                meta["steps"]["lyrics"] = True
+                meta["lyrics_recognized"] = False
+                meta["notes"] = [x for x in meta.get("notes", []) if "歌詞" not in x and "辨識" not in x] + [
+                    "正在背景搜尋線上歌詞，找到後會自動套用。"]
+                write_meta(d, meta)
+            search_lyrics_later(d, cfg, apply_first=True)
+        elif "lyrics" in steps:
             try:
                 step_lyrics(d, cfg, report)   # 歌詞相關的提示由 step_lyrics 自己更新
             except JobCancelled:
@@ -2860,8 +2932,9 @@ def process_song(song_id: str, steps: list[str]):
 _LYRICS_POOL = None
 
 
-def search_lyrics_later(d: Path, cfg: dict) -> None:
-    """在背景依序搜尋線上歌詞（一次一首），結果出來後歌曲庫會標「有線上歌詞可選」。"""
+def search_lyrics_later(d: Path, cfg: dict, apply_first: bool = False) -> None:
+    """在背景依序搜尋線上歌詞（一次一首），結果出來後歌曲庫會標「有線上歌詞可選」。
+    apply_first：沒有自動辨識的歌，直接套用最符合的第一個版本。"""
     global _LYRICS_POOL
     from concurrent.futures import ThreadPoolExecutor
     if _LYRICS_POOL is None:
@@ -2870,9 +2943,11 @@ def search_lyrics_later(d: Path, cfg: dict) -> None:
     def run():
         try:
             if d.exists():
-                find_and_store_candidates(d, cfg)
-        except Exception:
+                find_and_store_candidates(d, cfg, apply_first=apply_first)
+        except Exception as e:
             traceback.print_exc()   # 沒有網路或網站不通時，維持辨識結果
+            if apply_first and d.exists():
+                _lyrics_note(d, f"線上歌詞搜尋失敗（{e}）。可以在練唱畫面按「搜尋線上歌詞」再試一次，或用「重新處理 → 只重新辨識歌詞」自動辨識。")
     _LYRICS_POOL.submit(run)
 
 
@@ -2965,7 +3040,7 @@ def similarity(recognized: str, candidate: str) -> float | None:
     return round(sum(x.size for x in m.get_matching_blocks()) / len(a), 3)
 
 
-USER_AGENT = "LeihuLiantai/1.6.4 (+https://github.com/LeihuTW/Leihu-singsing)"   # HTTP 標頭只能用英文字
+USER_AGENT = "LeihuLiantai/1.6.5 (+https://github.com/LeihuTW/Leihu-singsing)"   # HTTP 標頭只能用英文字
 
 
 def _http_json(url: str, headers: dict | None = None, timeout: int = 8):
@@ -3137,11 +3212,31 @@ def find_candidates(d: Path, cfg: dict, query: str = "", check=None,
 
 def recognition_reliable(meta: dict) -> bool:
     """自動辨識的歌詞可不可靠。1.4.7 之前辨識的歌沒有這項資料，視為可靠（維持原本的行為）。"""
+    if meta.get("lyrics_recognized") is False and not meta.get("lyrics_quality"):
+        return False   # 匯入時沒有自動辨識
     q = meta.get("lyrics_quality")
     return bool(q.get("ok", True)) if isinstance(q, dict) else not meta.get("lyrics_unreliable")
 
 
-def find_and_store_candidates(d: Path, cfg: dict, check=None) -> None:
+def guess_language(text: str) -> str:
+    """從歌詞文字猜語言（沒有自動辨識時用）。"""
+    if re.search(r"[\u3040-\u30ff]", text):
+        return "ja"
+    if re.search(r"[\uac00-\ud7af]", text):
+        return "ko"
+    if re.search(r"[\u4e00-\u9fff]", text):
+        return "zh"
+    return "en" if re.search(r"[A-Za-z]", text) else ""
+
+
+def _lyrics_note(d: Path, note: str | None) -> None:
+    with _META_LOCK:   # 讀出到寫回之間不讓別的執行緒改這首歌的資料
+        meta = read_meta(d)
+        meta["notes"] = [x for x in meta.get("notes", []) if "線上歌詞" not in x] + ([note] if note else [])
+        write_meta(d, meta)
+
+
+def find_and_store_candidates(d: Path, cfg: dict, check=None, apply_first: bool = False) -> None:
     _, cands = find_candidates(d, cfg, check=check)
     meta = read_meta(d)
     # 候選一律保留給使用者看，不再用辨識結果過濾。是否主動提示「有線上歌詞可選」：
@@ -3153,6 +3248,23 @@ def find_and_store_candidates(d: Path, cfg: dict, check=None) -> None:
     atomic_write_text(d / "lyrics_candidates.json", json.dumps(cands, ensure_ascii=False))
     if meta.get("lyrics_source") in (None, "whisper"):
         update_meta(d, lyrics_pending=bool(likely))
+    if not apply_first:
+        return
+    lrc = d / "lyrics.lrc"
+    if meta.get("lyrics_source") or (lrc.exists() and lrc.read_text("utf-8").strip()):
+        _lyrics_note(d, None)   # 等搜尋的時候使用者已經自己選好歌詞，不覆蓋
+        return
+    if not likely:
+        _lyrics_note(d, "沒有找到相符的線上歌詞。" + ("可以在練唱畫面的「搜尋線上歌詞」看看其他候選、" if cands else "可以在練唱畫面")
+                     + "貼上歌詞，或用「重新處理 → 只重新辨識歌詞」自動辨識。")
+        return
+    c = likely[0]
+    _, how = apply_candidate(d, c)
+    lang = guess_language((c.get("plain") or "") + (c.get("synced") or ""))
+    if lang and not read_meta(d).get("language"):
+        update_meta(d, language=lang)
+    _lyrics_note(d, f"已自動套用線上歌詞（{c.get('track') or ''}／{c.get('artist') or ''}，{how}）。"
+                    "不對的話可以在練唱畫面的「搜尋線上歌詞」換其他版本。")
 
 
 # ---------------------------------------------------------------- 依主唱聲音對時間（不需要辨識結果，任何語言都可以）

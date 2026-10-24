@@ -851,13 +851,26 @@ function songBus() {
   S.bus.gain.value = Math.pow(10, normGain() / 20);
   return S.bus;
 }
-function normGain() { return S.normVol && S.song ? (S.song.norm_gain_db || 0) : 0; }
+/* 1.6.5：依開著的音軌（音量 ≥ 50%）那一種組合的實際響度計算要加減多少，
+   卡拉OK（關掉原唱）時伴奏也會調到和其他歌一致；和伺服器端 norm_gain_db 的算法相同 */
+function songNormDb() {
+  const m = S.song;
+  if (!m) return 0;
+  const key = ["lead", "back", "inst"].map(k => ((S.vol[k] ?? 1) >= 0.5 ? "1" : "0")).join("");
+  const lufs = (m.combo_lufs || {})[key];
+  if (lufs == null || m.norm_target == null) return m.norm_gain_db || 0;
+  const [lo, hi] = m.norm_range || [-15, 12];
+  return Math.min(hi, Math.max(lo, m.norm_target - lufs));
+}
+function normGain() { return S.normVol && S.song ? songNormDb() : 0; }
 function syncNormUi() {
   $("#norm-vol").checked = S.normVol;
-  const db = S.song ? (S.song.norm_gain_db || 0) : 0;
-  $("#norm-db").textContent = S.song && S.song.lufs != null
-    ? `這首 ${S.song.lufs.toFixed(1)} LUFS，${S.normVol ? (db >= 0 ? "+" : "") + db.toFixed(1) + " dB" : "未調整"}` : "";
-  if (S.bus) S.bus.gain.value = Math.pow(10, normGain() / 20);
+  const db = songNormDb();
+  const key = ["lead", "back", "inst"].map(k => ((S.vol[k] ?? 1) >= 0.5 ? "1" : "0")).join("");
+  const lufs = S.song ? ((S.song.combo_lufs || {})[key] ?? S.song.lufs) : null;
+  $("#norm-db").textContent = lufs != null
+    ? `這首 ${lufs.toFixed(1)} LUFS，${S.normVol ? (db >= 0 ? "+" : "") + db.toFixed(1) + " dB" : "未調整"}` : "";
+  if (S.bus) S.bus.gain.setTargetAtTime(Math.pow(10, normGain() / 20), S.bus.context.currentTime, 0.12);   // 平滑變化，不會突然跳
 }
 /* 隱藏功能：在「關於開發者」點 LINE Pay 圖片 10 下開啟／關閉「匯出調整後的音訊」 */
 S.mixExport = store.get("mixExport", false);
@@ -988,6 +1001,7 @@ function renderFaders() {
     inp.oninput = () => {
       S.vol[tr.k] = +inp.value; out.textContent = Math.round(S.vol[tr.k] * 100);
       if (S.nodes[tr.k]) S.nodes[tr.k].g.gain.value = S.vol[tr.k];
+      syncNormUi();
       saveSongPrefs();
     };
     box.appendChild(row);
@@ -996,6 +1010,7 @@ function renderFaders() {
 $$("[data-preset]").forEach(b => (b.onclick = () => {
   Object.assign(S.vol, PRESETS[b.dataset.preset]);
   for (const k of Object.keys(S.vol)) if (S.nodes[k]) S.nodes[k].g.gain.value = S.vol[k];
+  syncNormUi();
   renderFaders(); saveSongPrefs();
 }));
 
@@ -1152,10 +1167,13 @@ function applyLyrState(lyr) {
   $("#use-online").hidden = !lyr.online || lyr.source === "online";
   $("#lyr-warn").hidden = !(lyr.unreliable && empty);
   $("#lyr-warn-why").textContent = (lyr.reasons || []).length ? `原因：${lyr.reasons.join("、")}。建議用線上歌詞或匯入歌詞檔。` : "";
+  const rec = lyr.recognized !== false;   // 1.6.5：匯入時沒有自動辨識的歌
+  $("#lyr-warn-title").textContent = rec ? "自動辨識的歌詞不夠準確，已先留白" : "還沒有歌詞（線上沒有找到相符的版本，或還在背景搜尋）";
+  $("#lyr-warn-show").hidden = !rec || !lyr.auto;
   $("#lyr-lang").value = lyr.song_language == null ? "__cfg" : lyr.song_language;
   requestFuri();
   $("#cand-hint").textContent = lyr.unreliable || !lyr.auto
-    ? "辨識結果不可靠，依歌名和歌曲長度排序；選有「時間軸」的版本最省事。"
+    ? (rec ? "辨識結果不可靠，依歌名和歌曲長度排序；選有「時間軸」的版本最省事。" : "依歌名和歌曲長度排序；選有「時間軸」的版本最省事。")
     : "相似度是和自動辨識結果比對的程度，越高越可能是同一首歌、同一個版本。";
 }
 async function reloadLyrState() {
@@ -2699,6 +2717,7 @@ async function openSettings(focusUsage) {
   $("#cfg-whisper").value = cfg.whisper_model;
   $("#cfg-lang").value = cfg.lyrics_language || "";
   $("#cfg-tw").checked = !!cfg.convert_to_taiwan;
+  $("#cfg-autorec").checked = !!cfg.auto_recognize_lyrics;
   $("#cfg-font").value = cfg.font || "huninn";
   fillOutDevices(cfg.audio_out || "");
   $("#cfg-sep").value = cfg.separation_model;
@@ -2733,7 +2752,7 @@ async function saveSettings(extra = {}) {
     await api("/api/config", { json: {
       anthropic_api_key: $("#cfg-key").value, claude_model: $("#cfg-model").value.trim(),
       whisper_model: $("#cfg-whisper").value, lyrics_language: $("#cfg-lang").value,
-      convert_to_taiwan: $("#cfg-tw").checked, font: $("#cfg-font").value, audio_out: $("#cfg-out").value, separation_model: $("#cfg-sep").value.trim(),
+      convert_to_taiwan: $("#cfg-tw").checked, auto_recognize_lyrics: $("#cfg-autorec").checked, font: $("#cfg-font").value, audio_out: $("#cfg-out").value, separation_model: $("#cfg-sep").value.trim(),
       karaoke_model: $("#cfg-kara").value.trim(), karaoke_quality: $("#cfg-kq").value, karaoke_overlap: +$("#cfg-kov").value, auto_fine: $("#cfg-autofine").checked, pitch_model: $("#cfg-pitch").value,
       balance_usd: $("#cfg-balance").value.trim().replace(/^US\$|^\$/, ""), ...extra,
     } });
