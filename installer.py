@@ -392,6 +392,10 @@ def install_torch(tag: str) -> bool:
         say("  CUDA 12.8 版安裝失敗，改試 CUDA 12.6 版…")
         return install_torch("cu126")
     if code == 0:
+        # 上面用 --no-deps 只裝了 PyTorch 本體；接下來的顯示卡測試要 import torch，
+        # 先補裝它需要的套件（typing_extensions、sympy 等），不然全新安裝會被誤判成顯示卡不能用而降級成 CPU 版
+        if pip("install", *[f"{k}=={v}" for k, v in want.items()]):
+            say("  ! PyTorch 需要的套件沒有裝好，稍後安裝其他套件時會再補上")
         for f in files:   # 裝好了就刪掉暫存的安裝檔，省下約 3 GB
             f.unlink(missing_ok=True)
         progress(1, "PyTorch 安裝完成")
