@@ -502,9 +502,7 @@ async function pollJobs() {
   remoteOpen(st.remote);
   syncYtPause(st.yt_pause);
   if (st.version) { $("#ver").textContent = st.version; document.title = `雷虎練唱台 ${st.version}`; }
-  const up = st.update && st.update.latest;   // GitHub 上有新版本：上方顯示下載提示
-  $("#update-chip").hidden = !up;
-  if (up) $("#update-chip").textContent = `有新版 ${up}，點這裡下載`;
+  renderUpdate(st.update, st.jobs.some(j => j.status === "queued" || j.status === "running"));
   const box = $("#jobs");
   box.innerHTML = "";
   let busy = false, finished = false;
@@ -574,10 +572,41 @@ async function pollJobs() {
   if (ST.hqWas === undefined && st.hq && st.hq.state === "ready" && LIB.songs) renderSongs();
   ST.hqWas = st.hq ? st.hq.state : null;
   if (finished && !$("#view-lib").hidden) loadSongs();
-  jobTimer = setTimeout(pollJobs, busy ? 1000 : 5000);
+  const updating = st.update && ["downloading", "installing"].includes(st.update.state);   // 更新時每秒更新進度
+  jobTimer = setTimeout(pollJobs, busy || updating ? 1000 : 5000);
 }
 /* YouTube 限制下載時的暫停提示 */
 let ytPauseOn = false;
+/* 有新版本：上方顯示提示。用安裝檔裝的可以一鍵更新（按兩次確認），其他情況連到下載頁 */
+let updBusy = false, updErr = "";
+function renderUpdate(u, busy) {
+  const c = $("#update-chip");
+  updBusy = busy;
+  c.hidden = !(u && u.latest);
+  if (c.hidden) return;
+  if (u.state === "error" && u.error !== updErr) { updErr = u.error; toast(u.error, 8000); }
+  const auto = u.can_install && u.state !== "error";
+  c.toggleAttribute("data-ext", !auto);   // 不能一鍵更新時，點了用瀏覽器開下載頁
+  if (u.state === "downloading") c.textContent = `下載更新 ${Math.round(u.progress * 100)}%…`;
+  else if (u.state === "installing") c.textContent = "正在安裝更新，程式會自動重新開啟…";
+  else if (u.state === "error") c.textContent = `更新失敗，點這裡到下載頁下載 ${u.latest}`;
+  else if (!c.dataset.armed) c.textContent = auto ? `有新版 ${u.latest}，點這裡更新` : `有新版 ${u.latest}，點這裡下載`;
+}
+$("#update-chip").addEventListener("click", async e => {
+  const c = e.currentTarget;
+  if (c.hasAttribute("data-ext")) return;   // 交給外部連結的處理
+  e.preventDefault();
+  if (/下載更新|正在安裝/.test(c.textContent)) return;
+  if (!c.dataset.armed) {
+    c.dataset.armed = "1";
+    c.textContent = updBusy ? "確定更新？進行中的處理會中斷，程式會關閉後自動重新開啟" : "確定更新？程式會關閉，裝好後自動重新開啟";
+    setTimeout(() => { delete c.dataset.armed; pollJobs(); }, 5000);
+    return;
+  }
+  delete c.dataset.armed;
+  try { await api("/api/update/install", { method: "POST", json: {} }); c.textContent = "下載更新 0%…"; pollJobs(); }
+  catch (err) { toast(err.message); }
+});
 function syncYtPause(p) {
   const on = !!(p && p.on);
   const paused = LIB.songs.filter(s => s.dl_state === "paused").length;
