@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -62,7 +63,7 @@ def status():
                    hq_model=P.HQ_KARAOKE,
                    claude_ready=bool(cfg.get("anthropic_api_key") or os.environ.get("ANTHROPIC_API_KEY")),
                    session_cost=C.summary()["session"]["cost_usd"],
-                   remote=dict(REMOTE), yt_pause=dict(P.YT_PAUSE), **_jobs_for_ui())
+                   remote=dict(REMOTE), yt_pause=dict(P.YT_PAUSE), update=dict(UPDATE), **_jobs_for_ui())
 
 
 UI_QUEUE_SHOWN = 30
@@ -1184,7 +1185,8 @@ def export_lyrics(sid):
     return jsonify(path=str(path))
 
 
-EXTERNAL_URLS = ("https://www.twitch.tv/leihustore", "https://github.com/LeihuTW/Leihu-singsing",
+RELEASES_URL = "https://github.com/LeihuTW/Leihu-singsing/releases/latest"
+EXTERNAL_URLS = ("https://www.twitch.tv/leihustore", "https://github.com/LeihuTW/Leihu-singsing", RELEASES_URL,
                  # 分享錄音：各平台的發文／上傳頁
                  "https://www.facebook.com", "https://www.instagram.com", "https://x.com/compose/post",
                  "https://www.threads.com")
@@ -1351,13 +1353,35 @@ def loudness_backfill() -> None:
             P.log_error("loudness_backfill", e)
 
 
+UPDATE = {"latest": None, "url": RELEASES_URL}   # GitHub 上有比較新的版本時，latest 是新版的版本號
+
+
+def _ver(s: str) -> tuple:
+    return tuple(int(x) for x in re.findall(r"\d+", s)[:3])
+
+
+def check_update() -> None:
+    """啟動時到 GitHub 查一次最新版本，有新版就在畫面上方提示。沒網路或查不到就什麼都不顯示。"""
+    time.sleep(5)
+    try:
+        r = P._http_json("https://api.github.com/repos/LeihuTW/Leihu-singsing/releases/latest",
+                         {"Accept": "application/vnd.github+json"})
+        tag = str(r.get("tag_name") or "")
+        if _ver(tag) > _ver(VERSION):
+            UPDATE["latest"] = tag.lstrip("vV")   # 連結固定用 releases/latest（開啟網址有白名單）
+            print(f"[update] 有新版本 {tag}（目前 {VERSION}）", flush=True)
+    except Exception as e:
+        P.log_error("check_update", e)
+
+
 def main():
     P.LIB.mkdir(exist_ok=True)
     watch_parent()
     resume_downloads()
     threading.Thread(target=prefetcher, daemon=True, name="prefetch").start()
     threading.Thread(target=loudness_backfill, daemon=True, name="loudness").start()
-    url = f"http://{HOST}:{PORT}"
+    threading.Thread(target=check_update, daemon=True, name="update").start()
+    url =f"http://{HOST}:{PORT}"
     print(f"\n  {P.APP_NAME} {VERSION} 已啟動：{url}\n  關閉這個視窗就會結束程式。\n")
     if "--no-browser" not in sys.argv:
         threading.Timer(1.2, lambda: webbrowser.open(url)).start()

@@ -89,6 +89,7 @@ input[type=range] { accent-color: var(--accent); }
   color: var(--muted); white-space: nowrap;
 }
 .chip.ok { color: var(--good); border-color: color-mix(in srgb, var(--good) 40%, transparent); }
+.chip.new { color: var(--accent); border-color: var(--accent); font-weight: 600; text-decoration: none; }
 .chip.warn { color: var(--bad); border-color: color-mix(in srgb, var(--bad) 40%, transparent); }
 
 main { padding: 20px; max-width: 1280px; margin: 0 auto; }

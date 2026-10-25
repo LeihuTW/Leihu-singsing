@@ -502,6 +502,9 @@ async function pollJobs() {
   remoteOpen(st.remote);
   syncYtPause(st.yt_pause);
   if (st.version) { $("#ver").textContent = st.version; document.title = `雷虎練唱台 ${st.version}`; }
+  const up = st.update && st.update.latest;   // GitHub 上有新版本：上方顯示下載提示
+  $("#update-chip").hidden = !up;
+  if (up) $("#update-chip").textContent = `有新版 ${up}，點這裡下載`;
   const box = $("#jobs");
   box.innerHTML = "";
   let busy = false, finished = false;
