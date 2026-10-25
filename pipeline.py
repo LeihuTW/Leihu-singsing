@@ -2102,7 +2102,17 @@ def _whisper_model(cfg):
     root = str(MODELS / "whisper")
     name = cfg.get("whisper_model") or "large-v3-turbo"
     try:
-        return WhisperModel(name, device="auto", compute_type="default", download_root=root)
+        model = WhisperModel(name, device="auto", compute_type="default", download_root=root)
+        if model.model.device != "cuda":
+            return model
+        try:
+            # 有 NVIDIA 顯示卡時 device="auto" 一定選顯示卡，但裝的是 CPU 版 PyTorch 時沒有 cublas64_12.dll。
+            # 這時第一次運算會出錯，之後的 transcribe 卻會一直卡住、按停止也沒用，所以先試算一小段確認
+            model.detect_language(np.zeros(16000, dtype=np.float32), vad_filter=False)
+            return model
+        except RuntimeError as e:
+            print(f"[lyrics] 顯示卡無法執行語音辨識，改用 CPU（比較慢）：{e}", flush=True)
+            del model
     except Exception:
         traceback.print_exc()
     try:
