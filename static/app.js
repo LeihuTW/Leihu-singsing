@@ -1270,7 +1270,7 @@ $("#mel-toggle").onclick = () => setShowMel(!S.showMel);
 setShowMel(S.showMel);
 $("#lyr-size").value = S.lyrSize;
 $("#lyr-size").oninput = e => { S.lyrSize = +e.target.value; store.set("lyrSize", S.lyrSize); if (!S.showLyr) { S.showLyr = true; store.set("showLyr", true); syncLyrButtons(); } S.dirty = true; };
-function applyLyrScale() { $("#lyr").style.setProperty("--ls", S.lyrScale); store.set("lyrScale", S.lyrScale); }
+function applyLyrScale() { $("#lyr").style.setProperty("--ls", S.lyrScale); store.set("lyrScale", S.lyrScale); fitLyrNow(); }
 $("#lyr-smaller").onclick = () => { S.lyrScale = Math.max(0.7, +(S.lyrScale - 0.1).toFixed(1)); applyLyrScale(); };
 $("#lyr-bigger").onclick = () => { S.lyrScale = Math.min(2, +(S.lyrScale + 0.1).toFixed(1)); applyLyrScale(); };
 applyLyrScale();
@@ -1368,6 +1368,16 @@ function setLyrNode(node, text) {
   node._t = key;
   if (h) node.innerHTML = h; else node.textContent = text;
 }
+/* 1.6.5：正在唱的那句太長、超出歌詞區寬度時自動縮小字體（視窗變窄、放大字體時也會重算） */
+function fitLyrNow() {
+  const el = $("#lyr-now"), box = $("#lyr");
+  el.style.fontSize = "";
+  const cs = getComputedStyle(box);
+  const avail = box.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight) - 4;
+  const w = el.scrollWidth;
+  if (avail > 40 && w > avail) el.style.fontSize = (parseFloat(getComputedStyle(el).fontSize) * avail / w).toFixed(2) + "px";
+}
+if (window.ResizeObserver) new ResizeObserver(() => fitLyrNow()).observe($("#lyr"));
 function resetLyrNodes() { for (const id of ["#lyr-now", "#lyr-prev", "#lyr-next", "#lyr-next2", "#lyr-next3"]) $(id)._t = null; S.dirty = true; }
 function syncFuriBtn() {
   const ja = !!S.song && jaSong();
@@ -1462,6 +1472,27 @@ function shiftAllLyrics(firstT) {
   setLineEnds(); commitLines(true);
   toast(`全部歌詞${d > 0 ? "延後" : "提前"} ${Math.abs(d).toFixed(2)} 秒，第一句從 ${fmt(S.lines[0].t, 2)} 開始`, 2500);
 }
+/* 1.6.5：從第 i 句起（含後面每一句）一起移動。中段以後才開始不準時使用 */
+function shiftFrom(i, nt) {
+  const l = S.lines[i];
+  if (!l) return toast("還沒有含時間的歌詞");
+  const floor = i > 0 ? S.lines[i - 1].t + 0.1 : 0;
+  const d = Math.round((Math.max(floor, nt) - l.t) * 100) / 100;
+  if (!d) return;
+  for (const x of S.lines.slice(i)) {
+    x.t = Math.max(0, Math.round((x.t + d) * 100) / 100);
+    if (x.chars) x.chars.forEach(u => (u.t = Math.max(0, Math.round((u.t + d) * 100) / 100)));
+  }
+  setLineEnds(); commitLines(true);
+  toast(`從「${l.text.slice(0, 14)}${l.text.length > 14 ? "…" : ""}」起 ${S.lines.length - i} 句${d > 0 ? "延後" : "提前"} ${Math.abs(d).toFixed(2)} 秒`, 2500);
+}
+function lineIndexAt(t) {
+  let k = -1;
+  for (let i = 0; i < S.lines.length; i++) if (S.lines[i].t <= t + 0.05) k = i; else break;
+  return k;
+}
+$("#from-cur").onclick = () => { const t = cur(); shiftFrom(Math.max(0, lineIndexAt(t)), t - 0.08 * S.speed); };
+$("#from-next").onclick = () => { const t = cur(), k = lineIndexAt(t) + 1; if (k >= S.lines.length) return toast("後面沒有歌詞了"); shiftFrom(k, t - 0.08 * S.speed); };
 function syncFirstLine() {
   const el = $("#fl-time");
   if (document.activeElement !== el) el.value = S.lines.length ? fmt(S.lines[0].t, 2) : "";
@@ -2526,7 +2557,7 @@ function updateLyrics(t) {
   const el = $("#lyr-now");
   const text = now ? now.text : "";
   const h = furiHTML(text), key = (h ? S.kanaMode + JSON.stringify(S.kanaFix) : "T") + text;
-  if (el._t !== key) { for (const c of [$(".base", el), $(".fill", el)]) h ? (c.innerHTML = h) : (c.textContent = text); el._t = key; }
+  if (el._t !== key) { for (const c of [$(".base", el), $(".fill", el)]) h ? (c.innerHTML = h) : (c.textContent = text); el._t = key; fitLyrNow(); }
   let p = now ? clamp((t - now.t) / Math.max(0.3, now.end - now.t), 0, 1) : 0;
   if (now && now.chars && now.chars.length) {   // 有逐字時間時，跟著每個字變色
     const u = now.chars, n = u.length;
@@ -2541,6 +2572,64 @@ function updateLyrics(t) {
     const node = $(id), tx = l ? l.text : (id === "#lyr-next" && !now && S.lines[0] ? S.lines[0].text : "");
     setLyrNode(node, tx);
   }
+}
+
+/* 1.6.5：逐句調整的獨立視窗。歌詞和播放時間經由伺服器送給 /timing，那邊按的按鈕變成指令送回來 */
+const TP = { owner: null, seq: -1, polling: false, lines: "", sent: null, last: 0, busy: false };
+async function openTimingPopup() {
+  if (!S.song) return;
+  TP.owner ||= Math.random().toString(36).slice(2, 12).replace(/[^a-z0-9]/g, "x").padEnd(6, "x");
+  TP.lines = ""; TP.sent = null;
+  try { await api("/api/open-timing", { json: { owner: TP.owner } }); toast("已開啟逐句調整視窗，可以拉到旁邊、調整大小", 3500); }
+  catch (e) { return toast(e.message); }
+  if (!TP.polling) tpPoll();
+}
+$("#timing-pop").onclick = openTimingPopup;
+async function tpPoll() {
+  TP.polling = true;
+  let idle = 0;
+  while (TP.owner) {
+    try {
+      const r = await fetch(`/api/timing/cmds?owner=${TP.owner}&after=${TP.seq}`).then(x => x.json());
+      TP.seq = r.seq;
+      for (const c of r.cmds) { try { tpApply(c); } catch (e) { console.error(e); } }
+      if (r.alive || r.cmds.length) idle = 0; else if (++idle > 4) break;   // 視窗關掉約一分鐘後停止
+    } catch { await new Promise(res => setTimeout(res, 2000)); }
+  }
+  TP.polling = false;
+}
+function tpNow(c) {   // 按下按鈕那一刻的播放位置（扣掉傳送的時間）
+  const lag = S.playing ? Math.max(0, (Date.now() - (c.at || Date.now())) / 1000) * S.speed : 0;
+  return Math.max(0, cur() - lag - 0.08 * S.speed);
+}
+function tpApply(c) {
+  if (c.a === "toggle") return S.playing || S.wantPlay ? pause() : play();
+  if (c.a === "seekrel") return seek(cur() + (+c.d || 0));
+  const l = S.lines[c.i];
+  if (!l || l.text !== c.text) { TP.lines = ""; return toast("歌詞剛剛有變動，調整視窗已更新，請再按一次"); }
+  if (c.a === "play") { seek(Math.max(0, l.t - 1)); if (!S.playing) play(); return; }
+  if (c.a === "now") c.from ? shiftFrom(c.i, tpNow(c)) : shiftLine(l, tpNow(c));
+  else if (c.a === "nudge") c.from ? shiftFrom(c.i, l.t + (+c.d || 0)) : shiftLine(l, l.t + (+c.d || 0));
+  else return;
+  saveLyricsSoon();   // 在獨立視窗調整的自動儲存
+  setTimeout(tpSync, 30);   // 馬上把新的時間送回調整視窗
+}
+setInterval(tpSync, 500);   // 練唱視窗被蓋住、畫面暫停更新時也持續同步
+function tpSync() {
+  if (!TP.owner || TP.busy) return;
+  const now = performance.now();
+  const body = { owner: TP.owner };
+  const active = !$("#view-practice").hidden && S.song;
+  const lines = active ? JSON.stringify(S.lines.map(l => [l.t, l.text])) : "[]";
+  if (lines !== TP.lines) { body.lines = JSON.parse(lines); body.title = active ? (S.song.title || "") : ""; TP.lines = lines; }
+  const t = active ? cur() : 0, playing = !!(active && S.playing), rate = S.speed || 1;
+  const p = TP.sent;
+  const drift = p ? Math.abs(t - (p.t + (p.playing ? (Date.now() - p.at) / 1000 * p.rate : 0))) : 1;
+  if (!body.lines && p && p.playing === playing && p.rate === rate && drift < 0.15 && now - TP.last < 5000) return;
+  Object.assign(body, { t, playing, rate, at: Date.now() });
+  TP.sent = { t, playing, rate, at: body.at }; TP.last = now; TP.busy = true;
+  fetch("/api/timing/state", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) })
+    .catch(() => { TP.lines = ""; }).finally(() => { TP.busy = false; });
 }
 
 /* 1.4.3：直播歌詞（/overlay）同步。把目前的歌、歌詞和播放時間送給本機伺服器，直播畫面再來讀 */
@@ -2602,6 +2691,7 @@ function frame() {
   }
   micFrame();
   overlaySync();
+  tpSync();
   if (S.dirty && !$("#view-practice").hidden) {
     S.dirty = false;
     const t = cur();

@@ -108,10 +108,20 @@ def _client():
     return anthropic, anthropic.Anthropic(api_key=key), cfg.get("claude_model") or "claude-sonnet-5-5"
 
 
-def _call(kwargs: dict, purpose: str, song: str):
+def _call(kwargs: dict, purpose: str, song: str, no_think: bool = False):
     anthropic, client, model = _client()
     try:
-        msg = client.messages.create(model=model, **kwargs)
+        if no_think:
+            # 1.6.5：新模型預設會先思考，對齊歌詞這種只要回傳數字的工作，思考會把 token 用光、回覆被截斷。
+            # between_tools＝不先思考、直接呼叫工具；舊模型不認得這個設定時（400 錯誤，不計費）改用一般方式。
+            try:
+                msg = client.messages.create(model=model, extra_body={"thinking": {"type": "between_tools"}}, **kwargs)
+            except anthropic.BadRequestError as e:
+                if "thinking" not in str(e.message).lower():
+                    raise
+                msg = client.messages.create(model=model, **kwargs)
+        else:
+            msg = client.messages.create(model=model, **kwargs)
     except anthropic.APIConnectionError:
         raise P.UserError("連不上 Claude。確認網路後再試。")
     except anthropic.AuthenticationError:
@@ -154,8 +164,8 @@ def ask_tool(prompt: str, tool: dict, max_tokens: int, purpose: str, song: str =
     msg, entry = _call({
         "max_tokens": max_tokens,
         "tools": [tool],
-        "messages": [{"role": "user", "content": prompt + f"\n\n請呼叫 {tool['name']} 工具回傳結果，不要用文字回答。"}],
-    }, purpose, song)
+        "messages": [{"role": "user", "content": prompt + f"\n\n請直接呼叫 {tool['name']} 工具回傳結果，不要先用文字說明或推理。"}],
+    }, purpose, song, no_think=True)
     for b in msg.content:
         if getattr(b, "type", "") == "tool_use" and b.name == tool["name"]:
             return dict(b.input), entry
@@ -165,7 +175,7 @@ def ask_tool(prompt: str, tool: dict, max_tokens: int, purpose: str, song: str =
         return data, entry
     log_raw(purpose, msg)
     if getattr(msg, "stop_reason", "") == "max_tokens":
-        raise P.UserError("歌詞太長，Claude 的回覆被截斷。可以分段貼上再對齊。")
+        raise P.UserError("Claude 的回覆被截斷（已用掉的費用見下方）。可以再試一次，或分段貼上再對齊。")
     raise P.UserError("Claude 沒有回傳時間資料，再試一次。")
 
 

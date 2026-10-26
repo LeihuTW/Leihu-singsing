@@ -986,7 +986,8 @@ def claude_align(sid):
         + "\n\n資料二：\n" + "\n".join(f"{s:.2f}\t{e:.2f}\t{k}" for s, e, k in phrases)
         + f"\n\n資料三（共 {n} 行）：\n" + "\n".join(f"{i + 1}. {t}" for i, t in enumerate(ref_lines))
     )
-    data, usage = C.ask_tool(prompt, tool, 8000, "align", meta.get("title", ""))
+    # 回傳的只是每行一個數字（約 6 token），上限依行數給，夠用又不會在出錯時白白燒掉很多 token
+    data, usage = C.ask_tool(prompt, tool, min(16000, 2000 + 25 * n), "align", meta.get("title", ""))
     times = data.get("times") or []
     if len(times) != n:
         raise P.UserError(f"Claude 回傳了 {len(times)} 個時間，但歌詞有 {n} 行。再試一次。")
@@ -1274,6 +1275,92 @@ def open_app():
         import webbrowser
         webbrowser.open(url)
     return jsonify(ok=True, app=bool(exe))
+
+
+# ---------------------------------------------------------------- 逐句調整的獨立視窗（1.6.5）
+# 獨立視窗（/timing）和練唱畫面可能在不同的程式裡（桌面版視窗、Edge 視窗），所以透過伺服器轉送：
+# 練唱畫面把歌詞與播放時間送上來，獨立視窗用長輪詢讀；獨立視窗按的按鈕變成指令，練唱畫面用長輪詢收。
+# owner 是練唱畫面開視窗時產生的代號，指令只送給開它的那個畫面。
+TIMING: dict = {"state": {}, "sseq": 0, "cmds": [], "cseq": 0, "seen": {}}
+_TCOND = threading.Condition()
+
+
+@app.post("/api/timing/state")
+def timing_state_put():
+    body = request.get_json(force=True) or {}
+    owner = str(body.pop("owner", ""))[:20]
+    if not owner:
+        raise P.UserError("缺少 owner")
+    with _TCOND:
+        st = TIMING["state"].setdefault(owner, {})
+        st.update(body)
+        TIMING["sseq"] += 1
+        st["seq"] = TIMING["sseq"]
+        _TCOND.notify_all()
+    return jsonify(ok=True)
+
+
+@app.get("/api/timing/state")
+def timing_state_get():
+    owner = request.args.get("owner", "")[:20]
+    after = int(request.args.get("after", 0) or 0)
+    with _TCOND:
+        TIMING["seen"][owner] = time.time()
+        _TCOND.wait_for(lambda: TIMING["state"].get(owner, {}).get("seq", 0) > after, timeout=15)
+        st = dict(TIMING["state"].get(owner, {}))
+    return jsonify(st)
+
+
+@app.post("/api/timing/cmd")
+def timing_cmd_put():
+    body = request.get_json(force=True) or {}
+    owner = str(body.get("owner", ""))[:20]
+    with _TCOND:
+        TIMING["seen"][owner] = time.time()
+        TIMING["cseq"] += 1
+        TIMING["cmds"] = TIMING["cmds"][-200:] + [{"seq": TIMING["cseq"], "owner": owner, "cmd": body.get("cmd") or {}}]
+        _TCOND.notify_all()
+    return jsonify(ok=True)
+
+
+@app.get("/api/timing/cmds")
+def timing_cmds_get():
+    owner = request.args.get("owner", "")[:20]
+    after = int(request.args.get("after", -1) or 0)
+
+    def mine():
+        return [c for c in TIMING["cmds"] if c["owner"] == owner and c["seq"] > after]
+    with _TCOND:
+        if after < 0:   # 第一次：從現在開始收
+            return jsonify(seq=TIMING["cseq"], cmds=[], alive=False)
+        _TCOND.wait_for(lambda: bool(mine()), timeout=20)
+        out = mine()
+        alive = time.time() - TIMING["seen"].get(owner, 0) < 40
+        return jsonify(seq=max([after] + [c["seq"] for c in out]), cmds=[c["cmd"] for c in out], alive=alive)
+
+
+@app.get("/timing")
+def timing_page():
+    return send_from_directory(P.ROOT / "static", "timing.html", max_age=0)
+
+
+@app.post("/api/open-timing")
+def open_timing():
+    import re
+    owner = str((request.get_json(force=True) or {}).get("owner", ""))
+    if not re.fullmatch(r"[a-z0-9]{4,20}", owner):
+        raise P.UserError("代號格式不正確")
+    url = f"http://{HOST}:{PORT}/timing?owner={owner}"
+    exe = _app_browser()
+    if exe:
+        prof = P.ROOT / ".appwin"
+        prof.mkdir(exist_ok=True)
+        subprocess.Popen([exe, f"--app={url}", f"--user-data-dir={prof}", "--window-size=560,860",
+                          "--no-first-run", "--no-default-browser-check"],
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    else:
+        webbrowser.open(url)
+    return jsonify(ok=True)
 
 
 @app.post("/api/open-url")

@@ -1,0 +1,139 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>逐句調整 · 雷虎練唱台</title>
+<link rel="stylesheet" href="/static/style.css">
+<style>
+  /* 逐句調整的獨立視窗：字體跟著視窗寬度縮放，長句自動換行 */
+  html, body { height: 100%; }
+  body { margin: 0; background: var(--bg); color: var(--ink); font-family: var(--sans); display: flex; flex-direction: column; }
+  header { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 8px 10px; border-bottom: 1px solid var(--line); background: var(--panel); }
+  header .title { flex: 1 1 100%; font-weight: 700; font-size: clamp(14px, 2.6vw, 18px); overflow-wrap: anywhere; }
+  header .time { font-family: var(--mono); font-size: 14px; color: var(--muted); margin-right: auto; }
+  header label { font-size: 13px; color: var(--muted); display: flex; align-items: center; gap: 4px; }
+  button { font: inherit; font-size: 13px; padding: 4px 9px; border-radius: 6px; border: 1px solid var(--line); background: var(--panel); color: var(--ink); cursor: pointer; }
+  button:hover { border-color: var(--accent); }
+  button.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+  #list { flex: 1; overflow-y: auto; padding: 6px 8px 40vh; }
+  .row { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 4px 10px; align-items: center; padding: 6px 8px; border-radius: 8px; }
+  .row + .row { border-top: 1px solid var(--line); }
+  .row.cur { background: color-mix(in srgb, var(--melody) 16%, transparent); border-color: transparent; }
+  .row.cur .tx { color: var(--melody); }
+  .row .t { font-family: var(--mono); font-size: 13px; color: var(--muted); }
+  .row .tx { grid-column: 1 / -1; font-family: var(--lyric); font-size: clamp(16px, 4.6vw, 40px); line-height: 1.35; overflow-wrap: anywhere; }
+  .row .btns { display: flex; flex-wrap: wrap; gap: 3px; justify-content: flex-end; }
+  .row .btns button { padding: 2px 8px; }
+  .empty { padding: 24px; color: var(--muted); text-align: center; }
+  .note { font-size: 12px; color: var(--muted); flex: 1 1 100%; }
+  #off { display: none; padding: 6px 10px; background: var(--bad); color: #fff; font-size: 13px; }
+</style>
+</head>
+<body>
+<div id="off">和練唱畫面的連線中斷，正在重新連線…</div>
+<header>
+  <div class="title" id="title">逐句調整</div>
+  <span class="time" id="time">0:00.0</span>
+  <button id="b-back" title="倒退 5 秒">−5 秒</button>
+  <button id="b-play" class="primary">播放／暫停</button>
+  <button id="b-fwd" title="前進 5 秒">＋5 秒</button>
+  <label title="勾選時，「對準」和 ± 會連同後面每一句一起移動"><input id="from" type="checkbox"> 後面的句子一起移動</label>
+  <label title="播放時自動捲到正在唱的那句"><input id="follow" type="checkbox" checked> 跟著捲動</label>
+  <span class="note">唱到某句開口時按那句的「對準」；±0.1 秒微調。調整會自動儲存。</span>
+</header>
+<div id="list"><div class="empty">等待練唱畫面的歌詞…（請在練唱畫面打開一首歌）</div></div>
+<script>
+"use strict";
+const $ = s => document.querySelector(s);
+const owner = new URLSearchParams(location.search).get("owner") || "";
+try { const f = localStorage.getItem("font"); if (f) document.documentElement.dataset.font = JSON.parse(f); } catch {}
+fetch("/api/config").then(r => r.json()).then(c => { document.documentElement.dataset.font = c.font || "huninn"; }).catch(() => {});
+const ST = { lines: [], t: 0, playing: false, rate: 1, at: Date.now(), seq: 0, cur: -1, userScroll: 0 };
+const fmt = t => { t = Math.max(0, t); const m = Math.floor(t / 60), s = t - m * 60; return `${m}:${s.toFixed(1).padStart(4, "0")}`; };
+const lrcT = t => { const m = Math.floor(t / 60), s = t - m * 60; return `${String(m).padStart(2, "0")}:${s.toFixed(2).padStart(5, "0")}`; };
+function now() { return ST.playing ? ST.t + (Date.now() - ST.at) / 1000 * ST.rate : ST.t; }
+
+function send(cmd) {
+  cmd.at = Date.now();
+  fetch("/api/timing/cmd", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ owner, cmd }) }).catch(() => {});
+}
+function lineCmd(a, i, extra = {}) {
+  const l = ST.lines[i];
+  send({ a, i, text: l[1], from: $("#from").checked, ...extra });
+}
+function render() {
+  const box = $("#list");
+  box.innerHTML = "";
+  if (!ST.lines.length) { box.innerHTML = `<div class="empty">這首歌還沒有含時間的歌詞。</div>`; return; }
+  ST.lines.forEach(([t, text], i) => {
+    const row = document.createElement("div");
+    row.className = "row"; row.dataset.i = i;
+    row.innerHTML = `<span class="t"></span><span class="btns">
+      <button data-a="play" title="從這句前 1 秒播放">▶</button>
+      <button data-a="now" class="primary" title="把這句的開始對準目前播放位置">對準</button>
+      <button data-a="m" title="提早 0.1 秒">−0.1</button><button data-a="p" title="延後 0.1 秒">＋0.1</button></span>
+      <div class="tx"></div>`;
+    row.querySelector(".t").textContent = lrcT(t);
+    row.querySelector(".tx").textContent = text;
+    box.appendChild(row);
+  });
+  ST.cur = -2;
+  tick();
+}
+$("#list").addEventListener("click", e => {
+  const b = e.target.closest("button"); if (!b) return;
+  const i = +b.closest(".row").dataset.i, a = b.dataset.a;
+  if (a === "play") lineCmd("play", i);
+  if (a === "now") lineCmd("now", i);
+  if (a === "m") lineCmd("nudge", i, { d: -0.1 });
+  if (a === "p") lineCmd("nudge", i, { d: 0.1 });
+});
+$("#list").addEventListener("wheel", () => (ST.userScroll = Date.now()), { passive: true });
+$("#list").addEventListener("touchmove", () => (ST.userScroll = Date.now()), { passive: true });
+$("#b-play").onclick = () => send({ a: "toggle" });
+$("#b-back").onclick = () => send({ a: "seekrel", d: -5 });
+$("#b-fwd").onclick = () => send({ a: "seekrel", d: 5 });
+document.addEventListener("keydown", e => { if (e.code === "Space" && e.target.tagName !== "INPUT") { e.preventDefault(); send({ a: "toggle" }); } });
+
+function tick() {
+  const t = now();
+  $("#time").textContent = fmt(t);
+  let k = -1;
+  for (let i = 0; i < ST.lines.length; i++) if (ST.lines[i][0] <= t + 0.05) k = i; else break;
+  if (k !== ST.cur) {
+    ST.cur = k;
+    document.querySelectorAll(".row").forEach(r => r.classList.toggle("cur", +r.dataset.i === k));
+    const el = document.querySelector(`.row[data-i="${Math.max(0, k)}"]`);
+    if (el && $("#follow").checked && Date.now() - ST.userScroll > 4000) el.scrollIntoView({ block: "center", behavior: "smooth" });
+  }
+}
+setInterval(tick, 100);
+
+async function poll() {
+  for (;;) {
+    try {
+      const r = await fetch(`/api/timing/state?owner=${owner}&after=${ST.seq}`).then(x => { if (!x.ok) throw 0; return x.json(); });
+      $("#off").style.display = "none";
+      if (r.seq) ST.seq = r.seq;
+      if (r.t != null) Object.assign(ST, { t: r.t, playing: !!r.playing, rate: r.rate || 1, at: r.at || Date.now() });
+      if (r.title != null) { $("#title").textContent = r.title ? `逐句調整：${r.title}` : "逐句調整"; document.title = r.title ? `逐句調整 · ${r.title}` : "逐句調整 · 雷虎練唱台"; }
+      if (r.lines && JSON.stringify(r.lines) !== JSON.stringify(ST.lines)) {
+        const same = r.lines.length === ST.lines.length && r.lines.every((l, i) => l[1] === ST.lines[i][1]);
+        ST.lines = r.lines;
+        if (same) {   // 只有時間變了：更新數字，不重畫（保留捲動位置）
+          document.querySelectorAll(".row").forEach(row => { row.querySelector(".t").textContent = lrcT(ST.lines[+row.dataset.i][0]); });
+          ST.cur = -2; tick();
+        } else render();
+      }
+    } catch {
+      $("#off").style.display = "block";
+      await new Promise(res => setTimeout(res, 2000));
+    }
+  }
+}
+if (!owner) $("#list").innerHTML = `<div class="empty">請從練唱畫面的「逐句調整開始時間」按「開新視窗逐句調整」開啟這個視窗。</div>`;
+else poll();
+</script>
+</body>
+</html>

@@ -215,6 +215,11 @@
             <button class="ghost" data-fl="0.1">+0.1</button><button class="ghost" data-fl="0.5">+0.5 秒</button>
             <span class="hint">後面每一句（含逐字時間）會一起移動，自動儲存</span>
           </div>
+          <div class="row">
+            <span class="hint">中段以後才不準：</span>
+            <button id="from-cur" title="把目前顯示的這句對到播放位置，這句和後面每一句一起移動">這句以後對準目前位置</button>
+            <button id="from-next" title="把還沒出現的下一句對到播放位置（歌詞慢半拍時用），下一句和後面每一句一起移動">下一句以後對準目前位置</button>
+          </div>
         </div>
         <textarea id="lrc" spellcheck="false" aria-label="歌詞（LRC 格式）"></textarea>
         <div class="row">
@@ -237,6 +242,7 @@
           <summary>逐句調整開始時間</summary>
           <div class="detail" style="margin-top:8px">
             <span class="hint">播放到某句開頭時按「對準」，或用 ±0.1 秒微調。改完按「儲存歌詞」。</span>
+            <div class="row"><button id="timing-pop">開新視窗逐句調整</button><span class="hint">另開一個可以縮放的視窗，邊唱邊調；在那邊調整會自動儲存</span></div>
             <div id="timing" class="timing"></div>
             <div class="row"><button id="lyr-dist">自動分配每個字的時間</button><span class="hint">依旋律音符把每個字放到對應的音上</span></div>
           </div>

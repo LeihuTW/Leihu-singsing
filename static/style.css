@@ -229,7 +229,7 @@ textarea { width: 100%; min-height: 160px; resize: vertical; font-family: var(--
 .trow input { width: 92px; font-family: var(--mono); font-size: 12.5px; padding: 3px 6px; }
 .trow .btns { display: flex; gap: 2px; }
 .trow .btns button { padding: 2px 7px; font-size: 12px; }
-.trow .tx { font-family: var(--lyric); font-size: 15px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.trow .tx { font-family: var(--lyric); font-size: 15px; overflow-wrap: anywhere; }   /* 1.6.5：長句換行，不再被截掉 */
 .ls-results { display: grid; gap: 6px; }
 .ls-item { border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; display: grid; gap: 4px; }
 .ls-item .h { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
