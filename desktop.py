@@ -91,6 +91,40 @@ def running_instance(port: int) -> bool:
         return False
 
 
+class Api:
+    """給網頁呼叫的功能（window.pywebview.api.*）。"""
+
+    def __init__(self, base: str):
+        self._base = base
+        self._timing = None
+
+    def open_timing(self, owner: str) -> bool:
+        """1.6.5：逐句調整的獨立視窗，用練唱台自己的視窗開（不經過 Edge，不會帶出瀏覽器的擴充功能或還原舊視窗）。"""
+        import re
+        import webview
+        if not re.fullmatch(r"[a-z0-9]{4,20}", str(owner)):
+            return False
+        url = f"{self._base}/timing?owner={owner}"
+        w = self._timing
+        if w is not None:
+            try:
+                w.load_url(url)
+                w.restore()
+                w.show()
+                return True
+            except Exception:
+                self._timing = None
+        w = webview.create_window("逐句調整 · 雷虎練唱台", url, width=560, height=860, min_size=(320, 360),
+                                  background_color="#0E1318", text_select=True)
+
+        def closed():
+            if self._timing is w:
+                self._timing = None
+        w.events.closed += closed
+        self._timing = w
+        return True
+
+
 class _Existing:
     def terminate(self): pass
     def wait(self, *_): pass
@@ -133,7 +167,7 @@ def main():
             pass
         window = webview.create_window(
             f"雷虎練唱台 {version}", base + "/", width=1380, height=920, min_size=(960, 640),
-            background_color="#0E1318", text_select=True,
+            background_color="#0E1318", text_select=True, js_api=Api(base),
         )
         done: list = []
         window.events.loaded += lambda: allow_microphone(window, base, done)

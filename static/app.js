@@ -291,6 +291,10 @@ function renderSongs() {
           <option value="">重新處理…</option>
           <option value="separate,pitch,lyrics">全部重做</option>
           <option value="lyrics">只重新辨識歌詞</option>
+          <option value="max">用最高品質人聲分離重新辨識（合音多的歌，較慢）</option>
+          ${s.vocal_mode === "all"
+            ? `<option value="solo">改回只用主唱分析旋律與歌詞</option>`
+            : `<option value="group">合唱模式：多人輪流唱的歌（例如 S.H.E），用全部人聲重新分析</option>`}
           <option value="pitch">只重新分析旋律</option>
         </select>
         <button class="ghost danger" data-a="del">刪除</button>
@@ -334,7 +338,12 @@ function renderSongs() {
     $('[data-a="redo"]', el).onchange = async e => {
       const v = e.target.value; e.target.value = "";
       if (!v) return;
-      try { await api(`/api/songs/${s.id}/process`, { json: { steps: v.split(",") } }); toast("已加入處理佇列"); pollJobs(); }
+      try {
+        if (v === "max") await reprocessMax(s.id);
+        else if (v === "group" || v === "solo") await setVocalMode(s.id, v === "group");
+        else { await api(`/api/songs/${s.id}/process`, { json: { steps: v.split(",") } }); toast("已加入處理佇列"); }
+        pollJobs();
+      }
       catch (err) { toast(err.message); }
     };
     const del = $('[data-a="del"]', el);
@@ -668,7 +677,7 @@ async function openSong(id) {
   const [song, pitch, lyr] = await Promise.all([
     api(`/api/songs/${id}`), api(`/api/songs/${id}/pitch`), api(`/api/songs/${id}/lyrics`),
   ]);
-  S.song = song; titles[id] = song.title;
+  S.song = song; titles[id] = song.title; syncGroupBtn();
   S.pitch = { hop: pitch.hop, midi: Float32Array.from(pitch.midi, v => (v == null ? NaN : v)) };
   S.notes = pitch.notes.map(([s, e, m]) => ({ s, e, m }));
   S.autoLrc = lyr.auto;
@@ -680,7 +689,7 @@ async function openSong(id) {
   const useDefault = song.key_set_at && !(saved.at > song.key_set_at * 1000);
   S.key = clamp((useDefault ? song.key : saved.key) || 0, -6, 6); S.speed = useDefault ? 1 : saved.speed || 1;
   if (saved.vol) Object.assign(S.vol, saved.vol);
-  S.t = 0; S.loopA = S.loopB = null; S.live = []; S.take = null; S.takeBuf = null;
+  S.t = 0; S.loopA = S.loopB = null; S.live = []; S.take = null; S.takeBuf = null; judgeReset();
   keyHintReset();
   computeRange();
   $("#p-title").textContent = song.title + (song.artist ? ` — ${song.artist}` : "");
@@ -925,7 +934,7 @@ function pause() {
 }
 function seek(t) {
   S.t = clamp(t, 0, S.dur || 0);
-  S.live = [];
+  S.live = []; JG.done.clear(); JG.combo = 0;
   if (S.playing) play();
   if (S.rec) splitRecording();   // 錄音中跳轉：從新位置重新對齊
   S.dirty = true;
@@ -1203,6 +1212,33 @@ $("#lyr-lang").onchange = async e => {
   S.lyrLangUser = v === "__cfg" ? null : v; if (S.lyrLangUser) S.lyrLang = S.lyrLangUser; requestFuri();
   try { await api(`/api/songs/${S.song.id}`, { method: "PATCH", json: { lyrics_language: v === "__cfg" ? null : v } }); toast("已設定這首歌的辨識語言，按「重新辨識歌詞」套用", 2500); }
   catch (err) { toast(err.message); }
+};
+async function setVocalMode(id, group) {
+  await api(`/api/songs/${id}/process`, { json: { steps: ["pitch", "lyrics"], vocal_mode: group ? "all" : "lead" } });
+  toast(group ? "已設為合唱模式，正在用主唱＋合音重新分析旋律、重新辨識歌詞（不用重新分軌，很快）。目前用的線上或匯入歌詞不會被覆蓋"
+              : "已改回只用主唱，正在重新分析旋律、重新辨識歌詞", 6000);
+  loadSongs();
+}
+async function reprocessMax(id) {
+  const st = await api("/api/status").catch(() => ({}));
+  await api(`/api/songs/${id}/process`, { json: { steps: ["separate", "pitch", "lyrics"], max_quality: true } });
+  toast(st.modules && !st.modules.cuda
+    ? "已加入處理佇列。沒有顯示卡加速，最高品質分離一首可能要十幾分鐘"
+    : "已加入處理佇列：最高品質分離人聲 → 重新分析旋律 → 重新辨識歌詞。目前用的線上或匯入歌詞不會被覆蓋", 6000);
+}
+function syncGroupBtn() {
+  const on = S.song && S.song.vocal_mode === "all";
+  $("#lyr-group").textContent = on ? "改回只用主唱分析" : "合唱模式（多人輪流唱）";
+  $("#lyr-group").classList.toggle("on", !!on);
+}
+$("#lyr-group").onclick = async () => {
+  if (!S.song) return;
+  const group = S.song.vocal_mode !== "all";
+  try { await setVocalMode(S.song.id, group); S.song.vocal_mode = group ? "all" : null; syncGroupBtn(); pollJobs(); }
+  catch (e) { toast(e.message); }
+};
+$("#lyr-redo-max").onclick = async () => {
+  try { await reprocessMax(S.song.id); pollJobs(); } catch (e) { toast(e.message); }
 };
 $("#lyr-redo").onclick = async () => {
   try { await api(`/api/songs/${S.song.id}/process`, { json: { steps: ["lyrics"] } }); toast("已加入處理佇列，完成後重新開啟這首歌"); pollJobs(); }
@@ -1770,8 +1806,84 @@ function micFrame() {
     S.live.push({ t, m });
     if (m != null) keyHintAdd(m, refAt(t));
     if (S.live.length > 4000) S.live.splice(0, 1000);
+    judgeTick();
   }
   S.dirty = true;
+}
+
+/* 測試中：每句即時評價。開麥克風唱的時候，每句唱完就依這句的音準給 PERFECT／GREAT／GOOD／MISS。
+   只看原唱有旋律的時間點：唱到的比例（覆蓋率）× 落在 ±50 音分內的比例（不分八度，換音時早晚 0.15 秒內都算對） */
+const JG = { on: store.get("judgeOn", true), done: new Set(), combo: 0, tally: { perfect: 0, great: 0, good: 0, miss: 0 }, phr: null, phrKey: "" };
+function setJudge(on, say) {
+  JG.on = on; store.set("judgeOn", on); judgeReset();
+  $("#judge-on").checked = on; $("#judge-btn").classList.toggle("on", on);
+  if (say) toast(on ? "已開啟每句評分：開麥克風唱，每句唱完會跳出評價" : "已關閉每句評分", 2000);
+}
+setJudge(JG.on, false);
+$("#judge-on").onchange = e => setJudge(e.target.checked, false);
+$("#judge-btn").onclick = () => setJudge(!JG.on, true);
+function judgeReset() { JG.done.clear(); JG.combo = 0; JG.tally = { perfect: 0, great: 0, good: 0, miss: 0 }; $("#judge").innerHTML = ""; }
+function judgePhrases() {   // 有歌詞用每一句；沒有歌詞用旋律的樂句
+  const key = S.lines.length ? S.lines.map(l => l.t + ":" + l.end).join(",") : "n" + S.notes.length;
+  if (JG.phrKey === key && JG.phr) return JG.phr;
+  let out = [];
+  if (S.lines.length) out = S.lines.map(l => ({ s: l.t, e: Math.max(l.end || l.t + 1, l.t + 0.5) }));
+  else for (const n of S.notes) {
+    const p = out[out.length - 1];
+    if (p && n.s - p.e < 0.6) p.e = n.e; else out.push({ s: n.s, e: n.e });
+  }
+  JG.phr = out; JG.phrKey = key;
+  return out;
+}
+function judgeLine(ph) {
+  let ref = 0, sung = 0, hit = 0, sum = 0;
+  for (const p of S.live) {
+    if (p.t < ph.s || p.t > ph.e) continue;
+    const r = refAt(p.t);
+    if (isNaN(r)) continue;
+    ref++;
+    if (p.m == null) continue;
+    sung++;
+    let best = Infinity;
+    for (const dt of [0, -0.08, 0.08, -0.15, 0.15]) {
+      const rr = refAt(p.t + dt);
+      if (!isNaN(rr)) best = Math.min(best, Math.abs(fold(p.m - rr)) * 100);
+    }
+    sum += Math.min(best, 600);
+    if (best <= 50) hit++;
+  }
+  if (ref < 6) return null;   // 這句幾乎沒有旋律（例如念白、太短），不評
+  const cover = sung / ref, acc = sung ? hit / sung : 0;
+  const score = acc * Math.min(1, cover / 0.7);
+  const grade = cover < 0.2 ? "miss" : score >= 0.8 ? "perfect" : score >= 0.6 ? "great" : score >= 0.38 ? "good" : "miss";
+  return { grade, score, acc, cover, dev: sung ? sum / sung : null };
+}
+function judgeShow(r) {
+  const label = { perfect: "PERFECT", great: "GREAT", good: "GOOD", miss: "MISS" }[r.grade];
+  JG.combo = r.grade === "miss" ? 0 : JG.combo + 1;
+  JG.tally[r.grade]++;
+  const sub = r.cover < 0.2 ? "沒有唱到" : `命中 ${Math.round(r.acc * 100)}%${JG.combo >= 2 ? `・${JG.combo} COMBO` : ""}`;
+  const box = $("#judge");
+  box.innerHTML = `<span class="j ${r.grade}"><span class="g">${label}</span><span class="s">${sub}</span></span>`;
+}
+function judgeTick() {
+  if (!JG.on || !S.mic || !S.playing || !S.pitch) return;
+  const t = cur();
+  const ph = judgePhrases();
+  for (let i = 0; i < ph.length; i++) {
+    const p = ph[i];
+    if (p.s > t) break;
+    if (JG.done.has(i) || t < p.e + 0.25) continue;
+    JG.done.add(i);
+    if (t - p.e > 2) continue;   // 跳轉過來時，前面沒唱的句子不評
+    const r = judgeLine(p);
+    if (r) judgeShow(r);
+  }
+}
+function judgeSummary() {
+  const n = Object.values(JG.tally).reduce((a, b) => a + b, 0);
+  if (!n) return;
+  toast(`這次：PERFECT ${JG.tally.perfect}・GREAT ${JG.tally.great}・GOOD ${JG.tally.good}・MISS ${JG.tally.miss}`, 6000);
 }
 
 /* 麥克風音量表、增益、自動調整（1.2） */
@@ -1929,6 +2041,7 @@ function startRecording() {
   if (!S.mic) return;
   if (S.loadingAudio || !S.bufs.inst) return toast("音訊還在載入，載入完再開始錄音");
   if (!S.playing) { if (S.loopA != null) S.t = S.loopA; S.live = []; play(); }
+  judgeReset();
   beginRecorder();
   $("#rec").textContent = "■ 停止"; $("#rec").classList.add("live");
 }
@@ -1936,6 +2049,7 @@ function stopRecording() {
   if (!S.rec) return;
   const r = S.rec; S.rec = null;
   endRec(r);
+  if (JG.on) judgeSummary();
   $("#rec").textContent = "● 錄一次"; $("#rec").classList.remove("live");
   if (S.playing) pause();
 }
@@ -2580,9 +2694,16 @@ async function openTimingPopup() {
   if (!S.song) return;
   TP.owner ||= Math.random().toString(36).slice(2, 12).replace(/[^a-z0-9]/g, "x").padEnd(6, "x");
   TP.lines = ""; TP.sent = null;
-  try { await api("/api/open-timing", { json: { owner: TP.owner } }); toast("已開啟逐句調整視窗，可以拉到旁邊、調整大小", 3500); }
-  catch (e) { return toast(e.message); }
   if (!TP.polling) tpPoll();
+  // 桌面版：用練唱台自己的視窗開；瀏覽器（直播分享用視窗等）：開一個小視窗
+  let ok = false;
+  try { if (window.pywebview?.api?.open_timing) ok = await window.pywebview.api.open_timing(TP.owner); } catch (e) { console.error(e); }
+  if (!ok) {
+    const w = window.open(`/timing?owner=${TP.owner}`, "liantai-timing", "popup=yes,width=560,height=860");
+    if (!w) return toast("視窗被瀏覽器擋下來了，請允許這個網站開啟彈出式視窗");
+    try { w.focus(); } catch {}
+  }
+  toast("已開啟逐句調整視窗，可以拉到旁邊、調整大小", 3500);
 }
 $("#timing-pop").onclick = openTimingPopup;
 async function tpPoll() {
@@ -2685,7 +2806,7 @@ let lastTimeText = "";
 function frame() {
   if (S.playing) {
     const t = cur();
-    if (S.loopA != null && S.loopB != null && t >= S.loopB) { S.t = S.loopA; S.live = []; play(); if (S.rec) splitRecording(); }
+    if (S.loopA != null && S.loopB != null && t >= S.loopB) { S.t = S.loopA; S.live = []; JG.done.clear(); play(); if (S.rec) splitRecording(); }
     else if (t >= S.dur) { pause(); S.t = S.dur; }
     S.dirty = true;
   }

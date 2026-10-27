@@ -19,7 +19,7 @@ import claude_api as C
 import pipeline as P
 import share as SH
 
-VERSION = "1.6.5"
+VERSION = "1.6.6"
 HOST, PORT = "127.0.0.1", int(os.environ.get("LIANTAI_PORT", "8765"))
 app = Flask(__name__, static_folder=str(P.ROOT / "static"), static_url_path="/static")
 app.config["MAX_CONTENT_LENGTH"] = 1024 * 1024 * 1024
@@ -497,9 +497,37 @@ def reprocess(sid):
     P.song_dir(sid)
     steps = (request.get_json(force=True) or {}).get("steps") or ["separate", "pitch", "lyrics"]
     steps = [s for s in steps if s in ("import", "separate", "pitch", "lyrics")]
+    body = request.get_json(force=True) or {}
+    if "vocal_mode" in body:   # 合唱模式：旋律與辨識改用主唱＋合音（多人輪流唱的歌）
+        P.update_meta(P.song_dir(sid), vocal_mode="all" if body["vocal_mode"] == "all" else None)
+    if body.get("max_quality"):
+        return jsonify(job=queue_max(sid))
     label = ",".join(steps)
     jid = jobs.find("process", sid, label) or jobs.submit("process", sid, P.process_song(sid, steps), label=label)
     return jsonify(job=jid)
+
+
+def queue_max(sid: str) -> str:
+    """1.6.5：用最高品質重新分離人聲（高品質模型＋最精細設定），再重新分析旋律、重新辨識歌詞。
+    合唱、合音多的歌，標準處理常把合音算進主唱，旋律線和辨識都會亂；這個選項最慢但最乾淨。
+    目前使用的線上／匯入歌詞不會被覆蓋（辨識結果另外保存，可以在歌詞面板切換）。"""
+    if not P.hq_ready():
+        P.start_hq_download()
+        raise P.UserError("最高品質的分離模型（約 900 MB）還在下載，進度顯示在歌曲庫上方，下載完成後再按一次")
+    jid = jobs.find("process", sid, "max")
+    if jid:
+        return jid
+    proc = P.process_song(sid, ["separate", "pitch", "lyrics"],
+                          cfg_override={"karaoke_quality": "high", "karaoke_overlap": 4})
+
+    def run(report):
+        proc(report)
+        P.update_meta(P.song_dir(sid), fine_suggest=False, fine_done=True, fine_queued=False)
+        try:
+            prerender_key(sid)   # 重新分軌會清掉舊的移調版本，重做預設 KEY 的版本
+        except Exception as e:
+            P.log_error("queue_max prerender", e)
+    return jobs.submit("process", sid, run, label="max")
 
 
 @app.get("/api/songs/<sid>/pitch")
@@ -515,10 +543,17 @@ def pitch(sid):
 def get_lyrics(sid):
     d = P.song_dir(sid)
 
+    meta = P.read_meta(d)
+
     def rd(n):
         if not (d / n).exists():
             return ""
         t = (d / n).read_text("utf-8")
+        if n == "lyrics_auto.lrc" or (n == "lyrics.lrc" and meta.get("lyrics_source") in (None, "whisper")):
+            c = P.strip_hallucinations(t)   # 辨識結果裡「優優獨播劇場」之類的幻覺句子
+            if c != t:
+                P.atomic_write_text(d / n, c)
+                t = c
         if P.is_japanese(t):   # 1.5 以前把日文歌詞轉成了台灣繁體（来→來）：改回日文字形並存回去
             j = P.tw_to_ja(t)
             if j != t:
@@ -1269,7 +1304,8 @@ def open_app():
         prof = P.ROOT / ".appwin"
         prof.mkdir(exist_ok=True)
         subprocess.Popen([exe, f"--app={url}", f"--user-data-dir={prof}", "--window-size=1380,920",
-                          "--no-first-run", "--no-default-browser-check", "--autoplay-policy=no-user-gesture-required"],
+                          "--no-first-run", "--no-default-browser-check", "--disable-extensions", "--disable-sync",
+                          "--autoplay-policy=no-user-gesture-required"],
                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     else:
         import webbrowser
@@ -1342,25 +1378,6 @@ def timing_cmds_get():
 @app.get("/timing")
 def timing_page():
     return send_from_directory(P.ROOT / "static", "timing.html", max_age=0)
-
-
-@app.post("/api/open-timing")
-def open_timing():
-    import re
-    owner = str((request.get_json(force=True) or {}).get("owner", ""))
-    if not re.fullmatch(r"[a-z0-9]{4,20}", owner):
-        raise P.UserError("代號格式不正確")
-    url = f"http://{HOST}:{PORT}/timing?owner={owner}"
-    exe = _app_browser()
-    if exe:
-        prof = P.ROOT / ".appwin"
-        prof.mkdir(exist_ok=True)
-        subprocess.Popen([exe, f"--app={url}", f"--user-data-dir={prof}", "--window-size=560,860",
-                          "--no-first-run", "--no-default-browser-check"],
-                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    else:
-        webbrowser.open(url)
-    return jsonify(ok=True)
 
 
 @app.post("/api/open-url")

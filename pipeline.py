@@ -2040,9 +2040,21 @@ def segment_notes(f0: np.ndarray) -> list[list[float]]:
 PITCH_ALGO = 2   # 1.4.2：旋律分析改良（補斷點、修八度）；舊的歌可以重新分析旋律
 
 
+def analysis_vocal(d: Path) -> np.ndarray:
+    """旋律分析與歌詞辨識用的人聲（16 kHz 單聲道）。
+    1.6.5：多人輪流唱的歌（例如 S.H.E），分離模型常把某位成員唱的整句歸到「合音」，主唱軌就斷斷續續；
+    這種歌設定成「合唱模式」後，改用主唱＋合音一起分析，音高追蹤會跟著當下最大聲（通常就是旋律）的那個人。"""
+    lead = read_audio(stem_path(d, "lead"), sr=PITCH_SR, mono=True)
+    if read_meta(d).get("vocal_mode") == "all" and stem_path(d, "back").exists():
+        back = read_audio(stem_path(d, "back"), sr=PITCH_SR, mono=True)
+        n = min(len(lead), len(back))
+        lead = lead[:n] + back[:n]
+    return lead
+
+
 def step_pitch(d: Path, cfg: dict, report) -> None:
-    report("分析主唱旋律", 0.55)
-    y16 = read_audio(stem_path(d, "lead"), sr=PITCH_SR, mono=True)
+    report("分析主唱旋律" if read_meta(d).get("vocal_mode") != "all" else "分析旋律（合唱模式：主唱＋合音）", 0.55)
+    y16 = analysis_vocal(d)
     midi = track_pitch(y16, cfg)
     notes = segment_notes(midi)
     data = {
@@ -2067,7 +2079,18 @@ def load_pitch(d: Path) -> tuple[np.ndarray, list]:
 
 # ---------------------------------------------------------------- 歌詞
 
-HALLUCINATION = re.compile(r"字幕|訂閱|订阅|點贊|点赞|感謝觀看|感谢观看|Amara|請不吝|请不吝|明鏡|明镜")
+# Whisper 在間奏、沒有人聲的地方常會「聽到」訓練資料裡影片字幕的片頭片尾字樣，這些句子直接丟掉
+HALLUCINATION = re.compile(
+    r"字幕|訂閱|订阅|點贊|点赞|感謝觀看|感谢观看|Amara|請不吝|请不吝|明鏡|明镜"
+    r"|優優獨播|优优独播|獨播劇場|独播剧场|YoYo\s*Television|Television\s*Series|Series\s*Exclusive"
+    r"|ご視聴|チャンネル登録|시청해\s*주셔서|구독"
+    r"|thanks?\s+(you\s+)?for\s+watching|please\s+subscribe|subtitles?\s+by", re.I)
+
+
+def strip_hallucinations(lrc: str) -> str:
+    """把辨識結果裡的幻覺句子拿掉（1.6.5 以前辨識的歌，開啟時順便清理）。"""
+    out = [l for l in lrc.splitlines() if not HALLUCINATION.search(re.sub(r"^(\[[^\]]*\])+", "", l))]
+    return "\n".join(out) + ("\n" if lrc.endswith("\n") and out else "")
 PUNCT_END = "，。！？、,.!?;；：:…"
 
 
@@ -2242,7 +2265,7 @@ def step_lyrics(d: Path, cfg: dict, report) -> None:
     report("載入語音辨識模型（第一次會下載）", 0.7)
     free_gpu()
     model = _whisper_model(cfg)
-    y16 = read_audio(stem_path(d, "lead"), sr=PITCH_SR, mono=True)
+    y16 = analysis_vocal(d)
     report("判斷歌詞語言", 0.74)
     meta0 = read_meta(d)
     song_lang = meta0.get("lyrics_language")          # 這首歌個別指定的語言（None＝依設定）
@@ -2883,10 +2906,10 @@ class Jobs:
                 self.update(jid, status="error", error=f"{type(e).__name__}: {e}")
 
 
-def process_song(song_id: str, steps: list[str]):
+def process_song(song_id: str, steps: list[str], cfg_override: dict | None = None):
     def run(report):
         d = song_dir(song_id)
-        cfg = load_config()
+        cfg = dict(load_config(), **(cfg_override or {}))
         meta = read_meta(d)
         if "import" in steps or not meta["steps"].get("import"):
             step_import(d, report)
@@ -3040,7 +3063,7 @@ def similarity(recognized: str, candidate: str) -> float | None:
     return round(sum(x.size for x in m.get_matching_blocks()) / len(a), 3)
 
 
-USER_AGENT = "LeihuLiantai/1.6.5 (+https://github.com/LeihuTW/Leihu-singsing)"   # HTTP 標頭只能用英文字
+USER_AGENT = "LeihuLiantai/1.6.6 (+https://github.com/LeihuTW/Leihu-singsing)"   # HTTP 標頭只能用英文字
 
 
 def _http_json(url: str, headers: dict | None = None, timeout: int = 8):

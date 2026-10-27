@@ -8,7 +8,7 @@
 </head>
 <body>
 <header class="bar">
-  <span class="logo">雷虎練唱台<small id="ver">1.6.5</small></span>
+  <span class="logo">雷虎練唱台<small id="ver">1.6.6</small></span>
   <nav class="row">
     <button id="nav-lib" class="tab cur">歌曲庫</button>
     <button id="nav-practice" class="tab" disabled>練唱</button>
@@ -67,6 +67,7 @@
     </div>
 
     <div class="stage">
+      <div id="judge" class="judge" aria-live="polite"></div>
       <div class="roll-wrap">
         <canvas id="roll" aria-label="旋律卷軸，點一下可跳到該時間"></canvas>
         <div id="hud" class="hud"></div>
@@ -113,6 +114,7 @@
           <button id="lyr-show" title="在旋律上方逐字顯示歌詞">字在旋律上</button>
           <button id="lyr-edit" title="拖曳調整每句、每個字的時間">調整</button>
           <button id="lyr-color" title="唱到哪個字就把哪個字上色；歌詞時間沒對準時可以關掉">逐字上色</button>
+          <button id="judge-btn" title="開麥克風唱的時候，每唱完一句跳出 PERFECT／GREAT／GOOD／MISS（測試中）">每句評分</button>
           <select id="lyr-kana" title="日文歌詞的讀音標註；平假名模式下讀音不對可以點一下修改" hidden><option value="hira">假名標音</option><option value="romaji">羅馬拼音</option><option value="off">不標讀音</option></select>
           <label for="lyr-size" title="旋律上歌詞的字級">字級</label>
           <input id="lyr-size" type="range" min="12" max="40" step="1" value="18" style="width:80px">
@@ -149,6 +151,7 @@
         <div class="row">
           <button id="mic">開啟麥克風</button>
           <button id="rec" class="rec" disabled>● 錄一次</button>
+          <label class="hint" title="開麥克風唱的時候，每唱完一句就跳出 PERFECT／GREAT／GOOD／MISS（測試中）"><input id="judge-on" type="checkbox"> 每句即時評價（測試）</label>
         </div>
         <div class="row">
           <label for="mic-dev" class="hint">麥克風</label>
@@ -197,6 +200,8 @@
             <option value="ja">日文</option><option value="en">英文</option><option value="ko">韓文</option><option value="yue">粵語</option>
           </select>
           <button id="lyr-redo" class="ghost" title="用選的語言重新辨識；目前用的線上或匯入的歌詞不會被覆蓋">重新辨識歌詞</button>
+          <button id="lyr-group" class="ghost" title="多人輪流唱的歌（例如 S.H.E）：分離常把某位成員的句子歸到合音，旋律斷斷續續。開啟後旋律分析與歌詞辨識改用主唱＋合音（不用重新分軌，很快）">合唱模式（多人輪流唱）</button>
+          <button id="lyr-redo-max" class="ghost" title="合唱、合音多的歌：先用最高品質重新分離人聲，再重新分析旋律、重新辨識歌詞（較慢）">用最高品質人聲分離重新辨識</button>
         </div>
         <div id="cand-box" class="cand" hidden>
           <b>找到線上歌詞，選一版使用</b>
