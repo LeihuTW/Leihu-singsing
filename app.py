@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -62,7 +63,7 @@ def status():
                    hq_model=P.HQ_KARAOKE,
                    claude_ready=bool(cfg.get("anthropic_api_key") or os.environ.get("ANTHROPIC_API_KEY")),
                    session_cost=C.summary()["session"]["cost_usd"],
-                   remote=dict(REMOTE), yt_pause=dict(P.YT_PAUSE), **_jobs_for_ui())
+                   remote=dict(REMOTE), yt_pause=dict(P.YT_PAUSE), update=dict(UPDATE), **_jobs_for_ui())
 
 
 UI_QUEUE_SHOWN = 30
@@ -1220,7 +1221,8 @@ def export_lyrics(sid):
     return jsonify(path=str(path))
 
 
-EXTERNAL_URLS = ("https://www.twitch.tv/leihustore", "https://github.com/LeihuTW/Leihu-singsing",
+RELEASES_URL = "https://github.com/LeihuTW/Leihu-singsing/releases/latest"
+EXTERNAL_URLS = ("https://www.twitch.tv/leihustore", "https://github.com/LeihuTW/Leihu-singsing", RELEASES_URL,
                  # 分享錄音：各平台的發文／上傳頁
                  "https://www.facebook.com", "https://www.instagram.com", "https://x.com/compose/post",
                  "https://www.threads.com")
@@ -1455,13 +1457,103 @@ def loudness_backfill() -> None:
             P.log_error("loudness_backfill", e)
 
 
+# GitHub 上有比較新的版本時，latest 是新版的版本號。can_install＝可以在程式裡一鍵更新；
+# state：""、downloading（下載安裝檔中，progress 0～1）、installing（已啟動安裝檔）、error
+UPDATE = {"latest": None, "url": RELEASES_URL, "can_install": False, "state": "", "progress": 0.0, "error": ""}
+_UPDATE_ASSET: dict = {}   # 新版安裝檔：name、url、size、digest
+_update_lock = threading.Lock()
+ASSET_PREFIX = "https://github.com/LeihuTW/Leihu-singsing/releases/download/"
+
+
+def _ver(s: str) -> tuple:
+    return tuple(int(x) for x in re.findall(r"\d+", s)[:3])
+
+
+def _installed_copy() -> bool:
+    """是用安裝檔裝的（有內建的 Python 和解除安裝程式）。開發用的原始碼資料夾不做自動更新。"""
+    return sys.platform == "win32" and (P.ROOT / "python" / "pythonw.exe").exists() \
+        and (P.ROOT / "uninstall.exe").exists()
+
+
+def check_update() -> None:
+    """啟動時到 GitHub 查一次最新版本，有新版就在畫面上方提示。沒網路或查不到就什麼都不顯示。"""
+    time.sleep(5)
+    try:
+        r = P._http_json("https://api.github.com/repos/LeihuTW/Leihu-singsing/releases/latest",
+                         {"Accept": "application/vnd.github+json"})
+        tag = str(r.get("tag_name") or "")
+        if _ver(tag) <= _ver(VERSION):
+            return
+        # 安裝檔要有 GitHub 提供的 SHA-256 檢查碼，下載完才能確認檔案完整、沒被換掉
+        asset = next((a for a in r.get("assets") or [] if str(a.get("name", "")).endswith("-Setup.exe")
+                      and str(a.get("browser_download_url", "")).startswith(ASSET_PREFIX)
+                      and str(a.get("digest") or "").startswith("sha256:")), None)
+        if asset:
+            _UPDATE_ASSET.update(name=asset["name"], url=asset["browser_download_url"],
+                                 size=int(asset.get("size") or 0), digest=asset["digest"])
+        UPDATE.update(latest=tag.lstrip("vV"),   # 下載頁連結固定用 releases/latest（開啟網址有白名單）
+                      can_install=bool(asset) and _installed_copy())
+        print(f"[update] 有新版本 {tag}（目前 {VERSION}，一鍵更新：{UPDATE['can_install']}）", flush=True)
+    except Exception as e:
+        P.log_error("check_update", e)
+
+
+def _download_and_install() -> None:
+    """下載新版安裝檔、核對檢查碼，再用安靜模式執行。安裝檔會先關閉程式，裝完自動重新開啟。"""
+    import hashlib
+    import urllib.request
+    a = _UPDATE_ASSET
+    try:
+        folder = Path(tempfile.gettempdir()) / "LeihuLiantai-update"
+        folder.mkdir(exist_ok=True)
+        exe, part = folder / a["name"], folder / (a["name"] + ".part")
+        h, got = hashlib.sha256(), 0
+        req = urllib.request.Request(a["url"], headers={"User-Agent": P.USER_AGENT})
+        with urllib.request.urlopen(req, timeout=30) as r, open(part, "wb") as f:
+            while chunk := r.read(1 << 16):
+                f.write(chunk)
+                h.update(chunk)
+                got += len(chunk)
+                UPDATE["progress"] = round(min(got / a["size"], 1.0), 3) if a["size"] else 0.0
+        if f"sha256:{h.hexdigest()}" != a["digest"]:
+            part.unlink(missing_ok=True)
+            raise P.UserError("下載的安裝檔不完整（檢查碼不符），請再試一次或到下載頁手動下載")
+        part.replace(exe)
+        UPDATE.update(state="installing", progress=1.0)
+        print(f"[update] 啟動安裝檔 {exe}", flush=True)
+        # /S＝安靜模式（沿用已下載的套件與模型，只更新需要的部分）；/D 一定要放最後、不能加引號
+        cmd = f'"{exe}" /S /D={P.ROOT}'
+        flags = 0x00000008 | 0x00000200   # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP：程式關閉時安裝檔不會跟著結束
+        try:
+            subprocess.Popen(cmd, creationflags=flags | 0x01000000, close_fds=True)   # CREATE_BREAKAWAY_FROM_JOB
+        except OSError:
+            subprocess.Popen(cmd, creationflags=flags, close_fds=True)
+    except Exception as e:
+        UPDATE.update(state="error", error=str(e) if isinstance(e, P.UserError) else f"更新失敗：{e}")
+        P.log_error("update", e)
+
+
+@app.post("/api/update/install")
+def update_install():
+    """畫面上按「更新」：在背景下載並執行新版安裝檔。"""
+    if not UPDATE["can_install"]:
+        raise P.UserError("這個版本沒辦法在程式裡更新，請到下載頁下載新版安裝檔")
+    with _update_lock:
+        if UPDATE["state"] in ("downloading", "installing"):
+            return jsonify(ok=True)
+        UPDATE.update(state="downloading", progress=0.0, error="")
+    threading.Thread(target=_download_and_install, daemon=True, name="update").start()
+    return jsonify(ok=True)
+
+
 def main():
     P.LIB.mkdir(exist_ok=True)
     watch_parent()
     resume_downloads()
     threading.Thread(target=prefetcher, daemon=True, name="prefetch").start()
     threading.Thread(target=loudness_backfill, daemon=True, name="loudness").start()
-    url = f"http://{HOST}:{PORT}"
+    threading.Thread(target=check_update, daemon=True, name="update").start()
+    url =f"http://{HOST}:{PORT}"
     print(f"\n  {P.APP_NAME} {VERSION} 已啟動：{url}\n  關閉這個視窗就會結束程式。\n")
     if "--no-browser" not in sys.argv:
         threading.Timer(1.2, lambda: webbrowser.open(url)).start()

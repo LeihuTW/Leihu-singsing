@@ -79,11 +79,12 @@ FunctionEnd
 Section "Install"
   AddSize 7000000
   ; 偵測之前的安裝：完整安裝過 → 問要更新還是全新重裝；裝到一半中斷 → 問要接著修復還是清除重裝
+  ; 程式內一鍵更新會用安靜模式（/S）執行：不問，直接選「是」（沿用已下載的套件與模型）
   ${If} ${FileExists} "$INSTDIR\python\python.exe"
     ${If} ${FileExists} "$INSTDIR\installed.json"
-      MessageBox MB_YESNOCANCEL|MB_ICONQUESTION "這台電腦已經安裝過雷虎練唱台。$\r$\n$\r$\n「是」：更新（沿用已下載的套件與模型，最快）$\r$\n「否」：全新重裝（清除舊的程式與套件，重新下載）$\r$\n「取消」：不安裝$\r$\n$\r$\n兩種方式都會保留歌曲庫、錄音與設定。" IDYES keep IDNO wipe
+      MessageBox MB_YESNOCANCEL|MB_ICONQUESTION "這台電腦已經安裝過雷虎練唱台。$\r$\n$\r$\n「是」：更新（沿用已下載的套件與模型，最快）$\r$\n「否」：全新重裝（清除舊的程式與套件，重新下載）$\r$\n「取消」：不安裝$\r$\n$\r$\n兩種方式都會保留歌曲庫、錄音與設定。" /SD IDYES IDYES keep IDNO wipe
     ${Else}
-      MessageBox MB_YESNOCANCEL|MB_ICONEXCLAMATION "偵測到上次安裝沒有完成。$\r$\n$\r$\n「是」：接著安裝，並自動檢查、修復不完整的檔案（建議）$\r$\n「否」：清除上次留下的檔案後全新安裝$\r$\n「取消」：不安裝$\r$\n$\r$\n兩種方式都會保留歌曲庫、錄音與設定。" IDYES keep IDNO wipe
+      MessageBox MB_YESNOCANCEL|MB_ICONEXCLAMATION "偵測到上次安裝沒有完成。$\r$\n$\r$\n「是」：接著安裝，並自動檢查、修復不完整的檔案（建議）$\r$\n「否」：清除上次留下的檔案後全新安裝$\r$\n「取消」：不安裝$\r$\n$\r$\n兩種方式都會保留歌曲庫、錄音與設定。" /SD IDYES IDYES keep IDNO wipe
     ${EndIf}
     Abort "已取消安裝"
   wipe:
@@ -134,6 +135,11 @@ Section "Install"
   WriteRegDWORD HKCU "${REGKEY}" "NoModify" 1
   WriteRegDWORD HKCU "${REGKEY}" "NoRepair" 1
   WriteRegDWORD HKCU "${REGKEY}" "EstimatedSize" 7000000
+
+  ; 安靜模式不會顯示完成頁，裝好直接重新開啟程式
+  ${If} ${Silent}
+    Call LaunchApp
+  ${EndIf}
 SectionEnd
 
 Section "Uninstall"
