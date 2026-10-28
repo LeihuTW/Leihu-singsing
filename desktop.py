@@ -39,8 +39,12 @@ def start_server(port: int) -> subprocess.Popen:
     log = open(ROOT / "logs" / "app.log", "a", encoding="utf-8", buffering=1)
     env = dict(os.environ, LIANTAI_PORT=str(port), PYTHONIOENCODING="utf-8", PYTHONUNBUFFERED="1")
     flags = 0x08000000 if sys.platform == "win32" else 0   # CREATE_NO_WINDOW
+    # 伺服器要用 python.exe（不是 pythonw.exe）執行：pythonw 沒有主控台，之後伺服器每次呼叫 ffmpeg、pip 等程式，
+    # Windows 都會替它們各開一個新的黑色視窗、閃一下就不見。用 python.exe 加上 CREATE_NO_WINDOW，
+    # 伺服器有一個看不見的主控台，這些程式會共用它，就不會再跳出視窗
+    py = Path(sys.executable).with_name("python.exe")
     return subprocess.Popen(
-        [sys.executable, str(ROOT / "app.py"), "--no-browser", "--parent-pid", str(os.getpid())],
+        [str(py if py.exists() else sys.executable), str(ROOT / "app.py"), "--no-browser", "--parent-pid", str(os.getpid())],
         cwd=str(ROOT), env=env, stdout=log, stderr=subprocess.STDOUT, creationflags=flags)
 
 
