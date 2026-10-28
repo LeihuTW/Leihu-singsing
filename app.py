@@ -20,7 +20,7 @@ import claude_api as C
 import pipeline as P
 import share as SH
 
-VERSION = "1.6.6"
+VERSION = "1.6.7"
 HOST, PORT = "127.0.0.1", int(os.environ.get("LIANTAI_PORT", "8765"))
 app = Flask(__name__, static_folder=str(P.ROOT / "static"), static_url_path="/static")
 app.config["MAX_CONTENT_LENGTH"] = 1024 * 1024 * 1024
@@ -1553,7 +1553,7 @@ def main():
     threading.Thread(target=prefetcher, daemon=True, name="prefetch").start()
     threading.Thread(target=loudness_backfill, daemon=True, name="loudness").start()
     threading.Thread(target=check_update, daemon=True, name="update").start()
-    url =f"http://{HOST}:{PORT}"
+    url = f"http://{HOST}:{PORT}"
     print(f"\n  {P.APP_NAME} {VERSION} 已啟動：{url}\n  關閉這個視窗就會結束程式。\n")
     if "--no-browser" not in sys.argv:
         threading.Timer(1.2, lambda: webbrowser.open(url)).start()
