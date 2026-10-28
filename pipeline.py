@@ -3073,7 +3073,7 @@ def similarity(recognized: str, candidate: str) -> float | None:
     return round(sum(x.size for x in m.get_matching_blocks()) / len(a), 3)
 
 
-USER_AGENT = "LeihuLiantai/1.6.7 (+https://github.com/LeihuTW/Leihu-singsing)"   # HTTP 標頭只能用英文字
+USER_AGENT = "LeihuLiantai/1.6.8 (+https://github.com/LeihuTW/Leihu-singsing)"   # HTTP 標頭只能用英文字
 
 
 def _http_json(url: str, headers: dict | None = None, timeout: int = 8):
@@ -3328,29 +3328,59 @@ def voice_phrases(d: Path, gap: float = 0.35, min_len: float = 0.3) -> list[tupl
 
 
 def align_synced_to_voice(lines: list[dict], d: Path, cand_dur: float | None, dur: float | None) -> tuple[list[dict], str]:
-    """網站的時間軸和這首歌對不上（版本長度不同）時，找最能對上主唱開口位置的整體位移（與速度比例）。"""
-    ph = voice_phrases(d)
-    if not ph or not lines:
+    """網站的時間軸和這首歌對不上（版本長度不同、前奏不同）時，找最能對上主唱開口位置的整體位移（與速度比例）。"""
+    r = voice_fit([l["t"] for l in lines], d, cand_dur, dur) if lines else None
+    if not r:
         return lines, ""
+    sc, off = r
+    out = [{**l, "t": round(max(0.0, l["t"] * sc + off), 2)} for l in lines]
+    return out, f"依主唱的聲音位置調整了網站的時間軸（{off:+.1f} 秒{'、速度比例 %.3f' % sc if sc != 1.0 else ''}）"
+
+
+def voice_fit(times: list[float], d: Path, cand_dur: float | None = None, dur: float | None = None):
+    """回傳 (速度比例, 位移秒數)；和原本的時間差不多就回傳 None。"""
+    ph = voice_phrases(d)
+    if not ph or not times:
+        return None
     onsets = np.array([a for a, _ in ph])
-    ts = np.array([l["t"] for l in lines], dtype=float)
+    ts = np.array(times, dtype=float)
     scales = [1.0]
     if cand_dur and dur and 0.8 < dur / cand_dur < 1.25:
         scales.append(dur / cand_dur)
+
+    if len(onsets) < 2:
+        return None
 
     def fit(t):
         k = np.clip(np.searchsorted(onsets, t), 1, len(onsets) - 1)
         dist = np.minimum(np.abs(t - onsets[k - 1]), np.abs(t - onsets[k]))
         return float(np.exp(-(dist ** 2) / (2 * 0.3 ** 2)).sum())
-    best = (fit(ts), 1.0, 0.0)
+    base = fit(ts)
+    best = (base, 1.0, 0.0)
+    # 1.6.8：MV 版前奏常常長很多，範圍放寬到 ±60 秒；先每 0.25 秒粗找，再在最佳位置附近每 0.02 秒細找
     for sc in scales:
-        for off in np.arange(-25, 25.01, 0.05):
+        coarse = max(((fit(ts * sc + off), float(off)) for off in np.arange(-60, 60.01, 0.25)))
+        for off in np.arange(coarse[1] - 0.5, coarse[1] + 0.501, 0.02):
             v = fit(ts * sc + off)
             if v > best[0] + 1e-9:
-                best = (v, sc, float(off))
-    _, sc, off = best
-    out = [{**l, "t": round(max(0.0, l["t"] * sc + off), 2)} for l in lines]
-    return out, f"依主唱的聲音位置調整了網站的時間軸（{off:+.1f} 秒{'、速度比例 %.3f' % sc if sc != 1.0 else ''}）"
+                best = (v, sc, round(float(off), 2))
+    v, sc, off = best
+    # 明顯比原本的時間軸更貼合主唱才調整，避免把本來就對的時間軸亂移
+    if v < base + max(1.0, 0.08 * len(ts)) or (abs(off) < 0.15 and sc == 1.0):
+        return None
+    return sc, off
+
+
+def lyrics_shift(d: Path, times: list[float]) -> tuple[float, float]:
+    """目前的歌詞整體和歌聲差了好幾秒時，依主唱開口位置找出整體位移與速度比例（畫面套用，逐字時間一起移動）。
+    不需要調整時回傳 (1, 0)。"""
+    ts = [float(t) for t in times if t is not None]
+    if len(ts) < 3:
+        raise UserError("含時間的歌詞太少，沒辦法自動校正")
+    if not (d / "pitch.json").exists():
+        raise UserError("這首歌還沒分析旋律，沒辦法依歌聲校正")
+    meta = read_meta(d)
+    return voice_fit(ts, d, None, meta.get("duration")) or (1.0, 0.0)
 
 
 def align_by_voice(lines: list[str], d: Path, bonus: float = 0.6) -> list[dict]:
@@ -3510,7 +3540,9 @@ def apply_candidate(d: Path, cand: dict) -> tuple[str, str]:
     reliable = recognition_reliable(meta) and (d / "lyrics_auto.lrc").exists()
     if synced and (diff is None or diff <= 3):
         lines = [l for l in parse_lrc(synced) if l["t"] is not None and l["text"]]
-        how = "使用網站提供的時間軸"
+        # 1.6.8：長度相同，前奏卻可能不同（MV 版、剪輯版），整體差好幾秒；依主唱開口位置檢查並校正
+        lines, how = align_synced_to_voice(lines, d, cand.get("duration"), dur)
+        how = how or "使用網站提供的時間軸"
     elif synced:
         # 網站有時間軸、但版本長度不同：不靠辨識結果，改依主唱的聲音位置整體平移
         lines = [l for l in parse_lrc(synced) if l["t"] is not None and l["text"]]

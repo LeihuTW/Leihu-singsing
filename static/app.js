@@ -1520,12 +1520,36 @@ function parseTimeInput(v) {
   const m = String(v).trim().match(/^(?:(\d+):)?(\d+(?:\.\d+)?)$/);
   return m ? (+(m[1] || 0)) * 60 + +m[2] : null;
 }
+/* 歌詞順序一律視為正確，調整時間絕不改變順序。
+   對準／調整的那一句以「現在的時間」為準；前面的句子如果因此排到它後面（例如前面錯太多、時間太晚），
+   就往前推到它之前，後面的句子排到它前面時往後推，每句至少間隔 0.1 秒 */
+function moveLineTo(x, nt) {
+  nt = Math.max(0, Math.round(nt * 100) / 100);
+  const d = nt - x.t;
+  if (!d) return;
+  x.t = nt;
+  if (x.chars) x.chars.forEach(u => (u.t = Math.max(0, Math.round((u.t + d) * 100) / 100)));
+}
+function keepOrder(i) {
+  let moved = 0;
+  for (let j = i - 1; j >= 0; j--) {   // 前面的句子：不能晚於下一句
+    const lim = Math.round((S.lines[j + 1].t - 0.1) * 100) / 100;
+    if (S.lines[j].t <= lim) break;
+    moveLineTo(S.lines[j], lim); moved++;
+  }
+  for (let j = i + 1; j < S.lines.length; j++) {   // 後面的句子：不能早於上一句
+    const lim = Math.round((S.lines[j - 1].t + 0.1) * 100) / 100;
+    if (S.lines[j].t >= lim) break;
+    moveLineTo(S.lines[j], lim); moved++;
+  }
+  return moved;
+}
 function shiftLine(l, nt) {
   const i = S.lines.indexOf(l);
-  nt = Math.max(0, Math.round(nt * 100) / 100);
-  const d = nt - l.t;
-  l.t = nt;
-  if (l.chars) l.chars.forEach(u => (u.t = Math.round((u.t + d) * 100) / 100));
+  if (i < 0) return;
+  moveLineTo(l, nt);
+  const moved = keepOrder(i);
+  if (moved) toast(`為了維持歌詞順序，${moved} 句相鄰的歌詞也一起移動了`, 2500);
   setLineEnds(); commitLines(false); $("#timing-box").dataset.dirty = "1";
 }
 /* 第一句開始時間：整份歌詞一起平移（1.3.1） */
@@ -1544,13 +1568,10 @@ function shiftAllLyrics(firstT) {
 function shiftFrom(i, nt) {
   const l = S.lines[i];
   if (!l) return toast("還沒有含時間的歌詞");
-  const floor = i > 0 ? S.lines[i - 1].t + 0.1 : 0;
-  const d = Math.round((Math.max(floor, nt) - l.t) * 100) / 100;
+  const d = Math.round((Math.max(0, nt) - l.t) * 100) / 100;
   if (!d) return;
-  for (const x of S.lines.slice(i)) {
-    x.t = Math.max(0, Math.round((x.t + d) * 100) / 100);
-    if (x.chars) x.chars.forEach(u => (u.t = Math.max(0, Math.round((u.t + d) * 100) / 100)));
-  }
+  for (const x of S.lines.slice(i)) moveLineTo(x, x.t + d);
+  keepOrder(i);   // 往前移時，前面時間太晚的句子推到這句之前（順序不變）
   setLineEnds(); commitLines(true);
   toast(`從「${l.text.slice(0, 14)}${l.text.length > 14 ? "…" : ""}」起 ${S.lines.length - i} 句${d > 0 ? "延後" : "提前"} ${Math.abs(d).toFixed(2)} 秒`, 2500);
 }
@@ -1570,6 +1591,20 @@ function parseTime(v) {
   return m ? (+(m[1] || 0)) * 60 + +m[2] : NaN;
 }
 $("#fl-now").onclick = () => shiftAllLyrics(cur());
+/* 歌詞整體差好幾秒（例如 MV 版前奏比較長）時，依主唱開口位置自動找出位移，逐字時間一起移動 */
+$("#fl-auto").onclick = async () => {
+  if (!S.song || S.lines.length < 3) return toast("含時間的歌詞太少，沒辦法自動校正");
+  const b = $("#fl-auto"); b.disabled = true;
+  try {
+    const r = await api(`/api/songs/${S.song.id}/lyrics/autoshift`, { json: { times: S.lines.map(l => l.t) } });
+    if (r.scale === 1 && !r.offset) return toast("歌詞時間和歌聲已經對得上，不需要調整", 3000);
+    const f = t => Math.max(0, Math.round((t * r.scale + r.offset) * 100) / 100);
+    for (const l of S.lines) { l.t = f(l.t); if (l.chars) l.chars.forEach(u => (u.t = f(u.t))); }
+    setLineEnds(); commitLines(true);
+    toast(`已依歌聲校正：整體${r.offset > 0 ? "延後" : "提前"} ${Math.abs(r.offset).toFixed(2)} 秒${r.scale !== 1 ? `、速度比例 ${r.scale}` : ""}。中段之後還有落差，可以用「這句以後對準目前位置」`, 6000);
+  } catch (e) { toast(e.message); }
+  finally { b.disabled = false; }
+};
 $$("[data-fl]").forEach(b => (b.onclick = () => S.lines.length && shiftAllLyrics(S.lines[0].t + +b.dataset.fl)));
 $("#fl-time").addEventListener("change", e => {
   const t = parseTime(e.target.value);

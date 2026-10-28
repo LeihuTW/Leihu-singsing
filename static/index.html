@@ -8,7 +8,7 @@
 </head>
 <body>
 <header class="bar">
-  <span class="logo">雷虎練唱台<small id="ver">1.6.7</small></span>
+  <span class="logo">雷虎練唱台<small id="ver">1.6.8</small></span>
   <nav class="row">
     <button id="nav-lib" class="tab cur">歌曲庫</button>
     <button id="nav-practice" class="tab" disabled>練唱</button>
@@ -215,6 +215,7 @@
             <label for="fl-time" class="hint">第一句開始</label>
             <input id="fl-time" type="text" inputmode="decimal" placeholder="0:00.00" aria-label="第一句歌詞的開始時間">
             <button id="fl-now" title="把第一句對到目前的播放位置">對準目前位置</button>
+            <button id="fl-auto" title="歌詞內容對、但整體早了或晚了好幾秒時：依主唱開口的位置自動找出要移多少秒">依歌聲自動校正</button>
           </div>
           <div class="row">
             <button class="ghost" data-fl="-0.5">−0.5 秒</button><button class="ghost" data-fl="-0.1">−0.1</button>

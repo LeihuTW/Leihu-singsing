@@ -20,7 +20,7 @@ import claude_api as C
 import pipeline as P
 import share as SH
 
-VERSION = "1.6.7"
+VERSION = "1.6.8"
 HOST, PORT = "127.0.0.1", int(os.environ.get("LIANTAI_PORT", "8765"))
 app = Flask(__name__, static_folder=str(P.ROOT / "static"), static_url_path="/static")
 app.config["MAX_CONTENT_LENGTH"] = 1024 * 1024 * 1024
@@ -1094,6 +1094,14 @@ def lyrics_candidates(sid):
     cands = json.loads(p.read_text("utf-8")) if p.exists() else []
     return jsonify(pending=bool(meta.get("lyrics_pending")), results=cands,
                    recognized=P.recognized_text(d)[:300])
+
+
+@app.post("/api/songs/<sid>/lyrics/autoshift")
+def lyrics_autoshift(sid):
+    """1.6.8：依主唱開口位置，算出目前歌詞整體要移多少秒（由畫面套用）。"""
+    times = (request.get_json(force=True) or {}).get("times") or []
+    sc, off = P.lyrics_shift(P.song_dir(sid), times[:2000])
+    return jsonify(scale=sc, offset=off)
 
 
 @app.post("/api/songs/<sid>/lyrics/apply")
