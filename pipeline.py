@@ -2782,6 +2782,9 @@ class Jobs:
     def submit(self, kind: str, song_id: str, fn, label: str = "") -> str:
         jid = uuid.uuid4().hex[:10]
         with self.cv:
+            old = time.time() - 3600   # 結束超過一小時的工作紀錄不用再留（大量匯入時會累積上千筆）
+            for k in [k for k, j in self.state.items() if j.get("finished", old + 1) < old]:
+                del self.state[k]
             self.state[jid] = {"id": jid, "kind": kind, "song": song_id, "label": label,
                                "status": "queued", "step": "排隊中", "progress": 0.0,
                                "error": None, "created": time.time()}
@@ -2823,7 +2826,12 @@ class Jobs:
 
     def update(self, jid: str, **kw) -> None:
         with self.lock:
-            self.state[jid].update(kw)
+            j = self.state.get(jid)
+            if j is None:
+                return
+            if kw.get("status") in ("done", "error", "cancelled"):
+                kw.setdefault("finished", time.time())
+            j.update(kw)
 
     def get(self, jid: str) -> dict | None:
         with self.lock:
@@ -2835,7 +2843,7 @@ class Jobs:
         order = self.order()
         with self.lock:
             out = [dict(j, order=order.get(j["id"])) for j in self.state.values() if j["status"] != "cancelled"
-                   and (j["status"] in ("queued", "running") or j["created"] > cutoff)]
+                   and (j["status"] in ("queued", "running") or j.get("finished", j["created"]) > cutoff)]
         # 執行中的在前，排隊中的依目前順序
         return sorted(out, key=lambda j: (j["status"] != "running", j["order"] if j["order"] is not None else -1,
                                           j["created"]))
@@ -2902,7 +2910,7 @@ class Jobs:
             self.update(jid, status="running", step="開始")
 
             def report(step, p, jid=jid):
-                if self.state[jid].get("cancel"):
+                if (self.state.get(jid) or {}).get("cancel"):
                     raise JobCancelled()
                 self.update(jid, step=step, progress=round(p, 3))
             try:

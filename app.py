@@ -104,6 +104,22 @@ REMOTE = {"seq": 0, "id": None, "key": 0}
 _remote_lock = threading.Lock()
 
 
+@app.before_request
+def _local_only():
+    """練唱台只給這台電腦自己的畫面和程式用。
+    瀏覽器裡其他網站的網頁可以對 127.0.0.1 送出 POST（不需要預檢的簡單請求），
+    不擋的話任何網站都能趁練唱台開著時改設定、加下載、清歌單；所以：
+    1. Host 不是本機位址的一律拒絕（防 DNS rebinding）；
+    2. 會改資料的請求（非 GET）如果帶了 Origin，必須是練唱台自己。"""
+    host = (request.host or "").rsplit(":", 1)[0].strip("[]").lower()
+    if host not in ("127.0.0.1", "localhost", "::1"):
+        abort(403)
+    if request.method not in ("GET", "HEAD", "OPTIONS"):
+        origin = request.headers.get("Origin")
+        if origin and origin.rstrip("/").lower() not in (f"http://127.0.0.1:{PORT}", f"http://localhost:{PORT}"):
+            abort(403)
+
+
 @app.post("/api/remote/open")
 def remote_open():
     # 只給本機程式呼叫：瀏覽器裡的網頁送出的請求一定帶 Origin，一律拒絕，
@@ -1446,6 +1462,8 @@ def timing_state_put():
     if not owner:
         raise P.UserError("缺少 owner")
     with _TCOND:
+        for o in [o for o, t in TIMING["seen"].items() if time.time() - t > 3600 and o != owner]:   # 很久沒開的調整視窗
+            TIMING["seen"].pop(o, None); TIMING["state"].pop(o, None)
         st = TIMING["state"].setdefault(owner, {})
         st.update(body)
         TIMING["sseq"] += 1
@@ -1554,8 +1572,12 @@ def watch_parent() -> None:
 
 
 def remove_duet_leftovers() -> None:
-    """1.7.0 測試版的「男女對唱」已經拿掉：清掉它留下的模型（約 530 MB）、每首歌的男聲／女聲軌與聲部標記。"""
+    """1.7.0 測試版的「男女對唱」已經拿掉：清掉它留下的模型（約 530 MB）、每首歌的男聲／女聲軌與聲部標記。
+    只需要做一次，做完留一個記號，之後啟動不用再掃整個歌曲庫。"""
     import shutil
+    flag = P.ROOT / ".duet_cleaned"
+    if flag.exists():
+        return
     for pat in ("model_chorus_bs_roformer_ep_267_sdr_24.1275.ckpt*", "config_chorus_male_female_bs_roformer.yaml*"):
         for f in P.MODELS.glob(pat):
             try:
@@ -1583,6 +1605,10 @@ def remove_duet_leftovers() -> None:
                         P.write_meta(d, m)
             except Exception as e:
                 P.log_error("remove_duet_leftovers", e)
+    try:
+        flag.write_text("1", "utf-8")
+    except OSError:
+        pass
 
 
 def loudness_backfill() -> None:

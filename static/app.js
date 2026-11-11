@@ -401,13 +401,15 @@ function queueAdd(id) {
   toast(`已加入待唱清單（第 ${LIVE.queue.length} 首）`, 1500);
 }
 async function queueNext() {
-  const id = LIVE.queue.shift();
+  const id = LIVE.queue[0];
   if (!id) return toast("待唱清單是空的");
-  saveQueue();
   pause();
-  await openSong(id);
+  try { await openSong(id); }
+  catch (e) { return toast("載入失敗，這首還留在待唱清單：" + e.message, 4000); }
+  LIVE.queue = LIVE.queue.filter(x => x !== id);   // 載入成功才從清單拿掉
+  saveQueue();
   renderSongs();
-  toast(`已載入：${S.song.title}，按播放開始`, 3000);
+  if (S.song && S.song.id === id) toast(`已載入：${S.song.title}，按播放開始`, 3000);
 }
 $("#lq-next").onclick = () => queueNext();
 $("#lq-clear").onclick = () => { if (LIVE.queue.length && confirm("清空待唱清單？")) { LIVE.queue = []; saveQueue(); } };
@@ -539,13 +541,18 @@ function renderLiveSongs(box, list) {
 
 function renderSongs() {
   const box = $("#songs");
+  const keepTop = box.scrollTop;
   box.innerHTML = "";
   if (!LIB.songs.length) {
     box.innerHTML = `<div class="empty">歌曲庫是空的。匯入第一首歌，處理完就能開始練。</div>`;
     return;
   }
   const list = LIB.songs.filter(songMatches);
-  if (window.LIVE && LIVE.on) { renderQueue(); return renderLiveSongs(box, list); }
+  if (window.LIVE && LIVE.on) {   // 背景工作完成時會重畫清單：保留捲動位置，不會突然跳回最上面
+    renderQueue(); renderLiveSongs(box, list);
+    box.scrollTop = keepTop;
+    return;
+  }
   const inCat = s => !(LIB.cur === "__none__" && s.category) && (LIB.cur === "__all__" || LIB.cur === "__none__" || s.category === LIB.cur);
   const sim = LIB.q ? LIB.similar.map(id => LIB.songs.find(s => s.id === id)).filter(s => s && inCat(s) && !list.includes(s)) : [];
   if (!list.length && !sim.length) {
@@ -1020,9 +1027,13 @@ async function repitch(id) {
 async function openSong(id) {
   pause();
   stopTap();
+  const req = (S.openReq = (S.openReq || 0) + 1);   // 連點兩首時只有最後一次有效，不會歌詞和音樂對不上
   const [song, pitch, lyr] = await Promise.all([
     api(`/api/songs/${id}`), api(`/api/songs/${id}/pitch`), api(`/api/songs/${id}/lyrics`),
   ]);
+  if (req !== S.openReq) return;
+  pause();
+  S.bufs = {}; S.dur = 0;   // 上一首的音訊先清掉：新的這首還沒載好（或載入失敗）時按播放，不會播到上一首
   S.song = song; titles[id] = song.title; syncGroupBtn();
   if (window.LIVE) { LIVE.played = 0; LIVE.logged = null; }
   S.pitch = { hop: pitch.hop, midi: Float32Array.from(pitch.midi, v => (v == null ? NaN : v)) };
