@@ -19,7 +19,7 @@ function applyFont(f) {
   if (f === "huninn" && document.fonts) document.fonts.load('20px "jf open huninn"').catch(() => {});
 }
 applyFont(store.get("font", "huninn"));
-fetch("/api/config").then(r => r.json()).then(c => { applyFont(c.font); OUT_LABEL = c.audio_out || ""; applySink(); }).catch(() => {});
+fetch("/api/config").then(r => r.json()).then(c => { applyFont(c.font); OUT_LABEL = c.audio_out || ""; MON_LABEL = c.monitor_out || ""; applySink(); }).catch(() => {});
 
 async function api(path, opts = {}) {
   const o = { ...opts };
@@ -247,7 +247,7 @@ $("#live-toggle").onclick = () => setLive(!LIVE.on);
 $$("[data-live-preset]").forEach(b => (b.onclick = () => $(`[data-preset="${b.dataset.livePreset}"]`).click()));
 /* 音量：只影響歌曲（主唱／合音／伴奏），導引音和麥克風不受影響 */
 S.masterVol = store.get("masterVol", 1);
-function syncLiveVol() { $("#live-vol").value = String(S.masterVol); $("#live-vol-v").textContent = Math.round(S.masterVol * 100); if (S.master) S.master.gain.value = S.masterVol; }
+function syncLiveVol() { $("#live-vol").value = String(S.masterVol); $("#live-vol-v").textContent = Math.round(S.masterVol * 100); if (S.master) S.master.gain.value = S.masterVol; syncMonGain(); }
 $("#live-vol").oninput = e => { S.masterVol = +e.target.value; store.set("masterVol", S.masterVol); syncLiveVol(); };
 syncLiveVol();
 function liveAdjust(which, d) {
@@ -1217,6 +1217,7 @@ function songBus() {
     S.bus = g;
   }
   S.bus.gain.value = Math.pow(10, normGain() / 20);
+  syncMonGain();
   return S.bus;
 }
 /* 1.6.5：依開著的音軌（音量 ≥ 50%）那一種組合的實際響度計算要加減多少，
@@ -1224,7 +1225,8 @@ function songBus() {
 function songNormDb() {
   const m = S.song;
   if (!m) return 0;
-  const key = ["lead", "back", "inst"].map(k => ((S.vol[k] ?? 1) >= 0.5 ? "1" : "0")).join("");
+  // 「原唱只給我聽」時觀眾聽不到原唱：音量標準化以沒有原唱的組合為準
+  const key = ["lead", "back", "inst"].map(k => ((S.vol[k] ?? 1) >= 0.5 && !(k === "lead" && S.leadPrivate) ? "1" : "0")).join("");
   const lufs = (m.combo_lufs || {})[key];
   if (lufs == null || m.norm_target == null) return m.norm_gain_db || 0;
   const [lo, hi] = m.norm_range || [-15, 12];
@@ -1234,7 +1236,7 @@ function normGain() { return S.normVol && S.song ? songNormDb() : 0; }
 function syncNormUi() {
   $("#norm-vol").checked = S.normVol;
   const db = songNormDb();
-  const key = ["lead", "back", "inst"].map(k => ((S.vol[k] ?? 1) >= 0.5 ? "1" : "0")).join("");
+  const key = ["lead", "back", "inst"].map(k => ((S.vol[k] ?? 1) >= 0.5 && !(k === "lead" && S.leadPrivate) ? "1" : "0")).join("");
   const lufs = S.song ? ((S.song.combo_lufs || {})[key] ?? S.song.lufs) : null;
   $("#norm-db").textContent = lufs != null
     ? `這首 ${lufs.toFixed(1)} LUFS，${S.normVol ? (db >= 0 ? "+" : "") + db.toFixed(1) + " dB" : "未調整"}` : "";
@@ -1279,10 +1281,69 @@ function startNode(k, buf, when, pos) {
   const c = ac();
   const src = c.createBufferSource(); src.buffer = buf;
   const g = c.createGain(); g.gain.value = S.vol[k] ?? 1;
-  src.connect(g).connect(["lead", "back", "inst"].includes(k) ? songBus() : c.destination);
+  src.connect(g);
+  const bus = songBus();
+  const mon = monActive() ? S.mon : null;
+  if (S.leadPrivate && k === "lead") {                             // 原唱：只進自己聽的那一路
+    if (mon) g.connect(mon.lead);
+    else ensureMonitor();   // 自己聽的那一路還沒接好（剛開程式）：原唱先不出聲，絕不送到觀眾那邊
+  }
+  else if (["lead", "back", "inst"].includes(k)) g.connect(bus);   // 觀眾聽的混音（自己那一路也會收到一份）
+  else if (mon && k === "guide") g.connect(mon.dest);              // 導引音：只給自己
+  else { g.connect(c.destination); if (mon) g.connect(mon.dest); }
   src.start(when, pos);
   S.nodes[k] = { src, g };
 }
+
+/* ------------------------------------------------------------ 原唱只給我聽
+   觀眾：伴奏＋合音，走原本的「音樂輸出裝置」。自己：同一份混音再加上原唱和導引音，
+   經由另一個輸出裝置（耳機）播出。兩路在耳機裡是同一條路徑，所以原唱和伴奏不會有時間差 */
+let MON_LABEL = "";
+S.leadPrivate = store.get("leadPrivate", false);
+function monActive() { return !!(S.leadPrivate && S.mon && S.mon.ok); }
+function syncMonGain() {
+  if (S.mon && S.bus) S.mon.lead.gain.value = S.bus.gain.value * (S.masterVol ?? 1);   // 原唱跟著音量標準化和音量拉桿
+}
+async function setupMonitor() {
+  if (!S.leadPrivate) { if (S.mon) { S.mon.ok = false; S.mon.el.pause(); } return false; }
+  if (!MON_LABEL) throw new Error("還沒選「自己聽的裝置」：請到設定選你的耳機");
+  if (MON_LABEL === OUT_LABEL) throw new Error("「自己聽的裝置」和「音樂輸出裝置」是同一個，觀眾也會聽到原唱；請到設定選不同的裝置");
+  const d = (await outDevices()).find(x => x.label === MON_LABEL);
+  if (!d) throw new Error(`找不到自己聽的裝置「${MON_LABEL}」，請確認耳機有接上`);
+  const c = ac();
+  songBus();
+  if (!S.mon) {
+    const dest = c.createMediaStreamDestination(), lead = c.createGain(), el = new Audio();
+    lead.connect(dest); S.master.connect(dest);
+    el.srcObject = dest.stream;
+    S.mon = { dest, lead, el, ok: false };
+  }
+  if (typeof S.mon.el.setSinkId !== "function") throw new Error("這個視窗不支援指定第二個輸出裝置");
+  await S.mon.el.setSinkId(d.deviceId);
+  await S.mon.el.play();
+  S.mon.ok = true;
+  syncMonGain();
+  return true;
+}
+let monPending = false;
+function ensureMonitor() {
+  if (monPending) return;
+  monPending = true;
+  setupMonitor().then(() => { if (S.playing) { pause(); play(); } })
+    .catch(e => toast(e.message + "。原唱目前靜音（沒有送給觀眾）", 7000))
+    .finally(() => { monPending = false; $("#lead-private").classList.toggle("on", S.leadPrivate); });
+}
+async function setLeadPrivate(on, quiet) {
+  S.leadPrivate = on; store.set("leadPrivate", on);
+  try { await setupMonitor(); }
+  catch (e) { S.leadPrivate = false; store.set("leadPrivate", false); if (S.mon) S.mon.ok = false; if (!quiet) toast(e.message, 6000); }
+  $("#lead-private").classList.toggle("on", S.leadPrivate);
+  syncNormUi();
+  if (S.playing) { pause(); play(); }   // 重新接線
+  if (!quiet && S.leadPrivate) toast(`原唱只從「${MON_LABEL}」播出，觀眾那邊只有伴奏和合音`, 4000);
+}
+$("#lead-private").onclick = () => setLeadPrivate(!S.leadPrivate);
+$("#lead-private").classList.toggle("on", S.leadPrivate);
 /* ------------------------------------------------------------ 1.7：旋律譜圖片 */
 (() => {
   const sel = $("#sd-tonic");
@@ -3363,7 +3424,7 @@ async function openSettings(focusUsage) {
   $("#cfg-hotkeys").checked = cfg.global_hotkeys !== false;
   renderHotkeys();
   $("#cfg-font").value = cfg.font || "huninn";
-  fillOutDevices(cfg.audio_out || "");
+  fillOutDevices(cfg.audio_out || "", cfg.monitor_out || "");
   $("#cfg-sep").value = cfg.separation_model;
   $("#cfg-kara").value = cfg.karaoke_model;
   $("#cfg-kq").value = cfg.karaoke_quality || "auto";
@@ -3396,24 +3457,27 @@ async function saveSettings(extra = {}) {
     await api("/api/config", { json: {
       anthropic_api_key: $("#cfg-key").value, claude_model: $("#cfg-model").value.trim(),
       whisper_model: $("#cfg-whisper").value, lyrics_language: $("#cfg-lang").value,
-      convert_to_taiwan: $("#cfg-tw").checked, auto_recognize_lyrics: $("#cfg-autorec").checked, global_hotkeys: $("#cfg-hotkeys").checked, font: $("#cfg-font").value, audio_out: $("#cfg-out").value, separation_model: $("#cfg-sep").value.trim(),
+      convert_to_taiwan: $("#cfg-tw").checked, auto_recognize_lyrics: $("#cfg-autorec").checked, global_hotkeys: $("#cfg-hotkeys").checked, font: $("#cfg-font").value, audio_out: $("#cfg-out").value, monitor_out: $("#cfg-mon").value, separation_model: $("#cfg-sep").value.trim(),
       karaoke_model: $("#cfg-kara").value.trim(), karaoke_quality: $("#cfg-kq").value, karaoke_overlap: +$("#cfg-kov").value, auto_fine: $("#cfg-autofine").checked, pitch_model: $("#cfg-pitch").value,
       balance_usd: $("#cfg-balance").value.trim().replace(/^US\$|^\$/, ""), ...extra,
     } });
     applyFont($("#cfg-font").value);
     OUT_LABEL = $("#cfg-out").value; applySink();
+    MON_LABEL = $("#cfg-mon").value;
+    if (S.leadPrivate) setLeadPrivate(true, false);   // 裝置改了：重新接到新的裝置
     $("#settings").hidden = true; toast("設定已儲存"); pollJobs();
   } catch (e) { toast(e.message); }
 }
-async function fillOutDevices(saved) {
-  const sel = $("#cfg-out");
-  if (!("setSinkId" in AudioContext.prototype)) { sel.disabled = true; sel.title = "這個瀏覽器不支援選擇輸出裝置"; }
+async function fillOutDevices(saved, savedMon = "") {
+  if (!("setSinkId" in AudioContext.prototype)) { $("#cfg-out").disabled = true; $("#cfg-out").title = "這個瀏覽器不支援選擇輸出裝置"; }
   const list = await outDevices().catch(() => []);
-  const opts = [["", "系統預設"], ...list.map(d => [d.label, d.label])];
-  if (saved && !list.some(d => d.label === saved)) opts.push([saved, `${saved}（目前沒有連接）`]);
-  sel.innerHTML = "";
-  for (const [v, t] of opts) { const o = document.createElement("option"); o.value = v; o.textContent = t; sel.append(o); }
-  sel.value = saved;
+  for (const [sel, val, none] of [[$("#cfg-out"), saved, "系統預設"], [$("#cfg-mon"), savedMon, "（未設定）"]]) {
+    const opts = [["", none], ...list.map(d => [d.label, d.label])];
+    if (val && !list.some(d => d.label === val)) opts.push([val, `${val}（目前沒有連接）`]);
+    sel.innerHTML = "";
+    for (const [v, t] of opts) { const o = document.createElement("option"); o.value = v; o.textContent = t; sel.append(o); }
+    sel.value = val;
+  }
 }
 $("#open-in-browser").onclick = () => api("/api/open-app", { method: "POST", json: {} })
   .then(r => { $("#settings").hidden = true; toast(r.app ? "已開啟分享用視窗；Discord 分享時選那個視窗，第一次用麥克風時按「允許」" : "已用瀏覽器開啟練唱台；Discord 分享時選那個瀏覽器視窗", 6000); })

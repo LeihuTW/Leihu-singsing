@@ -140,6 +140,7 @@
       <div class="row">
         <button data-live-preset="orig">原曲</button>
         <button data-live-preset="karaoke">卡拉OK</button>
+        <button id="lead-private" title="原唱和導引音只從「自己聽的裝置」（耳機）播出，觀眾那邊只有伴奏和合音。要先到設定選好兩個不同的裝置">原唱只給我聽</button>
         <label class="lv-vol">音量 <input id="live-vol" type="range" min="0" max="1.5" step="0.01" value="1" aria-label="音量"><span id="live-vol-v" class="num">100</span></label>
       </div>
       <div class="row">
@@ -525,11 +526,14 @@
       <span id="hk-msg" class="hint">點按鍵欄位後按下新的組合（要加 Ctrl、Alt、Shift 或 Win；F13～F24 可以單獨使用），Esc 取消。改完馬上生效，只控制桌面版視窗。</span>
     </div>
     <label class="row"><input id="cfg-autorec" type="checkbox"> 匯入時自動辨識歌詞（關閉時直接套用線上搜尋到的第一個版本，處理也比較快）</label>
-    <label class="row"><input id="cfg-tw" type="checkbox"> 中文歌詞轉成台灣繁體用字</label>
+    <label class="row"><input id="cfg-tw" type="checkbox"> 簡體歌詞轉成繁體（只轉字形，不改用詞）</label>
     <div class="field" id="out-field"><span>音樂輸出裝置（練唱、試聽的聲音從這裡播出）</span>
       <select id="cfg-out"><option value="">系統預設</option></select>
       <span class="hint">Discord「分享應用程式」分享這個桌面視窗時沒有聲音。要給朋友看畫面又聽到音樂，按下面的按鈕開一個直播分享用的練唱台視窗（外觀一樣），Discord 分享那個視窗，畫面和音樂會一起送出。</span>
       <div><button id="open-in-browser" type="button">開啟直播分享用視窗</button></div></div>
+    <div class="field"><span>自己聽的裝置（「原唱只給我聽」用：選你的耳機）</span>
+      <select id="cfg-mon"><option value="">（未設定）</option></select>
+      <span class="hint">開啟「原唱只給我聽」後：上面的「音樂輸出裝置」只播伴奏和合音（給觀眾，OBS 收這個裝置），這裡選的裝置會多聽到原唱和導引音。兩個要選不同的裝置；只有一副耳機時，觀眾那邊可以裝免費的虛擬音效線 VB-Cable。</span></div>
     <label class="field"><span>字體（練唱畫面、歌詞與匯出的影片／成績卡）</span>
       <select id="cfg-font"><option value="huninn">粉圓（內建 jf open 粉圓）</option><option value="kai">楷書（歌詞楷書、介面黑體）</option><option value="sans">黑體（微軟正黑體）</option></select></label>
     <label class="field"><span>人聲分離模型</span><input id="cfg-sep" type="text"></label>

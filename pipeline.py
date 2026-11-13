@@ -52,6 +52,7 @@ DEFAULT_CONFIG = {
     "auto_recognize_lyrics": False,
     "global_hotkeys": True,   # 1.7：Ctrl+Alt 全域快捷鍵（重開練唱台後生效）   # 匯入時自動辨識歌詞（關閉時直接套用線上搜尋到的第一個版本）
     "audio_out": "",   # 音樂輸出裝置名稱；空字串＝系統預設
+    "monitor_out": "",   # 「原唱只給我聽」時，自己聽的裝置（耳機）名稱
     "font": "huninn",   # 介面與歌詞字體：huninn（內建 jf open 粉圓）／kai（楷書）／sans（黑體）
     "pitch_model": "auto",
     "claude_model": "claude-sonnet-5-5",
@@ -2109,7 +2110,9 @@ def to_taiwan(text: str) -> str:
         from opencc import OpenCC
     except ImportError:
         return text
-    for conf in ("s2twp", "s2twp.json"):
+    # 只做簡體→繁體的字形轉換（s2tw）。以前用的 s2twp 還會把詞換成台灣慣用語
+    # （例如「信息→資訊」「出租車→計程車」），會改到歌詞原本的用字，所以不用
+    for conf in ("s2tw", "s2tw.json"):
         try:
             return OpenCC(conf).convert(text)
         except Exception:
