@@ -968,9 +968,10 @@ $("#update-chip").addEventListener("click", async e => {
 let liveHoldWas = null;
 function syncLiveHold(l) {
   const on = !!(l && l.hold);
-  $("#live-hold").hidden = !on;
-  if (on) $("#live-hold-why").textContent = (l.reason ? `原因：${l.reason}。` : "");
-  if (on && liveHoldWas === false) toast(`直播中（${l.reason}），背景處理已暫停`, 4000);
+  const held = on && !!l.holding;   // 真的有背景工作在等才顯示橫幅
+  $("#live-hold").hidden = !held;
+  if (held) $("#live-hold-why").textContent = (l.reason ? `原因：${l.reason}。` : "");
+  if (on && liveHoldWas === false) toast(`直播中（${l.reason}）：背景工作暫停，匯入改用輕量模型`, 4000);
   liveHoldWas = on;
 }
 $("#live-hold-go").onclick = async () => {

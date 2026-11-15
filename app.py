@@ -1644,6 +1644,36 @@ def remove_duet_leftovers() -> None:
         pass
 
 
+def live_light_upgrade() -> None:
+    """直播中匯入、先用輕量模型處理的歌：直播結束後自動用高品質模型重新分離＋分析旋律（歌詞、錄音不動）。
+    upgrade 是背景工作，萬一又開播會自動暫停。"""
+    time.sleep(90)
+    tried: set[str] = set()   # 這次開程式已經排過的（失敗或被按停止就不再自動排）
+    while True:
+        try:
+            cfg = P.load_config()
+            if not P.live_status(cfg)["hold"] and P.hq_models_ready(cfg):
+                for s in P.list_songs():
+                    sid = s["id"]
+                    if not s.get("live_light") or sid in tried:
+                        continue
+                    if any(jobs.find("process", sid, lb) for lb in ("upgrade", "max", "all", "youtube")):
+                        continue
+                    proc = P.process_song(sid, ["separate", "pitch"])
+
+                    def run(report, sid=sid, proc=proc):
+                        proc(report)
+                        try:
+                            prerender_key(sid)   # 重新分軌會清掉舊的移調版本
+                        except Exception as e:
+                            P.log_error("live_light_upgrade prerender", e)
+                    jobs.submit("process", sid, run, label="upgrade")
+                    tried.add(sid)
+        except Exception as e:
+            P.log_error("live_light_upgrade", e)
+        time.sleep(120)
+
+
 def loudness_backfill() -> None:
     """舊歌曲在背景補量各音軌組合的響度（每首約 2～3 秒）。
     有處理工作在跑時先暫停，不和分軌、辨識搶資源；沒補到的歌第一次開啟時會當場量。"""
@@ -1759,6 +1789,7 @@ def main():
     resume_downloads()
     threading.Thread(target=prefetcher, daemon=True, name="prefetch").start()
     threading.Thread(target=loudness_backfill, daemon=True, name="loudness").start()
+    threading.Thread(target=live_light_upgrade, daemon=True, name="live-light").start()
     threading.Thread(target=remove_duet_leftovers, daemon=True, name="cleanup").start()
     threading.Thread(target=check_update, daemon=True, name="update").start()
     url = f"http://{HOST}:{PORT}"

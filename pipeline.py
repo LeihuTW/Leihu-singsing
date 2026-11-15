@@ -2825,8 +2825,9 @@ class JobCancelled(Exception):
 
 # ---------------------------------------------------------------- 直播中暫停背景處理（2.0.1）
 # 分離、辨識會把顯示卡吃滿，直播畫面和 VTube Studio 的模型追蹤會掉格。
-# 偵測到直播軟體在跑、或練唱台的直播模式開著時，重工作的佇列先停住；結束後自動繼續。
-# 只擋「分離／分析／辨識」這類重工作；KEY 轉換、錄音評分照常，直播中換歌不受影響。
+# 偵測到直播軟體在跑、或練唱台的直播模式開著時，背景的重工作（升級、細修、最高品質、壓縮）先停住；結束後自動繼續。
+# 直播中自己匯入的歌照常處理，但改用輕量模型（標準分離），處理快、佔顯示卡時間短，
+# 直播結束後再自動用高品質模型補做一次（live_light 標記）。KEY 轉換、錄音評分照常。
 LIVE_HOLD = {"apps": [], "live_seen": 0.0, "override_until": 0.0, "checked": 0.0}
 _live_lock = threading.Lock()
 
@@ -2875,6 +2876,37 @@ def live_status(cfg: dict | None = None) -> dict:
     return {"hold": False, "reason": "", "apps": []}
 
 
+# 直播中要先停住的背景工作（使用者沒有在等結果的）
+LIVE_BACKGROUND = {"upgrade", "fine", "compact", "max"}
+
+
+class JobDeferred(Exception):
+    """背景工作做到一半開播：放回佇列，直播結束後從頭再做（不佔著佇列擋住直播中的匯入）。"""
+
+
+def wants_hq(cfg: dict) -> bool:
+    """這台電腦平常會不會用高品質（較慢、較吃顯示卡）的分離模型。"""
+    def hq(key):
+        q = cfg.get(key, "auto")
+        return q == "high" or (q == "auto" and cuda_ok())
+    return hq("vocal_quality") or hq("karaoke_quality")
+
+
+def hq_models_ready(cfg: dict) -> bool:
+    """平常要用的高品質模型都下載好了（直播後補做才有意義）。"""
+    def hq(key):
+        q = cfg.get(key, "auto")
+        return q == "high" or (q == "auto" and cuda_ok())
+    return (not hq("vocal_quality") or hqv_ready()) and (not hq("karaoke_quality") or hq_ready())
+
+
+def live_light_cfg(cfg: dict) -> dict | None:
+    """直播中匯入：回傳要改用的輕量設定；不在直播或本來就用標準模型時回傳 None。"""
+    if not live_status(cfg)["hold"] or not wants_hq(cfg):
+        return None
+    return {"vocal_quality": "standard", "karaoke_quality": "standard", "auto_recognize_lyrics": False}
+
+
 class Jobs:
     """一次只跑一個重工作，避免記憶體爆掉。"""
 
@@ -2887,24 +2919,22 @@ class Jobs:
         self.holding = ""            # 目前因為直播暫停中的原因（空字串＝沒有暫停）
         threading.Thread(target=self._run, daemon=True).start()
 
-    def _wait_live(self, jid: str | None = None) -> None:
-        """直播中：停在這裡，直到直播軟體關掉或直播模式關掉。"""
-        if not self.live_safe:
-            return
-        shown = False
-        while True:
-            st = live_status()
-            if not st["hold"]:
-                break
-            if not shown:
-                shown = True
-                self.holding = st["reason"]
-                if jid:
-                    self.update(jid, step=f"直播中暫停（{st['reason']}）")
-            if jid and (self.state.get(jid) or {}).get("cancel"):
-                break   # 讓 report() 丟出取消
-            time.sleep(3)
-        self.holding = ""
+    def _held(self, jid: str) -> bool:
+        st = self.state.get(jid) or {}
+        return self.live_safe and st.get("label") in LIVE_BACKGROUND
+
+    def _next(self, hold: bool):
+        """挑下一個要做的工作。直播中跳過背景工作，先做使用者在等的（例如直播中匯入的歌）。"""
+        for n, (jid, fn) in enumerate(self.pending):
+            st = self.state.get(jid) or {}
+            if st.get("status") == "cancelled":
+                self.pending.pop(n)
+                return jid, None
+            if hold and st.get("label") in LIVE_BACKGROUND:
+                continue
+            self.pending.pop(n)
+            return jid, fn
+        return None, None
 
     def submit(self, kind: str, song_id: str, fn, label: str = "") -> str:
         jid = uuid.uuid4().hex[:10]
@@ -3028,14 +3058,25 @@ class Jobs:
 
     def _run(self):
         while True:
-            with self.cv:
-                while not self.pending:
-                    self.cv.wait()
-                jid, fn = self.pending.pop(0)
-            if self.get(jid)["status"] == "cancelled":
-                continue
-            self._wait_live()   # 直播中不開始新的重工作
-            if self.get(jid)["status"] == "cancelled":
+            while True:
+                st = live_status() if self.live_safe else {"hold": False}   # 查程式清單可能要幾秒，不要鎖著佇列查
+                with self.cv:
+                    jid, fn = self._next(st["hold"])
+                    if jid:
+                        break
+                    if self.pending:   # 只剩直播中暫停的背景工作
+                        reason = st.get("reason") or "直播中"
+                        self.holding = reason
+                        for j, _ in self.pending:
+                            js = self.state.get(j)
+                            if js and js["status"] == "queued":
+                                js["step"] = f"直播中暫停（{reason}），結束後自動繼續"
+                        self.cv.wait(5)
+                    else:
+                        self.holding = ""
+                        self.cv.wait()
+            self.holding = ""
+            if fn is None or self.get(jid)["status"] == "cancelled":
                 continue
             self.update(jid, status="running", step="開始")
 
@@ -3043,12 +3084,16 @@ class Jobs:
                 if (self.state.get(jid) or {}).get("cancel"):
                     raise JobCancelled()
                 self.update(jid, step=step, progress=round(p, 3))
-                self._wait_live(jid)   # 做到一半開播：在下一個進度點停下，不再佔顯示卡
-                if (self.state.get(jid) or {}).get("cancel"):
-                    raise JobCancelled()
+                if self._held(jid) and live_status()["hold"]:
+                    raise JobDeferred()   # 做到一半開播：讓出顯示卡，直播後重做
             try:
                 fn(report)
                 self.update(jid, status="done", step="完成", progress=1.0)
+            except JobDeferred:
+                with self.cv:
+                    self.state[jid].update(status="queued", step="直播中暫停，結束後重新開始", progress=0.0)
+                    self.pending.append((jid, fn))
+                free_gpu()
             except JobCancelled:
                 self.update(jid, status="cancelled", step="已取消")
             except UserError as e:
@@ -3066,7 +3111,14 @@ def process_song(song_id: str, steps: list[str], cfg_override: dict | None = Non
         if "import" in steps or not meta["steps"].get("import"):
             step_import(d, report)
         if "separate" in steps:
+            light = live_light_cfg(cfg) if "import" in steps else None
+            if light:   # 直播中匯入：先用輕量模型，直播結束後自動補做高品質
+                cfg.update(light)
+                update_meta(d, live_light=True)
+                report("直播中：改用輕量模型分離（下播後自動補做高品質）", 0.1)
             step_separate(d, cfg, report)
+            if not light and meta.get("live_light"):
+                update_meta(d, live_light=False)   # 高品質補做完成
             measure_stem_loudness(d)   # 各音軌響度，播放時依開著的音軌調整音量
         if "pitch" in steps:
             step_pitch(d, cfg, report)
