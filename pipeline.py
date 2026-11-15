@@ -283,6 +283,13 @@ def _song_entry(d: Path) -> dict | None:
     except Exception as e:   # 一首歌的資料讀不出來，不要讓整個歌曲庫打不開
         log_error(f"list_songs {d.name}", e)
         return None
+    rc = m.get("lyrics_recheck")
+    if isinstance(rc, dict):
+        try:
+            if (d / "lyrics.lrc").stat().st_mtime_ns != rc.get("mtime"):
+                m["lyrics_recheck"] = None   # 歌詞改過了
+        except OSError:
+            m["lyrics_recheck"] = None
     takes = list_takes(d)
     m["takes"] = len(takes)
     scored = [t["acc"] for t in takes if t.get("acc") is not None]
@@ -1233,7 +1240,7 @@ def _pick(paths: list[Path], kind: str) -> Path:
 # 合音多、或有和聲吟唱的歌，標準模型常把合音留在主唱軌，旋律會在兩個聲部之間亂跳；這個模型分得乾淨很多。
 # 用 PyTorch 運算：有顯示卡約幾十秒，只有 CPU 會非常慢（一首歌可能要十幾分鐘），所以「自動」只在顯示卡可用時才用。
 HQ_KARAOKE = "mel_band_roformer_karaoke_aufr33_viperx_sdr_10.1956.ckpt"
-# 2.0.1：高品質的人聲／伴奏分離模型（BS-Roformer，viperx）。MVSEP 排行榜人聲 10.87／伴奏 17.17 dB，
+# 2.1.0：高品質的人聲／伴奏分離模型（BS-Roformer，viperx）。MVSEP 排行榜人聲 10.87／伴奏 17.17 dB，
 # 比原本的 MDX-NET Inst HQ 3（9.38／15.68）乾淨很多；伴奏殘留的人聲和主唱軌殘留的鼓都明顯減少
 HQ_VOCAL = "model_bs_roformer_ep_317_sdr_12.9755.ckpt"
 _HQ_VOCAL_YAML = "model_bs_roformer_ep_317_sdr_12.9755.yaml"
@@ -1566,9 +1573,18 @@ def fine_job(song_id: str, after=None):
         cfg["karaoke_overlap"] = 4
         if cfg.get("karaoke_quality") == "standard":
             cfg["karaoke_quality"] = "auto"
+        full = hq_models_ready(cfg)   # 高品質模型都在：這次就等於直播後的補做
+        lrc = (d / "lyrics.lrc").exists()
+        fit_before = lyrics_timing_fit(d) if lrc else None
         step_separate(d, cfg, report)
         step_pitch(d, cfg, report)
-        update_meta(d, fine_suggest=False, fine_done=True, fine_queued=False)
+        update_meta(d, fine_suggest=False, fine_done=True, fine_queued=False,
+                    **({"live_light": False} if full else {}))
+        if lrc:
+            try:
+                check_lyrics_after_reseparate(d, fit_before)
+            except Exception as e:
+                log_error("check_lyrics_after_reseparate", e)
         if after:
             try:
                 after(song_id)
@@ -2823,7 +2839,7 @@ class JobCancelled(Exception):
     """工作被新的要求取代（例如又換了 KEY），中途停止。"""
 
 
-# ---------------------------------------------------------------- 直播中暫停背景處理（2.0.1）
+# ---------------------------------------------------------------- 直播中暫停背景處理（2.1.0）
 # 分離、辨識會把顯示卡吃滿，直播畫面和 VTube Studio 的模型追蹤會掉格。
 # 偵測到直播軟體在跑、或練唱台的直播模式開著時，背景的重工作（升級、細修、最高品質、壓縮）先停住；結束後自動繼續。
 # 直播中自己匯入的歌照常處理，但改用輕量模型（標準分離），處理快、佔顯示卡時間短，
@@ -3108,6 +3124,8 @@ def process_song(song_id: str, steps: list[str], cfg_override: dict | None = Non
         d = song_dir(song_id)
         cfg = dict(load_config(), **(cfg_override or {}))
         meta = read_meta(d)
+        recheck = "import" not in steps and ("separate" in steps or "pitch" in steps) and (d / "lyrics.lrc").exists()
+        fit_before = lyrics_timing_fit(d) if recheck else None   # 重新分離前，歌詞和舊的歌聲位置吻合度
         if "import" in steps or not meta["steps"].get("import"):
             step_import(d, report)
         if "separate" in steps:
@@ -3122,6 +3140,11 @@ def process_song(song_id: str, steps: list[str], cfg_override: dict | None = Non
             measure_stem_loudness(d)   # 各音軌響度，播放時依開著的音軌調整音量
         if "pitch" in steps:
             step_pitch(d, cfg, report)
+        if recheck:
+            try:
+                check_lyrics_after_reseparate(d, fit_before)
+            except Exception as e:
+                log_error("check_lyrics_after_reseparate", e)
         if "lyrics" in steps and "import" in steps and not cfg.get("auto_recognize_lyrics", False):
             # 1.6.5：匯入時預設不自動辨識（準度不穩、又佔顯示卡），直接套用線上搜尋到的第一個版本
             report("排入線上歌詞搜尋（背景進行）", 0.97)
@@ -3267,7 +3290,7 @@ def similarity(recognized: str, candidate: str) -> float | None:
     return round(sum(x.size for x in m.get_matching_blocks()) / len(a), 3)
 
 
-USER_AGENT = "LeihuLiantai/2.0.0 (+https://github.com/LeihuTW/Leihu-singsing)"   # HTTP 標頭只能用英文字
+USER_AGENT = "LeihuLiantai/2.1.0 (+https://github.com/LeihuTW/Leihu-singsing)"   # HTTP 標頭只能用英文字
 
 
 def _http_json(url: str, headers: dict | None = None, timeout: int = 8):
@@ -3423,7 +3446,7 @@ def find_candidates(d: Path, cfg: dict, query: str = "", check=None,
         out.append(c)
 
     title = _norm(" ".join(filter(None, [meta.get("title"), meta.get("yt_track"), meta.get("yt_artist")])))
-    # 2.0.1：有時間軸的候選，拿它的時間軸和這首歌主唱開口的位置比對，算出「吻合度」0～1。
+    # 2.1.0：有時間軸的候選，拿它的時間軸和這首歌主唱開口的位置比對，算出「吻合度」0～1。
     # 歌名和長度都一樣、但其實是翻唱版、不同剪輯版的，吻合度會明顯比較低，自動套用時就不會挑到
     phrases = voice_phrases(d)
     for c in out:
@@ -3463,6 +3486,37 @@ def timeline_fit(c: dict, phrases: list[tuple[float, float]], dur: float | None)
     k = np.clip(np.searchsorted(onsets, ts), 1, len(onsets) - 1)
     dist = np.minimum(np.abs(ts - onsets[k - 1]), np.abs(ts - onsets[k]))
     return round(float(np.mean(np.exp(-(dist ** 2) / (2 * 0.35 ** 2)))), 2)
+
+
+def lyrics_timing_fit(d: Path) -> float | None:
+    """目前歌詞的時間軸（不做整體對齊，就是現在顯示的位置）和主唱開口位置的吻合度（0～1）。"""
+    try:
+        times = [l["t"] for l in lyric_lines(d) if l["text"].strip()]
+    except Exception:
+        return None
+    phrases = voice_phrases(d)
+    if len(times) < 4 or len(phrases) < 2:
+        return None
+    ts = np.array(times, dtype=float)
+    onsets = np.array([a for a, _ in phrases])
+    k = np.clip(np.searchsorted(onsets, ts), 1, len(onsets) - 1)
+    dist = np.minimum(np.abs(ts - onsets[k - 1]), np.abs(ts - onsets[k]))
+    return round(float(np.mean(np.exp(-(dist ** 2) / (2 * 0.35 ** 2)))), 2)
+
+
+def check_lyrics_after_reseparate(d: Path, before: float | None) -> None:
+    """2.1.0：重新分離／分析旋律後，目前的歌詞和新的歌聲位置對不太上 → 標「建議重新匯入歌詞」。
+    標記記下當時歌詞檔的時間，之後歌詞有改過（重新匯入、套用線上歌詞、手動調整）就自動消失。"""
+    after = lyrics_timing_fit(d)
+    bad = after is not None and (after < 0.55 or (before is not None and before - after >= 0.2))
+    rec = None
+    if bad:
+        try:
+            mt = (d / "lyrics.lrc").stat().st_mtime_ns
+        except OSError:
+            mt = 0
+        rec = {"fit": after, "before": before, "mtime": mt}
+    update_meta(d, lyrics_recheck=rec)
 
 
 class _PhraseStub:

@@ -22,7 +22,7 @@ import share as SH
 import score_sheet as SS   # 1.7：旋律譜匯出
 import hotkeys as HK   # 2.0：自訂全域快捷鍵
 
-VERSION = "2.0.0"
+VERSION = "2.1.0"
 HOST, PORT = "127.0.0.1", int(os.environ.get("LIANTAI_PORT", "8765"))
 app = Flask(__name__, static_folder=str(P.ROOT / "static"), static_url_path="/static")
 app.config["MAX_CONTENT_LENGTH"] = 1024 * 1024 * 1024
@@ -1325,11 +1325,13 @@ def live_override():
 
 @app.post("/api/upgrade-separation")
 def upgrade_separation():
-    """2.0.1：把還沒用新的人聲模型（BS-Roformer）處理過的歌，排進佇列重新分離＋分析旋律（歌詞、錄音不動）。
+    """2.1.0：把還沒用新的人聲模型（BS-Roformer）處理過的歌，排進佇列重新分離＋分析旋律（歌詞、錄音不動）。
     排在佇列最後、直播中會暫停，所以可以放著慢慢跑。"""
     if not P.hqv_ready():
         P.start_hqv_download()
         raise P.UserError("高品質人聲模型（約 640 MB）還在下載，下載完成後再按一次")
+    if P.vocal_model(P.load_config()) != P.HQ_VOCAL:
+        raise P.UserError("目前「人聲分離品質」設定不會用高品質模型（標準，或沒有顯示卡），升級不會有差別")
     n = 0
     for s in P.list_songs():
         if not (s.get("steps") or {}).get("separate") or s.get("vocal_model") == "bs_roformer" or s.get("separation") != "uvr":
@@ -1657,7 +1659,7 @@ def live_light_upgrade() -> None:
                     sid = s["id"]
                     if not s.get("live_light") or sid in tried:
                         continue
-                    if any(jobs.find("process", sid, lb) for lb in ("upgrade", "max", "all", "youtube")):
+                    if any(jobs.find("process", sid, lb) for lb in ("upgrade", "max", "fine", "all", "youtube")):
                         continue
                     proc = P.process_song(sid, ["separate", "pitch"])
 

@@ -109,11 +109,13 @@ async function loadSongs() {
   renderCats(); renderSongs();
   if (LIB.q) libSearch();
 }
+// 歌詞待修：直播中手動標記的，或重新分離後歌詞和歌聲對不太上的（2.1.0）
+const lyrNeedsFix = s => !!(s.lyrics_flag || s.lyrics_recheck);
 function renderCats() {
   const box = $("#cats"); box.innerHTML = "";
-  const count = c => LIB.songs.filter(s => c === "__all__" || (c === "__flag__" ? !!s.lyrics_flag : c === "__none__" ? !s.category : s.category === c)).length;
+  const count = c => LIB.songs.filter(s => c === "__all__" || (c === "__flag__" ? lyrNeedsFix(s) : c === "__none__" ? !s.category : s.category === c)).length;
   const items = [["__all__", "全部"], ...LIB.cats.map(c => [c, c]), ["__none__", "未分類"]];
-  if (LIB.songs.some(s => s.lyrics_flag) || LIB.cur === "__flag__") items.push(["__flag__", "歌詞待修"]);
+  if (LIB.songs.some(lyrNeedsFix) || LIB.cur === "__flag__") items.push(["__flag__", "歌詞待修"]);
   for (const [key, label] of items) {
     if (key === "__none__" && !LIB.cats.length) continue;
     const b = document.createElement("button");
@@ -218,7 +220,7 @@ $("#cat-del").onclick = async () => {
   loadSongs();
 };
 function songMatches(s) {
-  if (LIB.cur === "__flag__") { if (!s.lyrics_flag) return false; }
+  if (LIB.cur === "__flag__") { if (!lyrNeedsFix(s)) return false; }
   else {
     if (LIB.cur === "__none__" && s.category) return false;
     if (LIB.cur !== "__all__" && LIB.cur !== "__none__" && s.category !== LIB.cur) return false;
@@ -551,7 +553,7 @@ function renderLiveSongs(box, list) {
     el.disabled = !ok;
     el.title = ok ? "開始這首" : "還沒處理好";
     el.innerHTML = `<span class="t"></span><span class="a"></span>${ok ? `<span class="add" role="button" title="加進待唱清單">＋</span>` : ""}`;
-    $(".t", el).textContent = (s.lyrics_flag ? "⚑ " : "") + s.title;
+    $(".t", el).textContent = (lyrNeedsFix(s) ? "⚑ " : "") + s.title;
     $(".a", el).textContent = [s.artist, s.key ? `KEY ${s.key > 0 ? "+" : ""}${s.key}` : ""].filter(Boolean).join("・");
     el.onclick = e => {
       if (e.target.classList.contains("add")) { e.stopPropagation(); return queueAdd(s.id); }
@@ -624,6 +626,7 @@ function renderSongs() {
     else chips.push(`<span class="chip ${st.lyrics ? "ok" : ""}">${st.lyrics ? "歌詞" : "無歌詞"}</span>`);
     if (s.lyrics_pending) chips.push(`<span class="chip warn">有線上歌詞可選</span>`);
     if (s.lyrics_flag) chips.push(`<span class="chip warn" title="直播中標記的：歌詞不準，待處理">⚑ 歌詞待修</span>`);
+    if (s.lyrics_recheck) chips.push(`<span class="chip warn" title="重新分離後，目前歌詞和歌聲的位置對不太上（吻合度 ${Math.round((s.lyrics_recheck.fit || 0) * 100)}%）。重新搜尋線上歌詞或重新貼上後，這個提醒會自動消失">⚑ 建議重新匯入歌詞</span>`);
     if (s.takes) chips.push(`<span>${s.takes} 次錄音</span>`);
     if (s.best != null) chips.push(`<span>最佳 <b class="num">${Math.round(s.best * 100)}%</b></span>`);
     el.innerHTML = `
@@ -1076,6 +1079,8 @@ async function openSong(id) {
   pause();
   S.bufs = {}; S.dur = 0;   // 上一首的音訊先清掉：新的這首還沒載好（或載入失敗）時按播放，不會播到上一首
   S.song = song; titles[id] = song.title; syncGroupBtn(); syncFlagBtns();
+  { const e = LIB.songs.find(x => x.id === id);
+    if (e && e.lyrics_recheck && !LIVE.on) toast("這首重新分離後，歌詞和歌聲對不太上，建議重新匯入歌詞（搜尋線上歌詞或重新貼上）", 6000); }
   if (window.LIVE) { LIVE.played = 0; LIVE.logged = null; }
   S.pitch = { hop: pitch.hop, midi: Float32Array.from(pitch.midi, v => (v == null ? NaN : v)) };
   S.notes = pitch.notes.map(([s, e, m]) => ({ s, e, m }));
