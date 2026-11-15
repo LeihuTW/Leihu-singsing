@@ -39,7 +39,7 @@ def _locked(fn):
     return wrap
 
 
-jobs = P.Jobs()
+jobs = P.Jobs(live_safe=True)   # 分離、分析、辨識：直播中暫停，不搶顯示卡
 vjobs = P.Jobs()   # 移調／變速另外排隊：不會被分軌、評分卡住，也不會卡住它們
 
 
@@ -61,8 +61,14 @@ def status():
     mods = P.module_status()
     q = cfg.get("karaoke_quality", "auto")
     hq = P.hq_status() if (q == "high" or (q == "auto" and mods.get("cuda"))) else None
+    vq = cfg.get("vocal_quality", "auto")
+    hqv = P.hqv_status() if (vq == "high" or (vq == "auto" and mods.get("cuda"))) else None
+    if request.args.get("live") == "1":
+        P.live_touch()
+    live = P.live_status(cfg)
+    live["holding"] = jobs.holding
     return jsonify(version=VERSION, root=str(P.ROOT), modules=mods, cuda_note=P.CUDA_NOTE, hq=hq,
-                   hq_model=P.HQ_KARAOKE,
+                   hq_model=P.HQ_KARAOKE, hqv=hqv, live=live,
                    claude_ready=bool(cfg.get("anthropic_api_key") or os.environ.get("ANTHROPIC_API_KEY")),
                    session_cost=C.summary()["session"]["cost_usd"],
                    remote=dict(REMOTE), yt_pause=dict(P.YT_PAUSE), update=dict(UPDATE), **_jobs_for_ui())
@@ -1308,6 +1314,31 @@ def overlay_get():
     if request.args.get("ver") != str(o["ver"]):
         out["lines"] = o["lines"]
     return jsonify(out)
+
+
+@app.post("/api/live/override")
+def live_override():
+    """「直播中也照常處理」：接下來一小時不管直播偵測。"""
+    P.live_override(3600)
+    return jsonify(ok=True)
+
+
+@app.post("/api/upgrade-separation")
+def upgrade_separation():
+    """2.0.1：把還沒用新的人聲模型（BS-Roformer）處理過的歌，排進佇列重新分離＋分析旋律（歌詞、錄音不動）。
+    排在佇列最後、直播中會暫停，所以可以放著慢慢跑。"""
+    if not P.hqv_ready():
+        P.start_hqv_download()
+        raise P.UserError("高品質人聲模型（約 640 MB）還在下載，下載完成後再按一次")
+    n = 0
+    for s in P.list_songs():
+        if not (s.get("steps") or {}).get("separate") or s.get("vocal_model") == "bs_roformer" or s.get("separation") != "uvr":
+            continue
+        if jobs.find("process", s["id"], "upgrade") or jobs.find("process", s["id"], "max"):
+            continue
+        jobs.submit("process", s["id"], P.process_song(s["id"], ["separate", "pitch"]), label="upgrade")
+        n += 1
+    return jsonify(queued=n)
 
 
 # ---------------------------------------------------------------- 全域快捷鍵設定（2.0）

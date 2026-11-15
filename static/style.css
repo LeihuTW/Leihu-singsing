@@ -446,3 +446,4 @@ body.live .lyr-count { font-size: calc(48px * var(--ls)); }
 @media (max-width: 640px) { .hk-row { grid-template-columns: 1fr auto auto; } .hk-row .lb { grid-column: 1 / -1; } }
 .hk-field > label.row { display: flex; align-items: center; gap: 6px; }
 .hk-row .hk-key { justify-self: stretch; }
+.live-hold { border-color: var(--accent); }

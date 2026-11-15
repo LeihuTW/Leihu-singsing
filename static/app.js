@@ -851,7 +851,8 @@ const ST = {};                  // 伺服器狀態（高品質模型等）
 async function pollJobs() {
   clearTimeout(jobTimer);
   let st;
-  try { st = await api("/api/status"); } catch { jobTimer = setTimeout(pollJobs, 3000); return; }
+  try { st = await api(`/api/status${window.LIVE && LIVE.on ? "?live=1" : ""}`); } catch { jobTimer = setTimeout(pollJobs, 3000); return; }
+  syncLiveHold(st.live);
   updateClaudeChip(st.claude_ready, st.session_cost);
   remoteOpen(st.remote);
   syncYtPause(st.yt_pause);
@@ -905,21 +906,24 @@ async function pollJobs() {
     more.textContent = `……還有 ${st.queued_total - 30} 首排隊中（共 ${st.queued_total} 首）`;
     box.appendChild(more);
   }
-  // 高品質主唱分離模型在背景下載時，顯示下載進度
+  // 高品質模型在背景下載時，顯示下載進度（主唱／合音模型、人聲／伴奏模型）
   ST.hq = st.hq; ST.hqModel = st.hq_model;
-  if (st.hq && (st.hq.state === "downloading" || st.hq.state === "error")) {
+  for (const [dl, name] of [[st.hq, "高品質主唱分離模型"], [st.hqv, "高品質人聲分離模型"]]) {
+    if (!dl || !(dl.state === "downloading" || dl.state === "error")) continue;
     const el = document.createElement("div");
     const mb = v => Math.round(v / 1e6);
-    const p = st.hq.total ? st.hq.got / st.hq.total : 0;
-    el.className = "job" + (st.hq.state === "error" ? " error" : "");
+    const p = dl.total ? dl.got / dl.total : 0;
+    el.className = "job" + (dl.state === "error" ? " error" : "");
     el.innerHTML = `<span class="lbl"></span><span class="num">${Math.round(p * 100)}%</span><span></span>
       <div class="meter"><i style="width:${Math.round(p * 100)}%"></i></div><div class="err"></div>`;
-    $(".lbl", el).textContent = st.hq.state === "error" ? "高品質主唱分離模型下載失敗，下次處理歌曲時會再試"
-      : `背景下載高品質主唱分離模型 ${mb(st.hq.got)} / ${mb(st.hq.total)} MB（期間的歌會先用標準模型）`;
-    $(".err", el).textContent = st.hq.state === "error" ? st.hq.error : "";
+    $(".lbl", el).textContent = dl.state === "error" ? `${name}下載失敗，下次處理歌曲時會再試`
+      : `背景下載${name} ${mb(dl.got)} / ${mb(dl.total)} MB（期間的歌會先用標準模型）`;
+    $(".err", el).textContent = dl.state === "error" ? dl.error : "";
     box.appendChild(el);
     busy = true;
   }
+  if (ST.hqvWas === "downloading" && st.hqv && st.hqv.state === "ready") toast("高品質人聲分離模型下載完成，之後匯入的歌會自動使用；舊歌可以在設定裡一鍵重做", 6000);
+  ST.hqvWas = st.hqv ? st.hqv.state : null;
   if (ST.hqWas === "downloading" && st.hq && st.hq.state === "ready" && !$("#view-lib").hidden) {
     toast("高品質主唱分離模型下載完成，之後匯入的歌會自動使用", 4000); loadSongs();
   }
@@ -961,6 +965,18 @@ $("#update-chip").addEventListener("click", async e => {
   try { await api("/api/update/install", { method: "POST", json: {} }); c.textContent = "下載更新 0%…"; pollJobs(); }
   catch (err) { toast(err.message); }
 });
+let liveHoldWas = null;
+function syncLiveHold(l) {
+  const on = !!(l && l.hold);
+  $("#live-hold").hidden = !on;
+  if (on) $("#live-hold-why").textContent = (l.reason ? `原因：${l.reason}。` : "");
+  if (on && liveHoldWas === false) toast(`直播中（${l.reason}），背景處理已暫停`, 4000);
+  liveHoldWas = on;
+}
+$("#live-hold-go").onclick = async () => {
+  if (!confirm("接下來一小時，直播中也照常做分離、分析、辨識？直播畫面和 VTube Studio 可能會掉格。")) return;
+  try { await api("/api/live/override", { json: {} }); toast("一小時內照常處理", 3000); pollJobs(); } catch (e) { toast(e.message); }
+};
 function syncYtPause(p) {
   const on = !!(p && p.on);
   const paused = LIB.songs.filter(s => s.dl_state === "paused").length;
@@ -3453,6 +3469,8 @@ async function openSettings(focusUsage) {
   $("#cfg-sep").value = cfg.separation_model;
   $("#cfg-kara").value = cfg.karaoke_model;
   $("#cfg-kq").value = cfg.karaoke_quality || "auto";
+  $("#cfg-vq").value = cfg.vocal_quality || "auto";
+  $("#cfg-pause-live").checked = cfg.pause_while_streaming !== false;
   $("#cfg-kov").value = String(cfg.karaoke_overlap === 4 ? 4 : 2);
   $("#cfg-autofine").checked = cfg.auto_fine !== false;
   $("#cfg-pitch").value = cfg.pitch_model;
@@ -3483,7 +3501,7 @@ async function saveSettings(extra = {}) {
       anthropic_api_key: $("#cfg-key").value, claude_model: $("#cfg-model").value.trim(),
       whisper_model: $("#cfg-whisper").value, lyrics_language: $("#cfg-lang").value,
       convert_to_taiwan: $("#cfg-tw").checked, auto_recognize_lyrics: $("#cfg-autorec").checked, global_hotkeys: $("#cfg-hotkeys").checked, font: $("#cfg-font").value, audio_out: $("#cfg-out").value, monitor_out: $("#cfg-mon").value, separation_model: $("#cfg-sep").value.trim(),
-      karaoke_model: $("#cfg-kara").value.trim(), karaoke_quality: $("#cfg-kq").value, karaoke_overlap: +$("#cfg-kov").value, auto_fine: $("#cfg-autofine").checked, pitch_model: $("#cfg-pitch").value,
+      karaoke_model: $("#cfg-kara").value.trim(), karaoke_quality: $("#cfg-kq").value, vocal_quality: $("#cfg-vq").value, pause_while_streaming: $("#cfg-pause-live").checked, karaoke_overlap: +$("#cfg-kov").value, auto_fine: $("#cfg-autofine").checked, pitch_model: $("#cfg-pitch").value,
       balance_usd: $("#cfg-balance").value.trim().replace(/^US\$|^\$/, ""), ...extra,
     } });
     applyFont($("#cfg-font").value);
@@ -3504,6 +3522,15 @@ async function fillOutDevices(saved, savedMon = "") {
     sel.value = val;
   }
 }
+$("#cfg-upgrade").onclick = async () => {
+  const b = $("#cfg-upgrade"); b.disabled = true;
+  try {
+    const r = await api("/api/upgrade-separation", { json: {} });
+    toast(r.queued ? `已排入 ${r.queued} 首，會在背景慢慢重做（直播中會暫停）` : "所有歌都已經是用高品質人聲模型處理的", 5000);
+    pollJobs();
+  } catch (e) { toast(e.message, 6000); }
+  finally { b.disabled = false; }
+};
 $("#open-in-browser").onclick = () => api("/api/open-app", { method: "POST", json: {} })
   .then(r => { $("#settings").hidden = true; toast(r.app ? "已開啟分享用視窗；Discord 分享時選那個視窗，第一次用麥克風時按「允許」" : "已用瀏覽器開啟練唱台；Discord 分享時選那個瀏覽器視窗", 6000); })
   .catch(e => toast(e.message));

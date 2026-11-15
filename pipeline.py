@@ -42,6 +42,9 @@ STEMS = ("lead", "back", "inst")
 
 DEFAULT_CONFIG = {
     "separation_model": "UVR-MDX-NET-Inst_HQ_3.onnx",
+    "vocal_quality": "auto",   # 人聲／伴奏分離：auto：有顯示卡用高品質（BS-Roformer，乾淨很多但慢一倍）；standard；high
+    "pause_while_streaming": True,   # 偵測到直播軟體（OBS、VTube Studio…）或直播模式開著時，暫停背景的分離、辨識
+    "streaming_apps": ["obs64.exe", "obs32.exe", "VTube Studio.exe", "Streamlabs OBS.exe", "XSplit.Core.exe", "vMix64.exe"],
     "karaoke_model": "UVR_MDXNET_KARA_2.onnx",
     "karaoke_quality": "auto",   # auto：有顯示卡用高品質（Roformer）；standard；high
     "karaoke_overlap": 2,
@@ -1230,11 +1233,16 @@ def _pick(paths: list[Path], kind: str) -> Path:
 # 合音多、或有和聲吟唱的歌，標準模型常把合音留在主唱軌，旋律會在兩個聲部之間亂跳；這個模型分得乾淨很多。
 # 用 PyTorch 運算：有顯示卡約幾十秒，只有 CPU 會非常慢（一首歌可能要十幾分鐘），所以「自動」只在顯示卡可用時才用。
 HQ_KARAOKE = "mel_band_roformer_karaoke_aufr33_viperx_sdr_10.1956.ckpt"
+# 2.0.1：高品質的人聲／伴奏分離模型（BS-Roformer，viperx）。MVSEP 排行榜人聲 10.87／伴奏 17.17 dB，
+# 比原本的 MDX-NET Inst HQ 3（9.38／15.68）乾淨很多；伴奏殘留的人聲和主唱軌殘留的鼓都明顯減少
+HQ_VOCAL = "model_bs_roformer_ep_317_sdr_12.9755.ckpt"
+_HQ_VOCAL_YAML = "model_bs_roformer_ep_317_sdr_12.9755.yaml"
 
 
 # 模型下載來源：Hugging Face 的鏡像在台灣比 GitHub 快很多，放第一個；失敗或太慢再換 GitHub。
 # 每個檔案都核對大小與 SHA-256（與 GitHub 原檔一致），鏡像就算被換掉也不會用到錯的檔案。
 _HF_UVR = "https://huggingface.co/Politrees/UVR_resources/resolve/main/models/"
+_RAW_CFG = "https://raw.githubusercontent.com/TRvlvr/application_data/main/mdx_model_data/mdx_c_configs/"
 _GH_UVR = "https://github.com/TRvlvr/model_repo/releases/download/all_public_uvr_models/"
 _GH_AS = "https://github.com/nomadkaraoke/python-audio-separator/releases/download/model-configs/"
 _HQ_YAML = "mel_band_roformer_karaoke_aufr33_viperx_sdr_10.1956_config.yaml"
@@ -1246,6 +1254,10 @@ MODEL_FILES = {   # 檔名 → (大小, SHA-256, 下載網址…)
     HQ_KARAOKE: (913096801, "1de20d459332fe8869aeb01327a31df0032262706e1365114e852dc271779813", [
         _HF_UVR + "Roformer/MelBand/" + HQ_KARAOKE, _GH_UVR + HQ_KARAOKE, _GH_AS + HQ_KARAOKE]),
     _HQ_YAML: (None, None, [_GH_AS + _HQ_YAML]),
+    HQ_VOCAL: (639331213, "5b84f37e8d444c8cb30c79d77f613a41c05868ff9c9ac6c7049c00aefae115aa", [
+        _GH_UVR + HQ_VOCAL, _HF_UVR + "Roformer/BSRoformer/" + HQ_VOCAL]),
+    _HQ_VOCAL_YAML: (2273, "2bfdd16c656bd9519aba757cc4f8834b7ede675eb1e00ec4772d74ae1c41af7f", [
+        _GH_AS + _HQ_VOCAL_YAML, _RAW_CFG + _HQ_VOCAL_YAML]),
 }
 # audio-separator 第一次載入模型時要的設定檔；raw.githubusercontent 不通時改走 jsDelivr
 _RAW = "https://raw.githubusercontent.com/TRvlvr/application_data/main/"
@@ -1258,12 +1270,22 @@ MODEL_DATA = {
 HQ_FILES = {k: MODEL_FILES[k] for k in (HQ_KARAOKE, _HQ_YAML)}
 HQ_DL = {"state": "idle", "got": 0, "total": HQ_FILES[HQ_KARAOKE][0], "error": ""}
 _hq_lock = threading.Lock()
+HQV_FILES = {k: MODEL_FILES[k] for k in (HQ_VOCAL, _HQ_VOCAL_YAML)}
+HQV_DL = {"state": "idle", "got": 0, "total": HQV_FILES[HQ_VOCAL][0], "error": ""}
+
+
+def hqv_ready() -> bool:
+    return _files_ready(HQV_FILES)
 
 
 def hq_ready() -> bool:
     """高品質模型已經完整下載（大小完全正確才算，避免下載到一半的檔案被當成可用）。"""
+    return _files_ready(HQ_FILES)
+
+
+def _files_ready(files: dict) -> bool:
     uvr = MODELS / "uvr"
-    for name, (size, _, _) in HQ_FILES.items():
+    for name, (size, _, _) in files.items():
         p = uvr / name
         if not p.exists() or (size and p.stat().st_size != size) or p.stat().st_size == 0:
             return False
@@ -1444,18 +1466,27 @@ def ensure_model(name: str, progress=None) -> None:
 
 def start_hq_download() -> None:
     """在背景下載高品質主唱分離模型（約 900 MB），不佔用處理歌曲的佇列。"""
+    _start_download(HQ_FILES, HQ_DL, hq_ready)
+
+
+def start_hqv_download() -> None:
+    """在背景下載高品質人聲／伴奏分離模型（約 640 MB）。"""
+    _start_download(HQV_FILES, HQV_DL, hqv_ready)
+
+
+def _start_download(files: dict, tracker: dict, ready) -> None:
     with _hq_lock:
-        if HQ_DL["state"] == "downloading" or hq_ready():
+        if tracker["state"] == "downloading" or ready():
             return
-        HQ_DL.update(state="downloading", error="")
+        tracker.update(state="downloading", error="")
 
     def run():
         try:
-            for name in HQ_FILES:
-                ensure_model(name, lambda got, total, spd: HQ_DL.update(got=got))
-            HQ_DL.update(state="done", got=HQ_DL["total"])
+            for name in files:
+                ensure_model(name, lambda got, total, spd: tracker.update(got=got))
+            tracker.update(state="done", got=tracker["total"])
         except Exception as e:
-            HQ_DL.update(state="error", error=f"{type(e).__name__}: {e}")
+            tracker.update(state="error", error=f"{type(e).__name__}: {e}")
     threading.Thread(target=run, daemon=True).start()
 
 
@@ -1463,6 +1494,22 @@ def hq_status() -> dict:
     if HQ_DL["state"] in ("idle", "done") and hq_ready():
         return {"state": "ready"}
     return dict(HQ_DL)
+
+
+def hqv_status() -> dict:
+    if HQV_DL["state"] in ("idle", "done") and hqv_ready():
+        return {"state": "ready"}
+    return dict(HQV_DL)
+
+
+def vocal_model(cfg: dict) -> str:
+    """要用的人聲／伴奏分離模型。高品質模型還沒下載好時，這首先用標準模型，模型在背景下載。"""
+    q = cfg.get("vocal_quality", "auto")
+    if q == "high" or (q == "auto" and cuda_ok()):
+        if hqv_ready():
+            return HQ_VOCAL
+        start_hqv_download()
+    return cfg["separation_model"]
 
 
 def karaoke_model(cfg: dict) -> str:
@@ -1620,11 +1667,15 @@ def separate_uvr(d: Path, cfg: dict, report) -> None:
                                  "overlap": overlap, "pitch_shift": 0})
 
     report("準備人聲分離模型", 0.07)
-    ensure_model(cfg["separation_model"], _dl_report(report, "人聲分離模型", 0.07))
-    report("分離人聲與伴奏", 0.08)
-    sep.load_model(model_filename=cfg["separation_model"])
-    with _sep_progress("分離人聲與伴奏", report, 0.08, 0.26):
+    vmodel = vocal_model(cfg)
+    vhq = vmodel == HQ_VOCAL
+    ensure_model(vmodel, _dl_report(report, "人聲分離模型", 0.07))
+    vlabel = "分離人聲與伴奏" + ("（高品質）" if vhq else "（高品質模型下載中，這首先用標準模型）" if HQV_DL["state"] == "downloading" else "")
+    report(vlabel, 0.08)
+    sep.load_model(model_filename=vmodel)
+    with _sep_progress(vlabel, report, 0.08, 0.26):
         outs = _outputs(sep.separate(str(stem_path(d, "mix"))), tmp)
+    update_meta(d, vocal_model="bs_roformer" if vhq else "mdx")   # 之後可以找出還沒用新模型處理的歌
     voc = tmp / "vocals_only.wav"
     _pick(outs, "vocals").replace(voc)
     inst_p = _pick(outs, "instrumental")
@@ -2772,15 +2823,88 @@ class JobCancelled(Exception):
     """工作被新的要求取代（例如又換了 KEY），中途停止。"""
 
 
+# ---------------------------------------------------------------- 直播中暫停背景處理（2.0.1）
+# 分離、辨識會把顯示卡吃滿，直播畫面和 VTube Studio 的模型追蹤會掉格。
+# 偵測到直播軟體在跑、或練唱台的直播模式開著時，重工作的佇列先停住；結束後自動繼續。
+# 只擋「分離／分析／辨識」這類重工作；KEY 轉換、錄音評分照常，直播中換歌不受影響。
+LIVE_HOLD = {"apps": [], "live_seen": 0.0, "override_until": 0.0, "checked": 0.0}
+_live_lock = threading.Lock()
+
+
+def _running_apps(names: list[str]) -> list[str]:
+    if sys.platform != "win32" or not names:
+        return []
+    try:
+        flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        out = subprocess.run(["tasklist", "/FO", "CSV", "/NH"], capture_output=True, text=True,
+                             timeout=10, creationflags=flags, encoding="utf-8", errors="ignore").stdout
+    except Exception:
+        return []
+    low = out.lower()
+    return [n for n in names if f'"{n.lower()}"' in low]
+
+
+def live_touch() -> None:
+    """練唱台畫面在直播模式時每隔幾秒呼叫一次。"""
+    LIVE_HOLD["live_seen"] = time.time()
+
+
+def live_override(seconds: float = 3600) -> None:
+    """使用者按「直播中也照常處理」：暫時不管偵測結果。"""
+    LIVE_HOLD["override_until"] = time.time() + seconds
+
+
+def live_status(cfg: dict | None = None) -> dict:
+    """現在該不該暫停重工作，以及原因（給狀態列顯示）。每 15 秒才真的去查一次程式清單。"""
+    cfg = cfg or load_config()
+    now = time.time()
+    if not cfg.get("pause_while_streaming", True):
+        return {"hold": False, "reason": "", "apps": []}
+    if now < LIVE_HOLD["override_until"]:
+        return {"hold": False, "reason": "", "apps": [], "override": True}
+    with _live_lock:
+        if now - LIVE_HOLD["checked"] > 15:
+            LIVE_HOLD["checked"] = now
+            LIVE_HOLD["apps"] = _running_apps(cfg.get("streaming_apps") or [])
+    apps = list(LIVE_HOLD["apps"])
+    live = now - LIVE_HOLD["live_seen"] < 20
+    if apps:
+        return {"hold": True, "reason": "偵測到 " + "、".join(a.rsplit(".", 1)[0] for a in apps), "apps": apps}
+    if live:
+        return {"hold": True, "reason": "直播模式開著", "apps": []}
+    return {"hold": False, "reason": "", "apps": []}
+
+
 class Jobs:
     """一次只跑一個重工作，避免記憶體爆掉。"""
 
-    def __init__(self):
+    def __init__(self, live_safe: bool = False):
         self.pending: list[tuple[str, object]] = []   # 排隊中的工作（可以調整順序）
         self.state: dict[str, dict] = {}
         self.lock = threading.Lock()
         self.cv = threading.Condition(self.lock)
+        self.live_safe = live_safe   # 直播中要不要暫停（只有重工作的佇列開）
+        self.holding = ""            # 目前因為直播暫停中的原因（空字串＝沒有暫停）
         threading.Thread(target=self._run, daemon=True).start()
+
+    def _wait_live(self, jid: str | None = None) -> None:
+        """直播中：停在這裡，直到直播軟體關掉或直播模式關掉。"""
+        if not self.live_safe:
+            return
+        shown = False
+        while True:
+            st = live_status()
+            if not st["hold"]:
+                break
+            if not shown:
+                shown = True
+                self.holding = st["reason"]
+                if jid:
+                    self.update(jid, step=f"直播中暫停（{st['reason']}）")
+            if jid and (self.state.get(jid) or {}).get("cancel"):
+                break   # 讓 report() 丟出取消
+            time.sleep(3)
+        self.holding = ""
 
     def submit(self, kind: str, song_id: str, fn, label: str = "") -> str:
         jid = uuid.uuid4().hex[:10]
@@ -2910,12 +3034,18 @@ class Jobs:
                 jid, fn = self.pending.pop(0)
             if self.get(jid)["status"] == "cancelled":
                 continue
+            self._wait_live()   # 直播中不開始新的重工作
+            if self.get(jid)["status"] == "cancelled":
+                continue
             self.update(jid, status="running", step="開始")
 
             def report(step, p, jid=jid):
                 if (self.state.get(jid) or {}).get("cancel"):
                     raise JobCancelled()
                 self.update(jid, step=step, progress=round(p, 3))
+                self._wait_live(jid)   # 做到一半開播：在下一個進度點停下，不再佔顯示卡
+                if (self.state.get(jid) or {}).get("cancel"):
+                    raise JobCancelled()
             try:
                 fn(report)
                 self.update(jid, status="done", step="完成", progress=1.0)
