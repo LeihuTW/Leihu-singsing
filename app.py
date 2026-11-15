@@ -495,6 +495,8 @@ def rename(sid):
     if "key" in body:   # 預設 KEY：打開這首歌時自動切到這個 KEY，並先做好移調版本
         k = P.parse_key(body.get("key"))
         changes.update(key=k or 0, key_set_at=time.time())
+    if "lyrics_flag" in body:   # 歌詞待修標記（直播中發現不準先標起來，下播再處理）
+        changes["lyrics_flag"] = bool(body.get("lyrics_flag"))
     if "lyrics_language" in body:   # 這首歌的辨識語言；null＝依設定
         v = body.get("lyrics_language")
         changes["lyrics_language"] = v if v in ("", "zh", "ja", "en", "ko", "yue") else None

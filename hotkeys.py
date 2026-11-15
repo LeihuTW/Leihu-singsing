@@ -15,6 +15,7 @@ ACTIONS = [
     ("next-song", "待唱清單的下一首", "Ctrl+Alt+N"),
     ("key-up", "KEY 升一個半音", "Ctrl+Alt+PageUp"),
     ("key-down", "KEY 降一個半音", "Ctrl+Alt+PageDown"),
+    ("flag", "標記／取消「歌詞待修」", "Ctrl+Alt+F"),
 ]
 ACTION_IDS = [a for a, _, _ in ACTIONS]
 

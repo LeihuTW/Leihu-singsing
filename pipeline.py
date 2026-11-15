@@ -3241,6 +3241,11 @@ def find_candidates(d: Path, cfg: dict, query: str = "", check=None,
         out.append(c)
 
     title = _norm(" ".join(filter(None, [meta.get("title"), meta.get("yt_track"), meta.get("yt_artist")])))
+    # 2.0.1：有時間軸的候選，拿它的時間軸和這首歌主唱開口的位置比對，算出「吻合度」0～1。
+    # 歌名和長度都一樣、但其實是翻唱版、不同剪輯版的，吻合度會明顯比較低，自動套用時就不會挑到
+    phrases = voice_phrases(d)
+    for c in out:
+        c["voice_fit"] = timeline_fit(c, phrases, dur) if (c["synced"] and phrases) else None
 
     def score(c):
         # 歌名吻合度：候選的歌名（與歌手）有多少字出現在這首歌的標題裡；和辨識結果無關
@@ -3250,9 +3255,38 @@ def find_candidates(d: Path, cfg: dict, query: str = "", check=None,
         base = 0.5 * c["title_match"] - pen + (0.08 if c["synced"] else 0)
         if reliable and c["similarity"] is not None:   # 辨識可靠時，相似度才拿來參考
             base += c["similarity"]
+        if c.get("voice_fit") is not None:
+            base += 0.6 * (c["voice_fit"] - 0.5)   # 吻合的加分、不吻合的扣分（±0.3）
         return -base
     out.sort(key=score)
     return list(dict.fromkeys(tried)), out[:12]
+
+
+def timeline_fit(c: dict, phrases: list[tuple[float, float]], dur: float | None) -> float | None:
+    """候選歌詞的時間軸和這首歌主唱開口位置的吻合度（0～1）。
+    依網站的時間軸（長度不同時先依比例與位移對齊，和套用時的做法相同）算每一句開頭離最近一次開口多遠：
+    0.3 秒內算吻合，愈遠分數愈低。句子太少時不算。"""
+    times = [l["t"] for l in parse_lrc(c["synced"]) if l["t"] is not None and l["text"].strip()]
+    if len(times) < 4 or len(phrases) < 2:
+        return None
+    ts = np.array(times, dtype=float)
+    r = None
+    try:
+        r = voice_fit(times, _PhraseStub(phrases), c.get("duration"), dur)   # 需要整體對齊時先對齊
+    except Exception:
+        r = None
+    if r:
+        ts = ts * r[0] + r[1]
+    onsets = np.array([a for a, _ in phrases])
+    k = np.clip(np.searchsorted(onsets, ts), 1, len(onsets) - 1)
+    dist = np.minimum(np.abs(ts - onsets[k - 1]), np.abs(ts - onsets[k]))
+    return round(float(np.mean(np.exp(-(dist ** 2) / (2 * 0.35 ** 2)))), 2)
+
+
+class _PhraseStub:
+    """讓 voice_fit 直接用算好的開口段落（不用每個候選都重讀 pitch.json）。"""
+    def __init__(self, phrases):
+        self.phrases = phrases
 
 
 def recognition_reliable(meta: dict) -> bool:
@@ -3290,6 +3324,8 @@ def find_and_store_candidates(d: Path, cfg: dict, check=None, apply_first: bool 
         likely = [c for c in cands if c["similarity"] is None or c["similarity"] >= 0.25]
     else:
         likely = [c for c in cands if c.get("title_match", 0) >= 0.5 or (c["diff"] is not None and c["diff"] <= 5)]
+    # 和歌聲對不上的（吻合度低於 0.5：一半以上的句子離開口超過 0.5 秒）不自動套用，留給使用者自己挑
+    likely = [c for c in likely if c.get("voice_fit") is None or c["voice_fit"] >= 0.5]
     atomic_write_text(d / "lyrics_candidates.json", json.dumps(cands, ensure_ascii=False))
     if meta.get("lyrics_source") in (None, "whisper"):
         update_meta(d, lyrics_pending=bool(likely))
@@ -3314,8 +3350,10 @@ def find_and_store_candidates(d: Path, cfg: dict, check=None, apply_first: bool 
 
 # ---------------------------------------------------------------- 依主唱聲音對時間（不需要辨識結果，任何語言都可以）
 
-def voice_phrases(d: Path, gap: float = 0.35, min_len: float = 0.3) -> list[tuple[float, float]]:
+def voice_phrases(d, gap: float = 0.35, min_len: float = 0.3) -> list[tuple[float, float]]:
     """從旋律分析結果找出「有在唱」的段落 (開始, 結束)。"""
+    if isinstance(d, _PhraseStub):
+        return d.phrases
     try:
         pj = json.loads((d / "pitch.json").read_text("utf-8"))
     except Exception:

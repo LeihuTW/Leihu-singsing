@@ -104,15 +104,16 @@ const LIB = { songs: [], cats: [], cur: store.get("libCat", "__all__"), q: "" };
 async function loadSongs() {
   const [songs, cats] = await Promise.all([api("/api/songs"), api("/api/categories")]);
   LIB.songs = songs; LIB.cats = cats;
-  if (LIB.cur !== "__all__" && LIB.cur !== "__none__" && !cats.includes(LIB.cur)) LIB.cur = "__all__";
+  if (!["__all__", "__none__", "__flag__"].includes(LIB.cur) && !cats.includes(LIB.cur)) LIB.cur = "__all__";
   songs.forEach(s => (titles[s.id] = s.title));
   renderCats(); renderSongs();
   if (LIB.q) libSearch();
 }
 function renderCats() {
   const box = $("#cats"); box.innerHTML = "";
-  const count = c => LIB.songs.filter(s => c === "__all__" || (c === "__none__" ? !s.category : s.category === c)).length;
+  const count = c => LIB.songs.filter(s => c === "__all__" || (c === "__flag__" ? !!s.lyrics_flag : c === "__none__" ? !s.category : s.category === c)).length;
   const items = [["__all__", "全部"], ...LIB.cats.map(c => [c, c]), ["__none__", "未分類"]];
+  if (LIB.songs.some(s => s.lyrics_flag) || LIB.cur === "__flag__") items.push(["__flag__", "歌詞待修"]);
   for (const [key, label] of items) {
     if (key === "__none__" && !LIB.cats.length) continue;
     const b = document.createElement("button");
@@ -217,8 +218,11 @@ $("#cat-del").onclick = async () => {
   loadSongs();
 };
 function songMatches(s) {
-  if (LIB.cur === "__none__" && s.category) return false;
-  if (LIB.cur !== "__all__" && LIB.cur !== "__none__" && s.category !== LIB.cur) return false;
+  if (LIB.cur === "__flag__") { if (!s.lyrics_flag) return false; }
+  else {
+    if (LIB.cur === "__none__" && s.category) return false;
+    if (LIB.cur !== "__all__" && LIB.cur !== "__none__" && s.category !== LIB.cur) return false;
+  }
   if (!LIB.q) return true;
   if (LIB.hits) return LIB.hits.has(s.id);
   const hay = [s.title, s.yt_artist, s.yt_track, s.yt_uploader, s.category, s.lyrics_text,
@@ -345,6 +349,24 @@ $("#lv-search").onclick = () => {
   $("#ls-dlg").hidden = false;
   if (!$("#ls-results").children.length) searchLyrics("");
 };
+/* 歌詞待修標記：直播中發現不準，按一下先標起來；歌曲庫多一個「歌詞待修」分類可以篩出來 */
+function syncFlagBtns() {
+  const on = !!(S.song && S.song.lyrics_flag);
+  for (const id of ["#lyr-flag", "#lv-flag"]) { const b = $(id); b.classList.toggle("on", on); b.textContent = on ? "已標待修" : "歌詞待修"; }
+}
+async function toggleLyricsFlag() {
+  if (!S.song) return toast("還沒選歌");
+  const on = !S.song.lyrics_flag;
+  try {
+    await api(`/api/songs/${S.song.id}`, { method: "PATCH", json: { lyrics_flag: on } });
+    S.song.lyrics_flag = on;
+    const s = LIB.songs.find(x => x.id === S.song.id); if (s) s.lyrics_flag = on;
+    syncFlagBtns(); renderCats();
+    toast(on ? "已標記「歌詞待修」，下播後在歌曲庫的「歌詞待修」分類找得到" : "已取消歌詞待修標記", 3000);
+  } catch (e) { toast(e.message); }
+}
+$("#lyr-flag").onclick = toggleLyricsFlag;
+$("#lv-flag").onclick = toggleLyricsFlag;
 $("#lsd-close").onclick = () => {
   $("#ls-dlg").hidden = true;
   if (lsHome) lsHome.after($("#ls-box"));
@@ -358,6 +380,7 @@ function liveAction(act) {
   if (act === "play") return S.playing || S.wantPlay ? pause() : play();
   if (act === "now") return liveAdjust("cur");
   if (act === "next-line") return liveAdjust("next");
+  if (act === "flag") return toggleLyricsFlag();
   if (act === "minus") return liveAdjust("cur", -0.1);
   if (act === "plus") return liveAdjust("cur", 0.1);
   if (act === "mode") {
@@ -528,7 +551,7 @@ function renderLiveSongs(box, list) {
     el.disabled = !ok;
     el.title = ok ? "開始這首" : "還沒處理好";
     el.innerHTML = `<span class="t"></span><span class="a"></span>${ok ? `<span class="add" role="button" title="加進待唱清單">＋</span>` : ""}`;
-    $(".t", el).textContent = s.title;
+    $(".t", el).textContent = (s.lyrics_flag ? "⚑ " : "") + s.title;
     $(".a", el).textContent = [s.artist, s.key ? `KEY ${s.key > 0 ? "+" : ""}${s.key}` : ""].filter(Boolean).join("・");
     el.onclick = e => {
       if (e.target.classList.contains("add")) { e.stopPropagation(); return queueAdd(s.id); }
@@ -600,6 +623,7 @@ function renderSongs() {
       chips.push(`<span class="chip warn" title="自動辨識不夠準確，已先留白">建議找線上歌詞</span>`);
     else chips.push(`<span class="chip ${st.lyrics ? "ok" : ""}">${st.lyrics ? "歌詞" : "無歌詞"}</span>`);
     if (s.lyrics_pending) chips.push(`<span class="chip warn">有線上歌詞可選</span>`);
+    if (s.lyrics_flag) chips.push(`<span class="chip warn" title="直播中標記的：歌詞不準，待處理">⚑ 歌詞待修</span>`);
     if (s.takes) chips.push(`<span>${s.takes} 次錄音</span>`);
     if (s.best != null) chips.push(`<span>最佳 <b class="num">${Math.round(s.best * 100)}%</b></span>`);
     el.innerHTML = `
@@ -1034,7 +1058,7 @@ async function openSong(id) {
   if (req !== S.openReq) return;
   pause();
   S.bufs = {}; S.dur = 0;   // 上一首的音訊先清掉：新的這首還沒載好（或載入失敗）時按播放，不會播到上一首
-  S.song = song; titles[id] = song.title; syncGroupBtn();
+  S.song = song; titles[id] = song.title; syncGroupBtn(); syncFlagBtns();
   if (window.LIVE) { LIVE.played = 0; LIVE.logged = null; }
   S.pitch = { hop: pitch.hop, midi: Float32Array.from(pitch.midi, v => (v == null ? NaN : v)) };
   S.notes = pitch.notes.map(([s, e, m]) => ({ s, e, m }));
@@ -2085,6 +2109,7 @@ function renderCandidates(box, results) {
     const simCls = sim == null ? "lo" : sim >= 0.6 ? "hi" : sim >= 0.35 ? "mid" : "lo";
     el.innerHTML = `<div class="h"><b></b><span class="hint"></span>
         ${sim == null ? "" : `<span class="sim ${simCls}">相似度 ${Math.round(sim * 100)}%</span>`}
+        ${it.voice_fit == null ? "" : `<span class="sim ${it.voice_fit >= 0.75 ? "hi" : it.voice_fit >= 0.5 ? "mid" : "lo"}" title="這版的時間軸和這首歌主唱開口位置的吻合程度；低於 50% 多半是不同版本（翻唱、現場版、不同剪輯），不會自動套用">和歌聲吻合 ${Math.round(it.voice_fit * 100)}%</span>`}
         ${it.synced ? '<span class="chip ok">有時間軸</span>' : '<span class="chip">純文字</span>'}</div>
       <div class="pv"></div><div class="row"><span class="hint src"></span><button class="primary">使用這版</button></div>`;
     $("b", el).textContent = it.track || "（未命名）";
