@@ -28,6 +28,7 @@
     <div class="lib-head">
       <h1>歌曲庫</h1>
       <label class="btn primary">匯入歌曲<input type="file" id="import" accept="audio/*,.mp3,.wav,.flac,.ogg,.m4a" multiple hidden></label>
+      <button id="export-open" type="button">匯出歌單</button>
       <span class="hint">處理都在這台電腦上進行，第一次使用各模型時需要連網下載。</span>
     </div>
     <form id="yt-form" class="yt">
@@ -506,11 +507,56 @@
 
 <div id="setlist-dlg" class="modal" hidden>
   <div class="sheet" role="dialog" aria-modal="true" aria-labelledby="sl-title">
-    <h1 id="sl-title">本場歌單</h1>
-    <p class="hint">直播模式下，一首歌播放超過 30 秒就記下來。距離上一首超過 6 小時會自動當成新的一場。</p>
+    <h1 id="sl-title">直播歌單</h1>
+    <p class="hint">直播模式下，一首歌播放超過 30 秒就記下來。距離上一首超過 6 小時會自動當成新的一場；過去的場次也能在這裡回顧、匯出。</p>
+    <div class="row sl-opts">
+      <select id="sl-session" aria-label="選擇場次"></select>
+      <select id="sl-mode" aria-label="顯示方式"><option value="list">歌單文字</option><option value="chapters">YouTube 章節時間戳</option></select>
+      <label id="sl-start-f" class="row" hidden>開台時間 <input id="sl-start" type="time" step="1"></label>
+    </div>
+    <p id="sl-hint" class="hint" hidden>開台時間是影片的 00:00。預設是第一首歌開始的時間，請改成實際開台（影片開始）的時間；YouTube 要至少 3 段、每段 10 秒以上才會顯示章節。</p>
     <textarea id="sl-text" rows="14" readonly></textarea>
-    <div class="row"><button id="sl-copy" class="primary">複製文字</button><button id="sl-new" class="ghost danger">開始新的一場（清空）</button>
+    <div class="row"><button id="sl-copy" class="primary">複製文字</button><button id="sl-save" class="ghost">存成文字檔</button><button id="sl-xlsx" class="ghost">匯出 Excel</button>
+      <button id="sl-new" class="ghost danger">開始新的一場</button>
       <span class="spacer"></span><button id="sl-close" class="ghost">關閉</button></div>
+  </div>
+</div>
+
+<div id="export-dlg" class="modal" hidden>
+  <div class="sheet" role="dialog" aria-modal="true" aria-labelledby="ex-title-h">
+    <h1 id="ex-title-h">匯出歌單</h1>
+    <div class="field"><span>格式</span>
+      <label class="row"><input type="radio" name="ex-fmt" value="html" checked> 網頁：給觀眾看，可以搜尋、依分類切換</label>
+      <label class="row"><input type="radio" name="ex-fmt" value="xlsx"> Excel（.xlsx）：可以自己排版、篩選</label>
+      <label class="row"><input type="radio" name="ex-fmt" value="csv"> 練唱台歌單（.csv）：備份、換電腦用</label>
+      <span class="hint">網頁檔可以直接傳到 Discord 或放上網路空間，點開就能看。練唱台歌單可以在「批次加入」匯回，會依 YouTube 網址自動重新下載。</span></div>
+    <label class="field" id="ex-title-f"><span>標題</span><input id="ex-title" type="text" maxlength="60" placeholder="點歌清單"></label>
+    <div class="field"><span>範圍</span>
+      <label class="row"><input type="radio" name="ex-scope" value="all" checked> 全部分類</label>
+      <label class="row"><input type="radio" name="ex-scope" value="cur"> 只匯出目前的分類（<span id="ex-cur"></span>）</label>
+      <label class="row"><input id="ex-ready" type="checkbox" checked> 只列處理好、能唱的歌</label>
+      <label class="row" id="ex-key-f"><input id="ex-key" type="checkbox" checked> 顯示 KEY</label></div>
+    <p class="hint">檔案會存到「下載\雷虎練唱台」，存好會在檔案總管裡顯示。</p>
+    <div class="row"><button id="ex-go" class="primary">匯出</button><span class="spacer"></span><button id="ex-close" class="ghost">關閉</button></div>
+  </div>
+</div>
+
+<div id="storage-dlg" class="modal" hidden>
+  <div class="sheet" role="dialog" aria-modal="true" aria-labelledby="st-title">
+    <h1 id="st-title">搬移歌曲庫</h1>
+    <p class="hint">空間不夠或換電腦時，把處理好的歌（和可選的模型）搬到別的磁碟。會先<b>複製</b>到新位置並逐一核對，沒問題才改用新位置；舊的那份會留著，你確認新位置正常後再到設定裡刪除。搬移期間處理佇列會暫停、暫時不能練唱，搬完自動恢復。</p>
+    <div class="field"><span>要搬的東西</span>
+      <label class="row"><input id="st-lib" type="checkbox" checked> <span id="st-lib-l">歌曲庫</span></label>
+      <label class="row"><input id="st-models" type="checkbox"> <span id="st-models-l">模型（可選）</span></label></div>
+    <div class="field"><span>新的位置</span>
+      <div class="row"><input id="st-target" type="text" placeholder="例如 D:\雷虎練唱台資料" style="flex:1">
+        <button id="st-pick" type="button" class="ghost" hidden>選擇資料夾…</button></div>
+      <div id="st-drives" class="st-drives"></div>
+      <span class="hint">會在這個資料夾裡建立 library（歌曲庫）和 models（模型）兩個資料夾；請選空的資料夾。</span></div>
+    <p id="st-need" class="hint"></p>
+    <div class="row"><button id="st-go" class="primary">開始搬移</button>
+      <button id="st-adopt" class="ghost" title="換電腦、外接硬碟：選一個已經有歌曲庫的資料夾（例如從舊電腦整個複製過來的），直接改用它，不複製檔案">改用這裡現有的歌曲庫</button>
+      <span class="spacer"></span><button id="st-close" class="ghost">取消</button></div>
   </div>
 </div>
 
@@ -576,6 +622,10 @@
     <div class="field"><span>儲存空間</span>
       <div class="hint" id="storage-info"></div>
       <div><button id="storage-compact" hidden>轉成 FLAC 節省空間</button></div></div>
+    <div class="field"><span>儲存位置（歌曲庫、模型）</span>
+      <div id="loc-info" class="storage-info hint">讀取中…</div>
+      <div><button id="st-open" type="button">搬移到其他位置…</button></div>
+      <div id="storage-old"></div></div>
     <div class="row">
       <button id="cfg-save" class="primary">儲存</button>
       <button id="cfg-close" class="ghost">關閉</button>

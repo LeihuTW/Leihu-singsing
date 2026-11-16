@@ -44,6 +44,18 @@ if sys.platform == "win32":
 _bar = {"on": False, "base": 0.0, "span": 0.0, "pct": -1, "detail": ""}
 
 
+
+def models_root() -> Path:
+    """2.3.0：模型可以搬到別的位置（config.json 的 models_dir）。"""
+    try:
+        import json as _json
+        d = _json.loads((ROOT / "config.json").read_text("utf-8")).get("models_dir")
+        if d:
+            return Path(d)
+    except Exception:
+        pass
+    return ROOT / "models"
+
 def _clear_bar() -> None:
     if _bar["on"]:
         print("\r" + " " * 100 + "\r", end="", flush=True)
@@ -517,7 +529,7 @@ def verify(tag: str) -> bool:
             ok, out = probe(code)
         say(f"  {'✓' if ok else '✗'} {name}：{out}")
         ok_all &= ok or name == "視窗介面"
-    model = ROOT / "models" / "uvr" / SEP_MODELS[0]
+    model = models_root() / "uvr" / SEP_MODELS[0]
     if tag != "cpu" and model.exists():
         ok, out = probe("import torch, onnxruntime as o; s=o.InferenceSession(r'%s', providers=['CUDAExecutionProvider','CPUExecutionProvider']); print(s.get_providers()[0])" % model)
         say(f"  {'✓' if ok and 'CUDA' in out else '!'} 人聲分離使用：{out}")
@@ -553,7 +565,7 @@ def model_ok(path: Path) -> bool:
 
 
 def prefetch_models(tag: str = "cpu") -> None:
-    uvr = ROOT / "models" / "uvr"
+    uvr = models_root() / "uvr"
     uvr.mkdir(parents=True, exist_ok=True)
     missing = []
     for m in SEP_MODELS:
@@ -584,7 +596,7 @@ def prefetch_models(tag: str = "cpu") -> None:
     else:
         say("  ✓ 人聲分離模型已存在")
     progress(0.2, "歌詞辨識模型")
-    wdir = ROOT / "models" / "whisper"
+    wdir = models_root() / "whisper"
     say(f"  下載歌詞辨識模型 {WHISPER}（約 1.6 GB，已下載的部分會接著下載）…")
     stop = _watch(wdir, max(1e8, 1.62e9 - _dir_size(wdir)), "歌詞辨識模型", (0.2, 1))
     ok, out = probe("from faster_whisper.utils import download_model; "

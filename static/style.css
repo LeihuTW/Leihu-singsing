@@ -450,3 +450,9 @@ body.live .lyr-count { font-size: calc(48px * var(--ls)); }
 .jobs-bar { margin: 6px 0 2px; }
 .lyr-snip { font-size: 13px; color: var(--muted); margin-top: 2px; }
 #lib-scope { flex: none; }
+.storage-info div { margin: 2px 0; word-break: break-all; }
+.st-drives { display: flex; flex-wrap: wrap; gap: 6px; margin: 6px 0; }
+.st-drives button { font-size: 13px; padding: 4px 10px; }
+#storage-old .row { margin-top: 6px; }
+.sl-opts { flex-wrap: wrap; gap: 8px; margin-bottom: 6px; }
+.sl-opts label.row { gap: 6px; }

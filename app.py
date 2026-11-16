@@ -20,6 +20,7 @@ import claude_api as C
 import pipeline as P
 import share as SH
 import score_sheet as SS   # 1.7：旋律譜匯出
+import exporter as EX      # 2.3.0：匯出歌單、直播歌單回顧
 import hotkeys as HK   # 2.0：自訂全域快捷鍵
 
 VERSION = "2.2.1"
@@ -125,6 +126,12 @@ def _local_only():
         origin = request.headers.get("Origin")
         if origin and origin.rstrip("/").lower() not in (f"http://127.0.0.1:{PORT}", f"http://localhost:{PORT}"):
             abort(403)
+        # 2.3.0 搬移歌曲庫中：會寫進歌曲庫的操作先擋住（不然搬完會少掉這段時間的修改）
+        if P.STORAGE["moving"] and request.path.startswith(MOVE_BLOCK):
+            raise P.UserError("正在搬移歌曲庫，搬完才能操作歌曲（大約幾分鐘，進度在處理清單）")
+
+
+MOVE_BLOCK = ("/api/songs", "/api/youtube", "/api/batch", "/api/upgrade", "/api/categories", "/api/sheet")
 
 
 @app.post("/api/remote/open")
@@ -1365,6 +1372,75 @@ def overlay_get():
     return jsonify(out)
 
 
+# ---------------------------------------------------------------- 2.3.0 歌曲庫／模型搬移
+@app.get("/api/storage/location")
+def storage_location():
+    return jsonify(P.storage_info())
+
+
+@app.post("/api/storage/move")
+def storage_move():
+    """把歌曲庫（和可選的模型）搬到新位置。排進處理佇列：等手上的工作停下來才開始；
+    搬移中處理佇列暫停、會寫進歌曲庫的操作先擋住，搬完恢復原本的暫停狀態。"""
+    b = request.get_json(force=True) or {}
+    target = str(b.get("target") or "").strip()
+    what = [k for k in ("library", "models") if b.get(k)]
+    if not target:
+        raise P.UserError("請選擇或輸入新的位置")
+    if not what:
+        raise P.UserError("請至少選一項要搬移的東西")
+    if P.STORAGE["moving"] or jobs.find("storage", "", "move"):
+        raise P.UserError("已經在搬移中")
+    if "models" in what and (P.HQ_DL.get("state") == "downloading" or P.HQV_DL.get("state") == "downloading"):
+        raise P.UserError("模型還在下載中，下載完成後再搬移")
+    was_paused = jobs.paused
+    jobs.set_paused(True)   # 處理中的歌先停下、讓出歌曲庫
+
+    def run(report):
+        P.STORAGE["moving"] = True
+        try:
+            t0 = time.time()
+            while vjobs.active() and any(j["status"] == "running" for j in vjobs.active()):
+                report("等待 KEY 轉換完成", 0.0)   # 移調版本寫在歌曲庫裡，等它寫完
+                time.sleep(1)
+                if time.time() - t0 > 600:
+                    break
+            out = P.move_storage(target, what, report)
+            try:
+                import gpu_worker as G
+                G.POOL.shutdown()   # 顯示卡處理程式重開，才會用新的模型位置
+            except Exception:
+                pass
+            print(f"[storage] 搬移完成：{out}", flush=True)
+        finally:
+            P.STORAGE["moving"] = False
+            jobs.set_paused(was_paused)
+    jid = jobs.submit("storage", "", run, label="move")
+    return jsonify(job=jid)
+
+
+@app.post("/api/storage/adopt")
+def storage_adopt():
+    """改用已經有歌曲庫的資料夾（換電腦、外接硬碟），不複製檔案。"""
+    if P.STORAGE["moving"] or jobs.running:
+        raise P.UserError("還有工作在處理，請先按「全部暫停」等它停下來，或等處理完再切換")
+    b = request.get_json(force=True) or {}
+    out = P.adopt_storage(str(b.get("path") or ""))
+    try:
+        import gpu_worker as G
+        G.POOL.shutdown()
+    except Exception:
+        pass
+    return jsonify(out)
+
+
+@app.post("/api/storage/delete-old")
+def storage_delete_old():
+    b = request.get_json(force=True) or {}
+    P.delete_old_storage(str(b.get("path") or ""))
+    return jsonify(ok=True)
+
+
 @app.post("/api/jobs/pause-all")
 def jobs_pause_all():
     """2.1.1「全部暫停」：處理歌曲的工作都先停（處理中的那首在下一個進度點停下、讓出顯示卡）。
@@ -1454,6 +1530,7 @@ def hotkeys_pause():
 
 # ---------------------------------------------------------------- 本場歌單（1.7）
 SETLIST_PATH = P.ROOT / "setlist.json"
+SETLIST_DIR = P.ROOT / "setlists"   # 2.3.0：過去場次的歌單（開始新的一場時把上一場存起來）
 _SETLIST_LOCK = threading.Lock()
 SETLIST_GAP = 6 * 3600   # 距離上一首超過 6 小時就當成新的一場
 
@@ -1468,10 +1545,99 @@ def _setlist_read() -> dict:
     return {"started": None, "items": []}
 
 
+def _setlist_archive(d: dict) -> None:
+    """把一場歌單存進 setlists\（檔名是開始時間），之後還能回顧、匯出。"""
+    if not d.get("items"):
+        return
+    SETLIST_DIR.mkdir(exist_ok=True)
+    t = d.get("started") or d["items"][0]["t"]
+    P.atomic_write_text(SETLIST_DIR / (time.strftime("%Y%m%d-%H%M%S", time.localtime(t)) + ".json"),
+                        json.dumps(d, ensure_ascii=False))
+
+
+def _setlist_load(name: str | None) -> dict:
+    if not name:
+        return _setlist_read()
+    import re
+    if not re.fullmatch(r"\d{8}-\d{6}\.json", name or ""):
+        raise P.UserError("找不到這一場")
+    try:
+        return json.loads((SETLIST_DIR / name).read_text("utf-8"))
+    except (OSError, ValueError):
+        raise P.UserError("找不到這一場")
+
+
 @app.get("/api/setlist")
 def setlist_get():
     with _SETLIST_LOCK:
-        return jsonify(_setlist_read())
+        return jsonify(_setlist_load(request.args.get("file")))
+
+
+@app.get("/api/setlist/history")
+def setlist_history():
+    """本場＋過去的場次（新的在前），最多 60 場。"""
+    out = []
+    with _SETLIST_LOCK:
+        cur = _setlist_read()
+        if cur["items"]:
+            out.append({"file": "", "started": cur.get("started") or cur["items"][0]["t"], "count": len(cur["items"]), "current": True})
+        if SETLIST_DIR.exists():
+            for p in sorted(SETLIST_DIR.glob("*.json"), reverse=True)[:60]:
+                try:
+                    d = json.loads(p.read_text("utf-8"))
+                    out.append({"file": p.name, "started": d.get("started") or d["items"][0]["t"], "count": len(d["items"])})
+                except (OSError, ValueError, KeyError, IndexError):
+                    continue
+    return jsonify(out)
+
+
+@app.post("/api/export/setlist")
+def export_setlist():
+    """直播歌單回顧：存成文字檔（YouTube 章節或歌單文字，內容由畫面產生）或 Excel。"""
+    b = request.get_json(force=True) or {}
+    with _SETLIST_LOCK:
+        d = _setlist_load(b.get("file") or None)
+    if not d.get("items"):
+        raise P.UserError("這一場沒有唱過的歌")
+    day = time.strftime("%Y%m%d", time.localtime(d.get("started") or d["items"][0]["t"]))
+    if b.get("format") == "xlsx":
+        start = float(b["start"]) if b.get("start") else None
+        p = EX.save_download(f"歌單回顧_{day}.xlsx", EX.setlist_xlsx(d["items"], start))
+    else:
+        text = str(b.get("text") or "")[:200000]
+        if not text.strip():
+            raise P.UserError("沒有內容可以存")
+        p = EX.save_download(f"{'YouTube章節' if b.get('kind') == 'chapters' else '歌單'}_{day}.txt", text)
+    _reveal(p)
+    return jsonify(path=str(p))
+
+
+@app.post("/api/export/songlist")
+def export_songlist():
+    """匯出歌單：網頁（給觀眾看）、Excel，或可以用「批次加入」再匯回的 CSV。存到「下載\雷虎練唱台」並在檔案總管裡顯示。"""
+    b = request.get_json(force=True) or {}
+    fmt = b.get("format", "html")
+    cat = b.get("category")
+    scope = None if not cat or cat == "__all__" else ("" if cat == "__none__" else str(cat))
+    rows = EX.song_rows(scope, ready_only=bool(b.get("ready_only", True)))
+    if not rows:
+        raise P.UserError("沒有符合條件的歌可以匯出")
+    title = str(b.get("title") or "點歌清單").strip()[:60] or "點歌清單"
+    day = time.strftime("%Y%m%d")
+    if fmt == "xlsx":
+        p = EX.save_download(f"{title}_{day}.xlsx", EX.songlist_xlsx(rows, bool(b.get("show_key", True))))
+    elif fmt == "csv":
+        p = EX.save_download(f"練唱台歌單_{day}.csv", EX.songlist_csv(rows))
+    else:
+        p = EX.save_download(f"{title}_{day}.html", EX.songlist_html(rows, title, bool(b.get("show_key", True))))
+    _reveal(p)
+    return jsonify(path=str(p), count=len(rows))
+
+
+def _reveal(p: Path) -> None:
+    if sys.platform == "win32":
+        import subprocess
+        subprocess.Popen(["explorer", "/select,", str(p)])
 
 
 @app.post("/api/setlist/add")
@@ -1480,10 +1646,15 @@ def setlist_add():
     now = time.time()
     item = {"t": now, "id": str(b.get("id", ""))[:20], "title": str(b.get("title", ""))[:200],
             "artist": str(b.get("artist", ""))[:120], "key": int(b.get("key") or 0)}
+    try:   # 2.3.0：這首開始唱的時間（畫面送來的是累積播放了幾秒），給 YouTube 章節用
+        item["s"] = now - max(0.0, min(600.0, float(b.get("played") or 30)))
+    except (TypeError, ValueError):
+        item["s"] = now - 30
     with _SETLIST_LOCK:
         d = _setlist_read()
         if not d["items"] or now - d["items"][-1]["t"] > SETLIST_GAP:
-            d = {"started": now, "items": []}
+            _setlist_archive(d)   # 上一場存起來
+            d = {"started": item["s"], "items": []}
         last = d["items"][-1] if d["items"] else None
         if not (last and last["id"] == item["id"] and now - last["t"] < 600):   # 同一首十分鐘內不重複記
             d["items"].append(item)
@@ -1503,6 +1674,7 @@ def setlist_add():
 @app.post("/api/setlist/clear")
 def setlist_clear():
     with _SETLIST_LOCK:
+        _setlist_archive(_setlist_read())   # 清空前先存起來，之後還能回顧
         P.atomic_write_text(SETLIST_PATH, json.dumps({"started": None, "items": []}))
     return jsonify(ok=True)
 

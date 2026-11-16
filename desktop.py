@@ -130,6 +130,21 @@ class Api:
         self._timing = w
         return True
 
+    def pick_folder(self, start: str = "") -> str:
+        """2.3.0：搬移歌曲庫時選資料夾（網頁本身打不開資料夾選擇視窗）。取消時回傳空字串。"""
+        import webview
+        try:
+            kind = webview.FileDialog.FOLDER
+        except AttributeError:
+            kind = webview.FOLDER_DIALOG
+        win = webview.windows[0] if webview.windows else None
+        if win is None:
+            return ""
+        r = win.create_file_dialog(kind, directory=start or "")
+        if not r:
+            return ""
+        return str(r[0] if isinstance(r, (list, tuple)) else r)
+
 
 # 全域快捷鍵（練唱台不在最前面也能用，Stream Deck／巨集鍵盤可以直接綁）。
 # 按鍵定義在 hotkeys.py；設定改了（config.json）或設定畫面正在錄新按鍵時，會自動重新註冊，不用重開

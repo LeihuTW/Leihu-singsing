@@ -499,30 +499,121 @@ function setlistTick(t) {
   LIVE.played += dt;
   if (LIVE.played < 30) return;
   LIVE.logged = S.song.id;
-  api("/api/setlist/add", { json: { id: S.song.id, title: S.song.title, artist: S.song.artist || "", key: S.key } }).catch(() => {});
+  api("/api/setlist/add", { json: { id: S.song.id, title: S.song.title, artist: S.song.artist || "", key: S.key, played: LIVE.played } }).catch(() => {});
+}
+/* 2.3.0 直播歌單回顧：本場＋過去場次，可產生 YouTube 章節時間戳、存成文字檔或 Excel */
+const SL = { file: "", data: null };
+const pad2 = n => String(n).padStart(2, "0");
+const hhmm = t => { const d = new Date(t * 1000); return `${pad2(d.getHours())}:${pad2(d.getMinutes())}`; };
+const songStart = x => x.s || (x.t - 30);
+function hms(sec) {
+  sec = Math.max(0, Math.floor(sec));
+  const h = Math.floor(sec / 3600), m = Math.floor(sec / 60) % 60, ss = sec % 60;
+  return h ? `${h}:${pad2(m)}:${pad2(ss)}` : `${pad2(m)}:${pad2(ss)}`;
+}
+function slStart() {   // 開台時間（epoch 秒）：同一天的時:分:秒
+  const v = $("#sl-start").value, it = SL.data && SL.data.items[0];
+  if (!v || !it) return it ? songStart(it) : 0;
+  const [h, m, ss] = v.split(":").map(Number);
+  const d = new Date(songStart(it) * 1000); d.setHours(h, m, ss || 0, 0);
+  let t = d.getTime() / 1000;
+  if (t > songStart(it) + 3600) t -= 86400;   // 跨午夜：開台在前一天
+  return t;
+}
+function slRender() {
+  const r = SL.data, mode = $("#sl-mode").value;
+  $("#sl-start-f").hidden = $("#sl-hint").hidden = mode !== "chapters";
+  if (!r || !r.items.length) { $("#sl-text").value = "這場還沒有唱過的歌。"; return; }
+  const name = x => `${x.title}${x.artist ? ` － ${x.artist}` : ""}`;
+  if (mode === "chapters") {
+    const st = slStart(), lines = ["00:00 開場"];
+    let last = 0;
+    for (const x of r.items) {
+      const off = songStart(x) - st;
+      if (off < 10 || off - last < 10) continue;   // YouTube：第一段 00:00、每段至少 10 秒
+      lines.push(`${hms(off)} ${name(x)}`); last = off;
+    }
+    $("#sl-text").value = lines.join("\n");
+  } else {
+    const d = new Date((r.started || r.items[0].t) * 1000);
+    const head = `${d.getFullYear()}/${pad2(d.getMonth() + 1)}/${pad2(d.getDate())} 歌單`;
+    $("#sl-text").value = [head, ...r.items.map((x, i) => `${i + 1}. ${hhmm(songStart(x))} ${name(x)}${x.key ? `（KEY ${x.key > 0 ? "+" : ""}${x.key}）` : ""}`)].join("\n");
+  }
+}
+async function slLoad(file) {
+  SL.file = file || "";
+  SL.data = await api(`/api/setlist${SL.file ? `?file=${encodeURIComponent(SL.file)}` : ""}`);
+  const it = SL.data.items[0];
+  if (it) { const d = new Date(songStart(it) * 1000); $("#sl-start").value = `${pad2(d.getHours())}:${pad2(d.getMinutes())}:00`; }
+  slRender();
 }
 async function openSetlist() {
   try {
-    const r = await api("/api/setlist");
-    const d = r.started ? new Date(r.started * 1000) : new Date();
-    const head = `${d.getFullYear()}/${String(d.getMonth() + 1).padStart(2, "0")}/${String(d.getDate()).padStart(2, "0")} 歌單`;
-    const lines = r.items.map((x, i) => {
-      const tm = new Date(x.t * 1000);
-      return `${i + 1}. ${String(tm.getHours()).padStart(2, "0")}:${String(tm.getMinutes()).padStart(2, "0")} ${x.title}${x.artist ? ` － ${x.artist}` : ""}${x.key ? `（KEY ${x.key > 0 ? "+" : ""}${x.key}）` : ""}`;
-    });
-    $("#sl-text").value = r.items.length ? [head, ...lines].join("\n") : "這場還沒有唱過的歌。";
+    const hist = await api("/api/setlist/history");
+    const sel = $("#sl-session"); sel.innerHTML = "";
+    if (!hist.some(h => h.current)) hist.unshift({ file: "", started: Date.now() / 1000, count: 0, current: true });
+    for (const h of hist) {
+      const o = document.createElement("option"); o.value = h.file;
+      const d = new Date(h.started * 1000);
+      o.textContent = `${h.current ? "本場" : `${d.getMonth() + 1}/${d.getDate()} ${hhmm(h.started)}`}（${h.count} 首）`;
+      sel.append(o);
+    }
+    sel.value = "";
+    await slLoad("");
     $("#setlist-dlg").hidden = false;
   } catch (e) { toast(e.message); }
 }
 $("#lv-setlist").onclick = openSetlist;
+$("#sl-session").onchange = e => slLoad(e.target.value).catch(err => toast(err.message));
+$("#sl-mode").onchange = slRender;
+$("#sl-start").oninput = slRender;
 $("#sl-copy").onclick = async () => {
   try { await navigator.clipboard.writeText($("#sl-text").value); toast("已複製", 1500); }
   catch { $("#sl-text").select(); document.execCommand("copy"); toast("已複製", 1500); }
 };
+$("#sl-save").onclick = async () => {
+  try { await api("/api/export/setlist", { json: { file: SL.file, text: $("#sl-text").value, kind: $("#sl-mode").value } }); toast("已存到「下載\\雷虎練唱台」", 3000); }
+  catch (e) { toast(e.message); }
+};
+$("#sl-xlsx").onclick = async () => {
+  try { await api("/api/export/setlist", { json: { file: SL.file, format: "xlsx", start: slStart() } }); toast("已存到「下載\\雷虎練唱台」", 3000); }
+  catch (e) { toast(e.message); }
+};
 $("#sl-new").onclick = async () => {
-  if (!confirm("清空本場歌單，開始新的一場？")) return;
+  if (!confirm("結束這一場，開始新的一場？（這一場會保存起來，之後還能回顧）")) return;
   await api("/api/setlist/clear", { json: {} }).catch(e => toast(e.message));
   LIVE.logged = null; openSetlist();
+};
+
+/* 2.3.0 匯出歌單：網頁（給觀眾看）、Excel、可以再匯回的 CSV */
+const exFmt = () => document.querySelector('input[name="ex-fmt"]:checked').value;
+function exSync() {
+  const f = exFmt();
+  $("#ex-title-f").hidden = f === "csv";
+  $("#ex-key-f").hidden = f === "csv";
+}
+$("#export-open").onclick = () => {
+  const named = LIB.cur === "__all__" ? "全部" : LIB.cur === "__none__" ? "未分類" : LIB.cur === "__flag__" ? "全部" : LIB.cur;
+  $("#ex-cur").textContent = named;
+  document.querySelector('input[name="ex-scope"][value="cur"]').disabled = LIB.cur === "__all__" || LIB.cur === "__flag__";
+  if (LIB.cur === "__all__" || LIB.cur === "__flag__") document.querySelector('input[name="ex-scope"][value="all"]').checked = true;
+  $("#ex-title").value = store.get("exportTitle", "");
+  exSync();
+  $("#export-dlg").hidden = false;
+};
+document.querySelectorAll('input[name="ex-fmt"]').forEach(r => (r.onchange = exSync));
+$("#ex-close").onclick = () => ($("#export-dlg").hidden = true);
+$("#ex-go").onclick = async () => {
+  const scope = document.querySelector('input[name="ex-scope"]:checked').value;
+  const title = $("#ex-title").value.trim();
+  store.set("exportTitle", title);
+  try {
+    const r = await api("/api/export/songlist", { json: {
+      format: exFmt(), category: scope === "cur" ? LIB.cur : "__all__", ready_only: $("#ex-ready").checked,
+      show_key: $("#ex-key").checked, title } });
+    toast(`已匯出 ${r.count} 首，存到「下載\\雷虎練唱台」`, 4000);
+    $("#export-dlg").hidden = true;
+  } catch (e) { toast(e.message); }
 };
 $("#sl-close").onclick = () => { $("#setlist-dlg").hidden = true; };
 $("#setlist-dlg").addEventListener("click", e => { if (e.target.id === "setlist-dlg") $("#sl-close").click(); });
@@ -920,7 +1011,12 @@ async function pollJobs() {
       if (j.kind === "take" && S.song && j.song === S.song.id) refreshTakes(j.label);
     }
     jobSeen[j.id] = j.status;
-    if (j.kind !== "process" || j.status === "done" || j.status === "cancelled") continue;
+    if (j.kind === "storage" && j.status !== "running" && jobSeen["_st" + j.id] !== j.status) {   // 搬移結束：通知、更新畫面
+      jobSeen["_st" + j.id] = j.status;
+      if (j.status === "done") { toast("歌曲庫搬移完成，已經改用新的位置", 6000); loadSongs(); if (!$("#settings").hidden) loadStorage(); }
+      if (j.status === "error") toast("搬移失敗：" + (j.error || ""), 8000);
+    }
+    if ((j.kind !== "process" && j.kind !== "storage") || j.status === "done" || j.status === "cancelled") continue;
     if (j.status === "error" && (jobHidden.has(j.id) || (newest[j.song] || 0) > (j.created || 0))) continue;
     const el = document.createElement("div");
     el.className = "job" + (j.status === "error" ? " error" : "");
@@ -950,7 +1046,7 @@ async function pollJobs() {
         pollJobs();
       };
     }
-    $(".lbl", el).textContent = `${j.status === "queued" && j.order != null ? `#${j.order + 1} ` : ""}${j.label === "compact" ? "整理歌曲檔案" : songTitle(j.song)}：${j.status === "queued" ? "排隊中" : j.step}`;
+    $(".lbl", el).textContent = `${j.status === "queued" && j.order != null ? `#${j.order + 1} ` : ""}${j.label === "compact" ? "整理歌曲檔案" : j.kind === "storage" ? "搬移歌曲庫" : songTitle(j.song)}：${j.status === "queued" ? "排隊中" : j.step}`;
     if (j.error) $(".err", el).textContent = j.error;
     box.appendChild(el);
   }
@@ -3539,6 +3635,85 @@ document.addEventListener("keydown", e => {
 });
 
 /* ------------------------------------------------------------ 設定 */
+/* 2.3.0 儲存位置：歌曲庫、模型可以搬到別的磁碟 */
+const gb = n => n == null ? "?" : n >= 1e9 ? `${(n / 1e9).toFixed(1)} GB` : `${Math.max(0.1, n / 1e6).toFixed(n >= 1e8 ? 0 : 1)} MB`;
+let STORE = null;
+async function loadStorage() {
+  try {
+    STORE = await api("/api/storage/location");
+    const box = $("#loc-info"); box.innerHTML = "";
+    for (const [k, name] of [["library", "歌曲庫"], ["models", "模型"]]) {
+      const d = document.createElement("div");
+      d.textContent = `${name}：${STORE[k]}（${gb(STORE[k + "_size"])}${STORE[k + "_free"] != null ? `，所在磁碟剩 ${gb(STORE[k + "_free"])}` : ""}）`;
+      box.append(d);
+    }
+    if (STORE.library_missing) { const d = document.createElement("div"); d.className = "warn"; d.textContent = "找不到歌曲庫的資料夾（外接硬碟沒接上？）"; box.append(d); }
+    const old = $("#storage-old"); old.innerHTML = "";
+    for (const p of STORE.old) {
+      const r = document.createElement("div"); r.className = "row";
+      r.innerHTML = `<span class="hint"></span><button type="button" class="ghost danger">刪除舊位置</button>`;
+      $("span", r).textContent = `搬移前的舊位置還留著：${p}`;
+      $("button", r).onclick = async () => {
+        if (!confirm(`確定新位置一切正常了嗎？\n將永久刪除舊位置：\n${p}\n刪除後無法復原。`)) return;
+        try { await api("/api/storage/delete-old", { json: { path: p } }); toast("已刪除舊位置", 2500); loadStorage(); }
+        catch (e) { toast(e.message); }
+      };
+      old.append(r);
+    }
+  } catch (e) { $("#loc-info").textContent = e.message; }
+}
+function stNeed() {
+  if (!STORE) return;
+  const need = ($("#st-lib").checked ? STORE.library_size : 0) + ($("#st-models").checked ? STORE.models_size : 0);
+  const t = $("#st-target").value.trim();
+  const dr = STORE.drives.find(d => t.toUpperCase().startsWith(d.path.toUpperCase()));
+  $("#st-need").textContent = `需要約 ${gb(need)}` + (dr ? `，${dr.path} 剩 ${gb(dr.free)}${dr.free - need < 1e9 ? "（空間不夠）" : ""}` : "");
+}
+$("#st-open").onclick = async () => {
+  await loadStorage();
+  if (!STORE) return;
+  $("#st-lib-l").textContent = `歌曲庫（${gb(STORE.library_size)}）`;
+  $("#st-models-l").textContent = `模型（${gb(STORE.models_size)}，可選；分離、辨識用的 AI 模型）`;
+  const box = $("#st-drives"); box.innerHTML = "";
+  for (const d of STORE.drives) {
+    const b = document.createElement("button"); b.type = "button"; b.className = "ghost";
+    b.textContent = `${d.path}（剩 ${gb(d.free)}）`;
+    b.onclick = () => { $("#st-target").value = `${d.path}雷虎練唱台資料`; stNeed(); };
+    box.append(b);
+  }
+  $("#st-pick").hidden = !(window.pywebview && window.pywebview.api && window.pywebview.api.pick_folder);
+  stNeed();
+  document.body.appendChild($("#storage-dlg"));   // 疊在設定視窗上面
+  $("#storage-dlg").hidden = false;
+};
+$("#st-pick").onclick = async () => {
+  try { const p = await window.pywebview.api.pick_folder($("#st-target").value || ""); if (p) { $("#st-target").value = p; stNeed(); } }
+  catch (e) { toast(String(e)); }
+};
+["st-lib", "st-models"].forEach(id => ($("#" + id).onchange = stNeed));
+$("#st-target").oninput = stNeed;
+$("#st-close").onclick = () => ($("#storage-dlg").hidden = true);
+$("#st-adopt").onclick = async () => {
+  const path = $("#st-target").value.trim();
+  if (!path) return toast("請選擇已經有歌曲庫的資料夾");
+  if (!confirm(`改用這個資料夾裡的歌曲庫（不會複製或刪除任何檔案）：\n${path}\n\n目前的歌曲庫會留在原處。確定嗎？`)) return;
+  try {
+    const r = await api("/api/storage/adopt", { json: { path } });
+    toast(`已改用：${r.library}（${r.songs} 首）`, 5000);
+    $("#storage-dlg").hidden = true; loadSongs(); loadStorage();
+  } catch (e) { toast(e.message); }
+};
+$("#st-go").onclick = async () => {
+  const target = $("#st-target").value.trim();
+  if (!target) return toast("請選擇或輸入新的位置");
+  if (!confirm(`開始搬移到：\n${target}\n\n搬移期間處理佇列會暫停、暫時不能練唱。確定開始？`)) return;
+  try {
+    await api("/api/storage/move", { json: { target, library: $("#st-lib").checked, models: $("#st-models").checked } });
+    $("#storage-dlg").hidden = true; $("#settings").hidden = true;
+    toast("開始搬移，進度在歌曲庫的處理清單", 4000); pollJobs();
+  } catch (e) { toast(e.message); }
+};
+
 async function openSettings(focusUsage) {
   const [cfg, st] = await Promise.all([api("/api/config"), api("/api/status")]);
   $("#cfg-balance").value = cfg.balance_usd == null ? "" : cfg.balance_usd;
@@ -3568,6 +3743,7 @@ async function openSettings(focusUsage) {
     + (st.cuda_note ? `<div class="hint" id="cuda-note"></div>` : "");
   if (st.cuda_note) $("#cuda-note").textContent = st.cuda_note;
   $("#settings").hidden = false;
+  loadStorage();
   renderStorage();
 }
 async function renderStorage() {

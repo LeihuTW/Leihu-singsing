@@ -33,6 +33,21 @@ ROOT = Path(__file__).resolve().parent
 LIB = ROOT / "library"
 MODELS = ROOT / "models"
 CONFIG_PATH = ROOT / "config.json"
+DEFAULT_LIB, DEFAULT_MODELS = LIB, MODELS
+
+
+def _apply_storage() -> None:
+    """2.3.0：歌曲庫、模型可以搬到別的位置（設定裡的 library_dir／models_dir；空的＝程式資料夾裡）。"""
+    global LIB, MODELS
+    try:
+        c = json.loads(CONFIG_PATH.read_text("utf-8"))
+    except Exception:
+        c = {}
+    LIB = Path(c["library_dir"]) if c.get("library_dir") else DEFAULT_LIB
+    MODELS = Path(c["models_dir"]) if c.get("models_dir") else DEFAULT_MODELS
+
+
+_apply_storage()
 
 SR = 44100
 PITCH_SR = 16000
@@ -4194,16 +4209,207 @@ def apply_candidate(d: Path, cand: dict) -> tuple[str, str]:
 
 # ---------------------------------------------------------------- 分類
 
-CATS_PATH = LIB / "categories.json"
+def _cats_path() -> Path:
+    return LIB / "categories.json"   # 歌曲庫可以搬家：每次用目前的位置
 
 
 def load_categories() -> list[str]:
     try:
-        return [c for c in json.loads(CATS_PATH.read_text("utf-8")) if isinstance(c, str)]
+        return [c for c in json.loads(_cats_path().read_text("utf-8")) if isinstance(c, str)]
     except Exception:
         return []
 
 
 def save_categories(cats: list[str]) -> None:
     LIB.mkdir(exist_ok=True)
-    atomic_write_text(CATS_PATH, json.dumps(cats, ensure_ascii=False))
+    atomic_write_text(_cats_path(), json.dumps(cats, ensure_ascii=False))
+
+
+# ---------------------------------------------------------------- 歌曲庫／模型搬移（2.3.0）
+STORAGE = {"moving": False}   # 搬移中：擋住會寫進歌曲庫的操作
+
+
+def dir_size(p: Path) -> tuple[int, int]:
+    """資料夾大小（位元組、檔案數）。"""
+    total = n = 0
+    for root, _dirs, files in os.walk(p):
+        for f in files:
+            try:
+                total += os.path.getsize(os.path.join(root, f))
+                n += 1
+            except OSError:
+                pass
+    return total, n
+
+
+def drives() -> list[dict]:
+    """可以搬過去的磁碟（Windows：每個磁碟機代號的剩餘空間）。"""
+    out = []
+    if sys.platform == "win32":
+        import string
+        for L in string.ascii_uppercase:
+            r = f"{L}:\\"
+            if os.path.exists(r):
+                try:
+                    u = shutil.disk_usage(r)
+                    out.append({"path": r, "free": u.free, "total": u.total})
+                except OSError:
+                    pass
+    else:
+        u = shutil.disk_usage("/")
+        out.append({"path": "/", "free": u.free, "total": u.total})
+    return out
+
+
+def storage_info() -> dict:
+    cfg = load_config()
+    info = {"library": str(LIB), "models": str(MODELS),
+            "library_default": LIB == DEFAULT_LIB, "models_default": MODELS == DEFAULT_MODELS,
+            "library_missing": not LIB.exists(), "drives": drives(),
+            "old": [p for p in cfg.get("storage_old", []) if Path(p).exists()],
+            "moving": STORAGE["moving"]}
+    for k, p in (("library", LIB), ("models", MODELS)):
+        info[k + "_size"] = dir_size(p)[0] if p.exists() else 0
+        try:
+            info[k + "_free"] = shutil.disk_usage(p if p.exists() else p.anchor).free
+        except OSError:
+            info[k + "_free"] = None
+    return info
+
+
+def _inside(a: Path, b: Path) -> bool:
+    """a 是不是 b 本身或在 b 裡面。"""
+    try:
+        a.resolve().relative_to(b.resolve())
+        return True
+    except ValueError:
+        return False
+
+
+def move_storage(target: str, what: list[str], report) -> dict:
+    """把歌曲庫（library）和／或模型（models）複製到 target 底下，逐檔核對大小後才改用新位置。
+    舊的那份不刪，記在設定的 storage_old，使用者確認新位置正常後再刪。中途停止：設定不變，照常用舊的。"""
+    global LIB, MODELS
+    tgt = Path(target.strip().strip('"'))
+    if not tgt.is_absolute():
+        raise UserError("請輸入完整的資料夾位置，例如 D:\\雷虎練唱台資料")
+    if not Path(tgt.anchor).exists():
+        raise UserError(f"找不到磁碟 {tgt.anchor}")
+    srcs = [(k, LIB if k == "library" else MODELS) for k in ("library", "models") if k in what]
+    if not srcs:
+        raise UserError("請至少選一項要搬移的東西")
+    plan = []
+    for k, src in srcs:
+        dst = tgt / k
+        if _inside(dst, src) or _inside(src, dst):
+            raise UserError("新位置不能在原本的資料夾裡面（或包含原本的資料夾）")
+        if dst.exists() and any(dst.iterdir()):
+            raise UserError(f"{dst} 已經有檔案，請換一個空的資料夾")
+        if not src.exists():
+            raise UserError(f"找不到目前的{'歌曲庫' if k == 'library' else '模型'}資料夾：{src}")
+        plan.append((k, src, dst))
+    report("計算大小", 0.01)
+    need = 0
+    files: list[tuple[Path, Path, int]] = []
+    for k, src, dst in plan:
+        for root, _dirs, fs in os.walk(src):
+            for f in fs:
+                s = Path(root) / f
+                if f.endswith((".part", ".tmp")) or ".part" in f:
+                    continue   # 下載到一半的暫存檔不搬
+                try:
+                    size = s.stat().st_size
+                except OSError:
+                    continue
+                files.append((s, dst / s.relative_to(src), size))
+                need += size
+    free = shutil.disk_usage(tgt.anchor).free
+    if need > free - (1 << 30):   # 至少多留 1 GB
+        raise UserError(f"空間不夠：需要 {need / 1e9:.1f} GB，{tgt.anchor} 只剩 {free / 1e9:.1f} GB")
+    done, t0, last = 0, time.time(), 0.0
+    try:
+        for s, d, size in files:
+            d.parent.mkdir(parents=True, exist_ok=True)
+            with open(s, "rb") as fi, open(d, "wb") as fo:
+                while True:
+                    b = fi.read(8 << 20)
+                    if not b:
+                        break
+                    fo.write(b)
+                    done += len(b)
+                    if time.time() - last > 0.5:
+                        last = time.time()
+                        sp = done / max(1e-3, last - t0)
+                        left = (need - done) / sp if sp > 0 else 0
+                        eta = f"（約剩 {left / 60:.0f} 分鐘）" if left >= 90 else ""
+                        report(f"搬移中 {done / 1e9:.1f}／{need / 1e9:.1f} GB{eta}", 0.02 + 0.93 * done / max(1, need))
+            shutil.copystat(s, d)
+            if d.stat().st_size != size:
+                raise UserError(f"複製後大小不符：{s.name}，已停止搬移（仍使用原本的位置）")
+    except BaseException:
+        for _k, _src, dst in plan:   # 沒搬完：清掉新位置的半成品，繼續用舊的
+            shutil.rmtree(dst, ignore_errors=True)
+        raise
+    report("核對檔案", 0.96)
+    for k, src, dst in plan:
+        a, b = dir_size(dst)
+        exp = sum(sz for s, d, sz in files if _inside(d, dst))
+        if a != exp:
+            shutil.rmtree(dst, ignore_errors=True)
+            raise UserError("核對失敗：新位置的檔案總大小不符，已停止搬移（仍使用原本的位置）")
+    cfg = load_config()
+    old = list(cfg.get("storage_old", []))
+    for k, src, dst in plan:
+        cfg[k + "_dir"] = str(dst)
+        if str(src) not in old:
+            old.append(str(src))
+    cfg["storage_old"] = old
+    save_config(cfg)
+    _apply_storage()
+    try:
+        _SONG_CACHE.clear()
+    except Exception:
+        pass
+    report("完成", 1.0)
+    return {k: str(dst) for k, _src, dst in plan}
+
+
+def delete_old_storage(path: str) -> None:
+    """刪除搬移前的舊位置（只能刪設定裡記下來的舊位置，而且不能是目前正在用的）。"""
+    cfg = load_config()
+    old = cfg.get("storage_old", [])
+    if path not in old:
+        raise UserError("只能刪除搬移前的舊位置")
+    p = Path(path)
+    if _inside(LIB, p) or _inside(MODELS, p) or _inside(p, LIB) or _inside(p, MODELS):
+        raise UserError("這是目前正在使用的位置，不能刪除")
+    shutil.rmtree(p, ignore_errors=True)
+    cfg["storage_old"] = [x for x in old if x != path]
+    save_config(cfg)
+
+
+def adopt_storage(path: str) -> dict:
+    """換電腦、外接硬碟：直接改用一個已經有歌曲庫的資料夾（例如從舊電腦整個複製過來的），不複製檔案。
+    path 可以是含有 library／models 的資料夾，或 library 資料夾本身。"""
+    global LIB, MODELS
+    p = Path(path.strip().strip('"'))
+    if not p.is_absolute() or not p.exists():
+        raise UserError("找不到這個資料夾")
+    lib = p / "library" if (p / "library").is_dir() else p
+    n = sum(1 for d in lib.iterdir() if (d / "meta.json").exists()) if lib.is_dir() else 0
+    if not n:
+        raise UserError("這個資料夾裡沒有練唱台的歌曲庫（找不到任何歌曲）")
+    cfg = load_config()
+    cfg["library_dir"] = str(lib)
+    out = {"library": str(lib), "songs": n}
+    models = lib.parent / "models"
+    if lib.name == "library" and (models / "uvr").is_dir():
+        cfg["models_dir"] = str(models)
+        out["models"] = str(models)
+    save_config(cfg)
+    _apply_storage()
+    try:
+        _SONG_CACHE.clear()
+    except Exception:
+        pass
+    return out
