@@ -488,13 +488,14 @@ function updateCountdown(t) {
   if (el.textContent !== show) { el.textContent = show; el.hidden = !show; if (show) { el.classList.remove("pulse"); void el.offsetWidth; el.classList.add("pulse"); } }
 }
 
-/* 本場歌單：直播模式下播放超過 30 秒就記一筆 */
+/* 直播歌單：不管是不是直播模式，一首歌播放超過 30 秒就記一筆（2.3.0；之前只記直播模式）。
+   距離上一首超過 6 小時就當成新的一場，所以同一段時間裡唱的歌都會在同一場 */
 LIVE.played = 0; LIVE.logged = null; LIVE.lastTick = 0;
 function setlistTick(t) {
   const now = performance.now();
   const dt = LIVE.lastTick ? Math.min(0.5, (now - LIVE.lastTick) / 1000) : 0;
   LIVE.lastTick = now;
-  if (!LIVE.on || !S.playing || !S.song) return;
+  if (!S.playing || !S.song) return;
   if (LIVE.logged === S.song.id) return;
   LIVE.played += dt;
   if (LIVE.played < 30) return;
@@ -564,6 +565,7 @@ async function openSetlist() {
   } catch (e) { toast(e.message); }
 }
 $("#lv-setlist").onclick = openSetlist;
+$("#lib-setlist").onclick = openSetlist;
 $("#sl-session").onchange = e => slLoad(e.target.value).catch(err => toast(err.message));
 $("#sl-mode").onchange = slRender;
 $("#sl-start").oninput = slRender;

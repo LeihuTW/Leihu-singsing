@@ -29,6 +29,7 @@
       <h1>歌曲庫</h1>
       <label class="btn primary">匯入歌曲<input type="file" id="import" accept="audio/*,.mp3,.wav,.flac,.ogg,.m4a" multiple hidden></label>
       <button id="export-open" type="button">匯出歌單</button>
+      <button id="lib-setlist" type="button" title="這段時間唱過的歌，也能回顧過去的場次、產生 YouTube 章節">直播歌單</button>
       <span class="hint">處理都在這台電腦上進行，第一次使用各模型時需要連網下載。</span>
     </div>
     <form id="yt-form" class="yt">
@@ -175,7 +176,7 @@
         <button id="lv-search" class="ghost" title="歌詞不對、或整份換掉：搜尋線上歌詞（LRCLIB、網易雲、酷狗）">搜尋線上歌詞</button>
         <button id="lv-flag" class="ghost" title="歌詞不準先標起來，下播後到歌曲庫的「歌詞待修」一次處理（Ctrl+Alt+F）">歌詞待修</button>
         <span class="spacer"></span>
-        <button id="lv-setlist" class="ghost" title="這場直播唱過的歌（直播模式下播放超過 30 秒會記下來）">本場歌單</button>
+        <button id="lv-setlist" class="ghost" title="這段時間唱過的歌（播放超過 30 秒就會記下來）；也能回顧過去的場次、產生 YouTube 章節">直播歌單</button>
         <span class="hint">調整會自動儲存</span>
       </div>
     </div>
@@ -508,7 +509,7 @@
 <div id="setlist-dlg" class="modal" hidden>
   <div class="sheet" role="dialog" aria-modal="true" aria-labelledby="sl-title">
     <h1 id="sl-title">直播歌單</h1>
-    <p class="hint">直播模式下，一首歌播放超過 30 秒就記下來。距離上一首超過 6 小時會自動當成新的一場；過去的場次也能在這裡回顧、匯出。</p>
+    <p class="hint">不管是不是直播模式，一首歌播放超過 30 秒就記下來；距離上一首超過 6 小時會自動當成新的一場，同一段時間唱的歌都在同一場。過去的場次也能在這裡回顧、匯出。</p>
     <div class="row sl-opts">
       <select id="sl-session" aria-label="選擇場次"></select>
       <select id="sl-mode" aria-label="顯示方式"><option value="list">歌單文字</option><option value="chapters">YouTube 章節時間戳</option></select>
