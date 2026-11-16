@@ -3094,6 +3094,17 @@ class Jobs:
             self.pending[a], self.pending[b] = self.pending[b], self.pending[a]
             return True
 
+    def to_front(self, jid: str) -> bool:
+        """移到佇列最前面（下一個開始處理）。"""
+        with self.cv:
+            for n, (j, fn) in enumerate(self.pending):
+                if j == jid and self.state[j]["status"] == "queued":
+                    self.pending.insert(0, self.pending.pop(n))
+                    self.state[j]["priority"] = True
+                    self.cv.notify_all()
+                    return True
+        return False
+
     def upcoming(self, label: str, n: int) -> list[str]:
         """排在最前面、還沒開始的 n 個工作的歌曲編號（只看指定種類）。"""
         with self.lock:
@@ -3660,11 +3671,35 @@ def lyrics_timing_fit(d: Path) -> float | None:
     return round(float(np.mean(np.exp(-(dist ** 2) / (2 * 0.35 ** 2)))), 2)
 
 
+def recheck_bad(after: float | None, before: float | None) -> bool:
+    """2.1.1：只看「重新分離前後」差多少。歌詞句子常從一段歌聲中間開始，吻合度本來就不高，
+    單看分數會把大部分歌都標起來；分離前後明顯變差（掉 0.15 以上）才代表歌聲位置真的變了。"""
+    return after is not None and before is not None and before - after >= 0.15
+
+
+def clear_false_recheck() -> int:
+    """2.1.0 的判斷太嚴，把很多歌詞沒問題的歌也標成「建議重新匯入歌詞」：依新的標準重新判斷一次。"""
+    n = 0
+    for d in LIB.iterdir() if LIB.exists() else []:
+        mp = d / "meta.json"
+        if not mp.exists():
+            continue
+        try:
+            m = read_meta(d)
+        except Exception:
+            continue
+        rc = m.get("lyrics_recheck")
+        if isinstance(rc, dict) and not recheck_bad(rc.get("fit"), rc.get("before")):
+            update_meta(d, lyrics_recheck=None)
+            n += 1
+    return n
+
+
 def check_lyrics_after_reseparate(d: Path, before: float | None) -> None:
     """2.1.0：重新分離／分析旋律後，目前的歌詞和新的歌聲位置對不太上 → 標「建議重新匯入歌詞」。
     標記記下當時歌詞檔的時間，之後歌詞有改過（重新匯入、套用線上歌詞、手動調整）就自動消失。"""
     after = lyrics_timing_fit(d)
-    bad = after is not None and (after < 0.55 or (before is not None and before - after >= 0.2))
+    bad = recheck_bad(after, before)
     rec = None
     if bad:
         try:

@@ -633,11 +633,13 @@ function renderSongs() {
     el.innerHTML = `
       <div><div class="t"></div><div class="sub"></div><div class="m">${chips.join("")}</div></div>
       <div class="acts">
+        ${st.pitch ? "" : `<button data-a="prio" title="把這首排到處理佇列最前面，下一首就處理它">優先處理</button>`}
         <button class="primary" data-a="open" ${st.pitch ? "" : "disabled"}>練唱</button>
         <select class="catsel" data-a="cat" aria-label="分類"></select>
         <button data-a="rename">編輯資訊</button>
         <select data-a="redo" aria-label="重新處理">
           <option value="">重新處理…</option>
+          <option value="prio">優先處理（排到佇列最前面）</option>
           <option value="separate,pitch,lyrics">全部重做</option>
           <option value="lyrics">只重新辨識歌詞</option>
           <option value="max">用最高品質人聲分離重新辨識（合音多的歌，較慢）</option>
@@ -681,6 +683,8 @@ function renderSongs() {
       try { await api(`/api/songs/${s.id}/fine`, { method: "POST", json: {} }); toast("已排入精細處理（排在佇列最後）"); loadSongs(); pollJobs(); }
       catch (e) { toast(e.message); }
     };
+    const pr = $('[data-a="prio"]', el);
+    if (pr) pr.onclick = () => prioritize(s.id);
     const rp = $('[data-a="repitch"]', el);
     if (rp) rp.onclick = () => repitch(s.id);
     $('[data-a="rename"]', el).onclick = () => openEdit(s);
@@ -688,6 +692,7 @@ function renderSongs() {
       const v = e.target.value; e.target.value = "";
       if (!v) return;
       try {
+        if (v === "prio") return prioritize(s.id);
         if (v === "max") await reprocessMax(s.id);
         else if (v === "group" || v === "solo") await setVocalMode(s.id, v === "group");
         else { await api(`/api/songs/${s.id}/process`, { json: { steps: v.split(",") } }); toast("已加入處理佇列"); }
@@ -882,13 +887,18 @@ async function pollJobs() {
     el.className = "job" + (j.status === "error" ? " error" : "");
     el.innerHTML = `<span class="lbl"></span><span class="num">${j.status === "error" ? "" : Math.round(j.progress * 100) + "%"}</span>
       <span class="acts">${j.status === "error" ? `<button class="ghost job-x" title="關閉這則訊息" aria-label="關閉這則訊息">✕</button>`
-        : (j.status === "queued" ? `<button class="ghost job-mv" data-d="-1" title="往前移" aria-label="往前移">▲</button><button class="ghost job-mv" data-d="1" title="往後移" aria-label="往後移">▼</button>` : "")
+        : (j.status === "queued" ? `<button class="ghost job-top" title="移到最前面，下一首就處理" aria-label="移到最前面">⤒</button><button class="ghost job-mv" data-d="-1" title="往前移" aria-label="往前移">▲</button><button class="ghost job-mv" data-d="1" title="往後移" aria-label="往後移">▼</button>` : "")
           + `<button class="ghost job-stop" title="停止處理這首歌；已經完成的步驟會保留">${j.status === "queued" ? "取消" : "停止"}</button>`}</span>
       <div class="meter"><i style="width:${Math.round(j.progress * 100)}%"></i></div>${j.error ? `<div class="err"></div>` : ""}`;
     $$(".job-mv", el).forEach(b => (b.onclick = async () => {
       try { await api(`/api/jobs/${j.id}/move`, { json: { delta: +b.dataset.d } }); } catch (e) { toast(e.message); }
       pollJobs();
     }));
+    const top = $(".job-top", el);
+    if (top) top.onclick = async () => {
+      try { await api(`/api/jobs/${j.id}/top`, { method: "POST", json: {} }); toast("已移到最前面", 2000); } catch (e) { toast(e.message); }
+      pollJobs();
+    };
     const x = $(".job-x", el);
     if (x) x.onclick = () => { jobHidden.add(j.id); el.remove(); };
     const stop = $(".job-stop", el);
@@ -970,6 +980,16 @@ $("#update-chip").addEventListener("click", async e => {
   try { await api("/api/update/install", { method: "POST", json: {} }); c.textContent = "下載更新 0%…"; pollJobs(); }
   catch (err) { toast(err.message); }
 });
+// 2.1.1 優先處理：排到處理佇列最前面
+const PRIO_MSG = { moved: "已移到佇列最前面", download: "已排到最前面下載並處理", process: "已排到最前面處理",
+  upgrade: "已排到最前面，用高品質模型重新分離" };
+async function prioritize(id) {
+  try {
+    const r = await api(`/api/songs/${id}/prioritize`, { method: "POST", json: {} });
+    toast((PRIO_MSG[r.what] || "已排到最前面") + (pausedNow ? "（目前全部暫停中，按「繼續處理」後開始）" : ""), 3500);
+    loadSongs(); pollJobs();
+  } catch (e) { toast(e.message); }
+}
 let pausedNow = false;
 async function togglePauseAll(on) {
   try {

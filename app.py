@@ -463,6 +463,14 @@ def job_move(jid):
     return jsonify(ok=True)
 
 
+@app.post("/api/jobs/<jid>/top")
+def job_top(jid):
+    """移到佇列最前面。"""
+    if not jobs.to_front(jid):
+        raise P.UserError("無法移動（可能已經開始處理）")
+    return jsonify(ok=True)
+
+
 @app.get("/api/songs/<sid>")
 def song(sid):
     d = P.song_dir(sid)
@@ -775,6 +783,43 @@ def job_cancel(jid):
         except Exception:
             pass
     return jsonify(ok=True)
+
+
+@app.post("/api/songs/<sid>/prioritize")
+def prioritize(sid):
+    """2.1.1「優先處理」：這首歌排到處理佇列最前面。
+    已經在排隊 → 移到最前面；還沒排（沒下載完、沒分離完、旋律沒分析完、還沒升級高品質）→ 補排並放最前面。"""
+    d = P.song_dir(sid)
+    meta = P.read_meta(d)
+    mine = [j for j in jobs.active() if j.get("song") == sid and j.get("kind") == "process"]
+    if any(j["status"] == "running" for j in mine):
+        raise P.UserError("這首正在處理中")
+    for j in mine:
+        if j["status"] == "queued" and jobs.to_front(j["id"]):
+            return jsonify(job=j["id"], what="moved")
+    st = meta.get("steps") or {}
+    if not st.get("import"):
+        url = meta.get("source_url")
+        if not url:
+            raise P.UserError("這首歌沒有音檔，請重新匯入")
+        P.YT_PAUSE.update(on=False, reason="")
+        P.set_dl_state(d, "queued")
+        jid = yt_submit(sid, url)
+        what = "download"
+    elif not st.get("separate") or not st.get("pitch"):
+        steps = [s for s in ("separate", "pitch") if not st.get(s)]
+        if not st.get("separate"):
+            steps = ["separate", "pitch"]
+        jid = jobs.submit("process", sid, P.process_song(sid, steps), label=",".join(steps))
+        what = "process"
+    elif meta.get("separation") == "uvr" and meta.get("vocal_model") != "bs_roformer" \
+            and P.hqv_ready() and P.vocal_model(P.load_config()) == P.HQ_VOCAL:
+        jid = jobs.submit("process", sid, P.process_song(sid, ["separate", "pitch"]), label="upgrade")
+        what = "upgrade"
+    else:
+        raise P.UserError("這首已經處理完成，不需要再處理")
+    jobs.to_front(jid)
+    return jsonify(job=jid, what=what)
 
 
 @app.post("/api/songs/<sid>/redownload")
@@ -1351,7 +1396,8 @@ def upgrade_separation():
         sl = {i.get("id") for i in _setlist_read()["items"]}
     songs = sorted(P.list_songs(), key=lambda m: (-P.usage_score(m, sl), -(m.get("created") or 0)))   # 常唱的先做
     for s in songs:
-        if not (s.get("steps") or {}).get("separate") or s.get("vocal_model") == "bs_roformer" or s.get("separation") != "uvr":
+        stp = s.get("steps") or {}
+        if not stp.get("separate") or (s.get("vocal_model") == "bs_roformer" and stp.get("pitch")) or s.get("separation") != "uvr":
             continue
         if jobs.find("process", s["id"], "upgrade") or jobs.find("process", s["id"], "max"):
             continue
@@ -1819,6 +1865,7 @@ def main():
     threading.Thread(target=loudness_backfill, daemon=True, name="loudness").start()
     threading.Thread(target=live_light_upgrade, daemon=True, name="live-light").start()
     threading.Thread(target=remove_duet_leftovers, daemon=True, name="cleanup").start()
+    threading.Thread(target=P.clear_false_recheck, daemon=True, name="recheck").start()
     threading.Thread(target=check_update, daemon=True, name="update").start()
     url = f"http://{HOST}:{PORT}"
     print(f"\n  {P.APP_NAME} {VERSION} 已啟動：{url}\n  關閉這個視窗就會結束程式。\n")
