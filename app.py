@@ -39,7 +39,7 @@ def _locked(fn):
     return wrap
 
 
-jobs = P.Jobs(live_safe=True)   # 分離、分析、辨識：直播中暫停，不搶顯示卡
+jobs = P.Jobs(live_safe=True, pipeline=True)   # 分離、分析、辨識：直播中暫停，不搶顯示卡
 vjobs = P.Jobs()   # 移調／變速另外排隊：不會被分軌、評分卡住，也不會卡住它們
 
 
@@ -67,6 +67,7 @@ def status():
         P.live_touch()
     live = P.live_status(cfg)
     live["holding"] = jobs.holding
+    live["paused"] = jobs.paused
     return jsonify(version=VERSION, root=str(P.ROOT), modules=mods, cuda_note=P.CUDA_NOTE, hq=hq,
                    hq_model=P.HQ_KARAOKE, hqv=hqv, live=live,
                    claude_ready=bool(cfg.get("anthropic_api_key") or os.environ.get("ANTHROPIC_API_KEY")),
@@ -466,6 +467,8 @@ def job_move(jid):
 def song(sid):
     d = P.song_dir(sid)
     meta = P.read_meta(d)
+    if time.time() - (meta.get("last_opened") or 0) > 3600:   # 記下最近開過的時間（大量重新處理時常唱的先做）
+        meta = P.update_meta(d, last_opened=time.time())
     if "acapella" not in meta and P.stem_path(d, "inst").exists() and P.stem_path(d, "lead").exists():
         meta = P.update_meta(d, acapella=P.is_acapella(d))   # 舊歌曲補上清唱判斷
     if meta.get("lufs") is None and meta.get("steps", {}).get("import"):
@@ -1316,6 +1319,17 @@ def overlay_get():
     return jsonify(out)
 
 
+@app.post("/api/jobs/pause-all")
+def jobs_pause_all():
+    """2.1.1「全部暫停」：處理歌曲的工作都先停（處理中的那首在下一個進度點停下、讓出顯示卡）。
+    on 省略時切換。錄音評分、匯出、KEY 轉換照常。"""
+    body = request.get_json(force=True, silent=True) or {}
+    on = body.get("on")
+    on = (not jobs.paused) if on is None else bool(on)
+    jobs.set_paused(on)
+    return jsonify(paused=on)
+
+
 @app.post("/api/live/override")
 def live_override():
     """「直播中也照常處理」：接下來一小時不管直播偵測。"""
@@ -1333,7 +1347,10 @@ def upgrade_separation():
     if P.vocal_model(P.load_config()) != P.HQ_VOCAL:
         raise P.UserError("目前「人聲分離品質」設定不會用高品質模型（標準，或沒有顯示卡），升級不會有差別")
     n = 0
-    for s in P.list_songs():
+    with _SETLIST_LOCK:
+        sl = {i.get("id") for i in _setlist_read()["items"]}
+    songs = sorted(P.list_songs(), key=lambda m: (-P.usage_score(m, sl), -(m.get("created") or 0)))   # 常唱的先做
+    for s in songs:
         if not (s.get("steps") or {}).get("separate") or s.get("vocal_model") == "bs_roformer" or s.get("separation") != "uvr":
             continue
         if jobs.find("process", s["id"], "upgrade") or jobs.find("process", s["id"], "max"):
@@ -1423,6 +1440,15 @@ def setlist_add():
         last = d["items"][-1] if d["items"] else None
         if not (last and last["id"] == item["id"] and now - last["t"] < 600):   # 同一首十分鐘內不重複記
             d["items"].append(item)
+            try:
+                sd = P.song_dir(item["id"])
+                with P._META_LOCK:
+                    m = P.read_meta(sd)
+                    m["sung"] = (m.get("sung") or 0) + 1
+                    m["last_sung"] = now
+                    P.write_meta(sd, m)
+            except Exception:
+                pass   # 歌曲已刪除或編號不對：只記在歌單裡
         P.atomic_write_text(SETLIST_PATH, json.dumps(d, ensure_ascii=False))
     return jsonify(ok=True)
 

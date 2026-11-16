@@ -44,6 +44,8 @@ DEFAULT_CONFIG = {
     "separation_model": "UVR-MDX-NET-Inst_HQ_3.onnx",
     "vocal_quality": "auto",   # 人聲／伴奏分離：auto：有顯示卡用高品質（BS-Roformer，乾淨很多但慢一倍）；standard；high
     "pause_while_streaming": True,   # 偵測到直播軟體（OBS、VTube Studio…）或直播模式開著時，暫停背景的分離、辨識
+    "parallel_separation": False,
+    "queue_paused": False,   # 2.1.1：使用者按了「全部暫停」（重開程式後仍維持暫停）   # 2.1.1：沒在直播時兩首同時分離（顯示卡記憶體 10 GB 以上建議）
     "streaming_apps": ["obs64.exe", "obs32.exe", "VTube Studio.exe", "Streamlabs OBS.exe", "XSplit.Core.exe", "vMix64.exe"],
     "karaoke_model": "UVR_MDXNET_KARA_2.onnx",
     "karaoke_quality": "auto",   # auto：有顯示卡用高品質（Roformer）；standard；high
@@ -302,6 +304,26 @@ def _song_entry(d: Path) -> dict | None:
             pass
     _SONG_CACHE[d.name] = (stamp, m)
     return dict(m)
+
+
+def usage_score(m: dict, setlist_ids: set | None = None) -> float:
+    """這首歌常不常唱（2.1.1）：大量重新處理時，常唱的排前面。
+    看最近開過／直播唱過的時間、直播唱過幾次、錄音幾次、有沒有自己整理過歌詞或分類。"""
+    now = time.time()
+    score = 0.0
+    t = max(m.get("last_opened") or 0, m.get("last_sung") or 0)
+    if t:
+        score += 1000 + max(0.0, 180 - (now - t) / 86400)   # 最近半年內開過，越近越前面
+    if setlist_ids and m.get("id") in setlist_ids:
+        score += 500
+    score += 20 * (m.get("sung") or 0) + 10 * min(20, m.get("takes") or 0)
+    if m.get("key"):
+        score += 30   # 設過自己的 KEY：一定是會唱的歌
+    if m.get("lyrics_source") in ("online", "import", "claude"):
+        score += 5
+    if m.get("category"):
+        score += 2
+    return score
 
 
 def list_songs() -> list[dict]:
@@ -898,6 +920,9 @@ def youtube_job(song_id: str, url: str, after=None):
                     set_dl_state(d, None)
                 else:
                     step_youtube(d, url, report)
+        except JobDeferred:
+            set_dl_state(d, "queued")   # 暫停：之後會重新下載，不算取消
+            raise
         except JobCancelled:
             set_dl_state(d, "cancelled")
             raise
@@ -1458,6 +1483,9 @@ def ensure_model_data() -> None:
             log_error(f"model data {name}", e)   # 讓 audio-separator 自己再試一次
 
 
+_model_locks: dict = {}
+
+
 def ensure_model(name: str, progress=None) -> None:
     """確認分離模型已經完整下載；沒有或不完整就從最快的來源下載。"""
     ensure_model_data()
@@ -1466,9 +1494,10 @@ def ensure_model(name: str, progress=None) -> None:
         return                             # 不認得的模型：交給 audio-separator 自己下載
     size, sha, urls = spec
     p = MODELS / "uvr" / name
-    if p.exists() and (not size or p.stat().st_size == size):
-        return
-    fetch_file(urls, p, size, sha, progress)
+    with _model_locks.setdefault(name, threading.Lock()):   # 兩首同時處理時不要重複下載同一個模型
+        if p.exists() and (not size or p.stat().st_size == size):
+            return
+        fetch_file(urls, p, size, sha, progress)
 
 
 def start_hq_download() -> None:
@@ -1577,6 +1606,7 @@ def fine_job(song_id: str, after=None):
         lrc = (d / "lyrics.lrc").exists()
         fit_before = lyrics_timing_fit(d) if lrc else None
         step_separate(d, cfg, report)
+        getattr(report, "gpu_done", lambda: None)()
         step_pitch(d, cfg, report)
         update_meta(d, fine_suggest=False, fine_done=True, fine_queued=False,
                     **({"live_light": False} if full else {}))
@@ -1605,13 +1635,39 @@ def _autocast_ok() -> bool:
         return False
 
 
+_PROG_TLS = threading.local()   # 每個執行緒目前的分離進度（2.1.1：兩首同時分離時各回報各的）
+_PROG_PATCHED = {"done": False}
+_prog_lock = threading.Lock()
+
+
+def _patch_tqdm() -> None:
+    """把 audio-separator 內部的 tqdm 換成會依執行緒回報進度的版本（只換一次，之後不再還原）。"""
+    with _prog_lock:
+        if _PROG_PATCHED["done"]:
+            return
+        import importlib
+
+        def tq(it=None, *a, **k):
+            cur = getattr(_PROG_TLS, "cur", None)
+            if cur is None or it is None:
+                return it if it is not None else iter(())
+            return cur.wrap(it)
+        for name in _sep_progress.MODS:
+            try:
+                m = importlib.import_module("audio_separator.separator.architectures." + name)
+                m.tqdm = tq
+            except Exception:
+                pass
+        _PROG_PATCHED["done"] = True
+
+
 class _sep_progress:
     """audio-separator 內部用 tqdm 跑每一段，換成會回報進度的版本，畫面上就看得到分離跑到哪裡；
     按停止時 report 會丟出例外，也能在分離到一半時停下來。"""
     MODS = ("mdx_separator", "mdxc_separator", "vr_separator")
 
     def __init__(self, label: str, report, start: float, span: float):
-        self.saved, self.best, self.t0 = [], 0.0, time.time()
+        self.best, self.t0 = 0.0, time.time()
         self.cb = lambda p, eta: report(f"{label} {p * 100:.0f}%{eta}", start + span * p)
 
     def eta(self, p: float) -> str:
@@ -1621,36 +1677,30 @@ class _sep_progress:
         left = el * (1 - p) / p
         return f"（約剩 {left / 60:.0f} 分鐘）" if left >= 90 else f"（約剩 {max(5, round(left / 5) * 5):.0f} 秒）"
 
+    def wrap(self, it):
+        try:
+            n = len(it)
+        except Exception:
+            n = 0
+
+        def gen():
+            for i, x in enumerate(it):
+                if n:
+                    p = i / n
+                    if p >= self.best:
+                        self.best = p
+                        self.cb(p, self.eta(p))
+                yield x
+        return gen()
+
     def __enter__(self):
-        import importlib
-
-        def tq(it=None, *a, **k):
-            try:
-                n = len(it)
-            except Exception:
-                n = 0
-
-            def gen():
-                for i, x in enumerate(it):
-                    if n:
-                        p = i / n
-                        if p >= self.best:
-                            self.best = p
-                            self.cb(p, self.eta(p))
-                    yield x
-            return gen()
-        for name in self.MODS:
-            try:
-                m = importlib.import_module("audio_separator.separator.architectures." + name)
-                self.saved.append((m, m.tqdm))
-                m.tqdm = tq
-            except Exception:
-                pass
+        _patch_tqdm()
+        self.prev = getattr(_PROG_TLS, "cur", None)
+        _PROG_TLS.cur = self
         return self
 
     def __exit__(self, *exc):
-        for m, orig in self.saved:
-            m.tqdm = orig
+        _PROG_TLS.cur = self.prev
         return False
 
 
@@ -2121,10 +2171,14 @@ def analysis_vocal(d: Path) -> np.ndarray:
     return lead
 
 
+_PITCH_LOCK = threading.Lock()
+
+
 def step_pitch(d: Path, cfg: dict, report) -> None:
     report("分析主唱旋律" if read_meta(d).get("vocal_mode") != "all" else "分析旋律（合唱模式：主唱＋合音）", 0.55)
     y16 = analysis_vocal(d)
-    midi = track_pitch(y16, cfg)
+    with _PITCH_LOCK:   # 重疊處理時一次只分析一首的旋律（模型共用、也比較省顯示卡記憶體）
+        midi = track_pitch(y16, cfg)
     notes = segment_notes(midi)
     data = {
         "hop": HOP_S,
@@ -2896,7 +2950,7 @@ def live_status(cfg: dict | None = None) -> dict:
 LIVE_BACKGROUND = {"upgrade", "fine", "compact", "max"}
 
 
-class JobDeferred(Exception):
+class JobDeferred(JobCancelled):
     """背景工作做到一半開播：放回佇列，直播結束後從頭再做（不佔著佇列擋住直播中的匯入）。"""
 
 
@@ -2923,34 +2977,94 @@ def live_light_cfg(cfg: dict) -> dict | None:
     return {"vocal_quality": "standard", "karaoke_quality": "standard", "auto_recognize_lyrics": False}
 
 
-class Jobs:
-    """一次只跑一個重工作，避免記憶體爆掉。"""
+# 2.1.1：可以和下一首重疊處理的工作（分離完、還在分析旋律時，下一首就先開始分離）
+PIPELINE_LABELS = {"all", "youtube", "upgrade", "fine", "max"}
 
-    def __init__(self, live_safe: bool = False):
+
+class Jobs:
+    """重工作的佇列。預設一次分離一首；分離完的那首在分析旋律、存檔時，下一首可以先開始分離（pipeline）。
+    設定開啟「閒置時兩首同時分離」且沒在直播時，最多兩首同時分離。"""
+
+    def __init__(self, live_safe: bool = False, pipeline: bool = False):
         self.pending: list[tuple[str, object]] = []   # 排隊中的工作（可以調整順序）
         self.state: dict[str, dict] = {}
         self.lock = threading.Lock()
         self.cv = threading.Condition(self.lock)
         self.live_safe = live_safe   # 直播中要不要暫停（只有重工作的佇列開）
+        self.pipeline = pipeline     # 可不可以重疊處理
         self.holding = ""            # 目前因為直播暫停中的原因（空字串＝沒有暫停）
+        self.running: dict[str, str] = {}   # 執行中的工作 → "gpu"（分離中）／"post"（分析、存檔）
+        self.oom_until = 0.0                # 顯示卡記憶體不夠過：這個時間之前只同時分離一首
+        self.paused = False                 # 「全部暫停」：處理歌曲的工作都先停（錄音評分、匯出照常）
+        if live_safe:
+            try:
+                self.paused = bool(load_config().get("queue_paused"))
+            except Exception:
+                pass
         threading.Thread(target=self._run, daemon=True).start()
 
     def _held(self, jid: str) -> bool:
         st = self.state.get(jid) or {}
         return self.live_safe and st.get("label") in LIVE_BACKGROUND
 
-    def _next(self, hold: bool):
-        """挑下一個要做的工作。直播中跳過背景工作，先做使用者在等的（例如直播中匯入的歌）。"""
+    def _pausable(self, st: dict) -> bool:
+        return st.get("kind") == "process"
+
+    def set_paused(self, on: bool) -> None:
+        """全部暫停／繼續處理。暫停時處理中的歌在下一個進度點停下、讓出顯示卡，繼續後從頭重做這首。"""
+        with self.cv:
+            self.paused = on
+            if on:
+                for j in self.running:
+                    if self._pausable(self.state.get(j) or {}):
+                        self.state[j]["pause"] = True
+            self.cv.notify_all()
+        try:
+            cfg = load_config()
+            cfg["queue_paused"] = on
+            save_config(cfg)
+        except Exception as e:
+            log_error("save queue_paused", e)
+
+    def _slots(self, hold: bool) -> int:
+        """同時可以分離幾首。"""
+        if not self.pipeline or hold or time.time() < self.oom_until:
+            return 1
+        try:
+            return 2 if load_config().get("parallel_separation") else 1
+        except Exception:
+            return 1
+
+    def _can_start(self, st: dict, slots: int) -> bool:
+        if not self.running:
+            return True
+        if not self.pipeline or st.get("kind") != "process" or st.get("label") not in PIPELINE_LABELS:
+            return False   # 其他工作（錄音評分、匯出、壓縮）等前面的都做完才開始
+        others = [self.state.get(j) or {} for j in self.running]
+        if any(o.get("kind") != "process" or o.get("label") not in PIPELINE_LABELS for o in others):
+            return False
+        if st.get("song") and any(o.get("song") == st.get("song") for o in others):
+            return False   # 同一首歌不同時處理
+        gpu = sum(1 for v in self.running.values() if v == "gpu")
+        return gpu < slots and len(self.running) < slots + 1
+
+    def _next(self, hold: bool, slots: int):
+        """挑下一個要做的工作。直播中跳過背景工作，先做使用者在等的（例如直播中匯入的歌）。
+        回傳 (jid, fn, 只剩直播中暫停的工作)。"""
         for n, (jid, fn) in enumerate(self.pending):
             st = self.state.get(jid) or {}
             if st.get("status") == "cancelled":
                 self.pending.pop(n)
-                return jid, None
+                return jid, None, False
             if hold and st.get("label") in LIVE_BACKGROUND:
                 continue
+            if self.paused and self._pausable(st):
+                continue
+            if not self._can_start(st, slots):
+                return None, None, False   # 依順序等前面的，不插隊
             self.pending.pop(n)
-            return jid, fn
-        return None, None
+            return jid, fn, False
+        return None, None, bool(self.pending) and not self.paused
 
     def submit(self, kind: str, song_id: str, fn, label: str = "") -> str:
         jid = uuid.uuid4().hex[:10]
@@ -2962,7 +3076,7 @@ class Jobs:
                                "status": "queued", "step": "排隊中", "progress": 0.0,
                                "error": None, "created": time.time()}
             self.pending.append((jid, fn))
-            self.cv.notify()
+            self.cv.notify_all()
         return jid
 
     def move(self, jid: str, delta: int) -> bool:
@@ -3074,49 +3188,86 @@ class Jobs:
 
     def _run(self):
         while True:
-            while True:
-                st = live_status() if self.live_safe else {"hold": False}   # 查程式清單可能要幾秒，不要鎖著佇列查
-                with self.cv:
-                    jid, fn = self._next(st["hold"])
-                    if jid:
-                        break
-                    if self.pending:   # 只剩直播中暫停的背景工作
+            st = live_status() if self.live_safe else {"hold": False}   # 查程式清單可能要幾秒，不要鎖著佇列查
+            slots = self._slots(st["hold"])
+            with self.cv:
+                jid, fn, held = self._next(st["hold"], slots)
+                if jid is None:
+                    if held and not self.running:   # 只剩直播中暫停的背景工作
                         reason = st.get("reason") or "直播中"
                         self.holding = reason
                         for j, _ in self.pending:
                             js = self.state.get(j)
                             if js and js["status"] == "queued":
                                 js["step"] = f"直播中暫停（{reason}），結束後自動繼續"
-                        self.cv.wait(5)
-                    else:
+                    elif not held:
                         self.holding = ""
-                        self.cv.wait()
-            self.holding = ""
-            if fn is None or self.get(jid)["status"] == "cancelled":
-                continue
-            self.update(jid, status="running", step="開始")
+                    if self.paused:
+                        for j, _ in self.pending:
+                            js = self.state.get(j)
+                            if js and js["status"] == "queued" and self._pausable(js):
+                                js["step"] = "已全部暫停"
+                    self.cv.wait(5 if (self.pending or self.running) else None)
+                    continue
+                self.holding = ""
+                if fn is None or self.state[jid]["status"] == "cancelled":
+                    continue
+                self.running[jid] = "gpu"
+                self.state[jid].update(status="running", step="開始")
+            threading.Thread(target=self._work, args=(jid, fn), daemon=True, name=f"job-{jid}").start()
 
-            def report(step, p, jid=jid):
-                if (self.state.get(jid) or {}).get("cancel"):
-                    raise JobCancelled()
-                self.update(jid, step=step, progress=round(p, 3))
-                if self._held(jid) and live_status()["hold"]:
-                    raise JobDeferred()   # 做到一半開播：讓出顯示卡，直播後重做
-            try:
-                fn(report)
-                self.update(jid, status="done", step="完成", progress=1.0)
-            except JobDeferred:
-                with self.cv:
-                    self.state[jid].update(status="queued", step="直播中暫停，結束後重新開始", progress=0.0)
+    def _work(self, jid: str, fn) -> None:
+        def report(step, p, jid=jid):
+            if (self.state.get(jid) or {}).get("cancel"):
+                raise JobCancelled()
+            self.update(jid, step=step, progress=round(p, 3))
+            if (self.state.get(jid) or {}).get("pause"):
+                raise JobDeferred("paused")   # 按了全部暫停：讓出顯示卡，繼續後重做這首
+            if self._held(jid) and live_status()["hold"]:
+                raise JobDeferred()   # 做到一半開播：讓出顯示卡，直播後重做
+
+        def gpu_done():
+            """分離做完了（接下來是分析旋律、存檔）：讓下一首先開始分離。"""
+            with self.cv:
+                if jid in self.running:
+                    self.running[jid] = "post"
+                    self.cv.notify_all()
+        report.gpu_done = gpu_done
+        try:
+            fn(report)
+            self.update(jid, status="done", step="完成", progress=1.0)
+        except JobDeferred as e:
+            paused = bool(e.args) and e.args[0] == "paused"
+            with self.cv:
+                self.state[jid].pop("pause", None)
+                self.state[jid].update(status="queued", progress=0.0,
+                                       step="已全部暫停，繼續後重新開始這首" if paused else "直播中暫停，結束後重新開始")
+                if paused:
+                    self.pending.insert(0, (jid, fn))   # 繼續處理時先做這首
+                else:
                     self.pending.append((jid, fn))
+            free_gpu()
+        except JobCancelled:
+            self.update(jid, status="cancelled", step="已取消")
+        except UserError as e:
+            self.update(jid, status="error", error=str(e))
+        except Exception as e:
+            traceback.print_exc()
+            if "out of memory" in str(e).lower() and not self.state[jid].get("oom_retry") and len(self.running) > 1:
+                # 兩首同時處理時顯示卡記憶體不夠：接下來十分鐘只處理一首，這首排回最前面重做
+                self.oom_until = time.time() + 600
                 free_gpu()
-            except JobCancelled:
-                self.update(jid, status="cancelled", step="已取消")
-            except UserError as e:
-                self.update(jid, status="error", error=str(e))
-            except Exception as e:
-                traceback.print_exc()
+                with self.cv:
+                    self.state[jid].update(status="queued", step="顯示卡記憶體不夠，稍後重新處理", progress=0.0, oom_retry=True)
+                    self.pending.insert(0, (jid, fn))
+                log_error("parallel separation OOM", e)
+            else:
                 self.update(jid, status="error", error=f"{type(e).__name__}: {e}")
+        finally:
+            with self.cv:
+                self.running.pop(jid, None)
+                (self.state.get(jid) or {}).pop("pause", None)
+                self.cv.notify_all()
 
 
 def process_song(song_id: str, steps: list[str], cfg_override: dict | None = None):
@@ -3137,6 +3288,9 @@ def process_song(song_id: str, steps: list[str], cfg_override: dict | None = Non
             step_separate(d, cfg, report)
             if not light and meta.get("live_light"):
                 update_meta(d, live_light=False)   # 高品質補做完成
+            recognize = "lyrics" in steps and not ("import" in steps and not cfg.get("auto_recognize_lyrics", False))
+            if not recognize:   # 接下來只剩分析旋律、存檔：下一首可以先開始分離
+                getattr(report, "gpu_done", lambda: None)()
             measure_stem_loudness(d)   # 各音軌響度，播放時依開著的音軌調整音量
         if "pitch" in steps:
             step_pitch(d, cfg, report)
@@ -3159,6 +3313,8 @@ def process_song(song_id: str, steps: list[str], cfg_override: dict | None = Non
         elif "lyrics" in steps:
             try:
                 step_lyrics(d, cfg, report)   # 歌詞相關的提示由 step_lyrics 自己更新
+            except JobDeferred:
+                raise
             except JobCancelled:
                 with _META_LOCK:   # 讀出到寫回之間不讓別的執行緒改這首歌的資料
                     meta = read_meta(d)

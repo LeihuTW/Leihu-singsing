@@ -378,6 +378,7 @@ $("#ls-dlg").addEventListener("click", e => { if (e.target.id === "ls-dlg") $("#
 /* 直播模式的操作（畫面按鈕和 Ctrl+Alt 全域快捷鍵共用） */
 function liveAction(act) {
   if (act === "next-song") return queueNext();
+  if (act === "pause-all") return togglePauseAll();
   if (!S.song) return toast("還沒選歌");
   if (act === "play") return S.playing || S.wantPlay ? pause() : play();
   if (act === "now") return liveAdjust("cur");
@@ -856,6 +857,7 @@ async function pollJobs() {
   let st;
   try { st = await api(`/api/status${window.LIVE && LIVE.on ? "?live=1" : ""}`); } catch { jobTimer = setTimeout(pollJobs, 3000); return; }
   syncLiveHold(st.live);
+  syncPauseBar(st);
   updateClaudeChip(st.claude_ready, st.session_cost);
   remoteOpen(st.remote);
   syncYtPause(st.yt_pause);
@@ -968,6 +970,26 @@ $("#update-chip").addEventListener("click", async e => {
   try { await api("/api/update/install", { method: "POST", json: {} }); c.textContent = "下載更新 0%…"; pollJobs(); }
   catch (err) { toast(err.message); }
 });
+let pausedNow = false;
+async function togglePauseAll(on) {
+  try {
+    const r = await api("/api/jobs/pause-all", { json: on === undefined ? {} : { on } });
+    pausedNow = r.paused;
+    toast(r.paused ? "處理已全部暫停（錄音評分、KEY 轉換照常）" : "繼續處理", 3000);
+    pollJobs();
+  } catch (e) { toast(e.message); }
+}
+$("#jobs-pause").onclick = () => togglePauseAll(true);
+$("#jobs-resume").onclick = () => togglePauseAll(false);
+function syncPauseBar(st) {
+  const paused = !!(st.live && st.live.paused);
+  pausedNow = paused;
+  const proc = st.jobs.filter(j => j.kind === "process" && (j.status === "queued" || j.status === "running"));
+  $("#jobs-paused").hidden = !paused;
+  $("#jobs-bar").hidden = paused || !proc.length;
+  const run = proc.filter(j => j.status === "running").length;
+  $("#jobs-sum").textContent = proc.length ? `處理中 ${run} 首、排隊 ${proc.length - run} 首` : "";
+}
 let liveHoldWas = null;
 function syncLiveHold(l) {
   const on = !!(l && l.hold);
@@ -3477,6 +3499,7 @@ async function openSettings(focusUsage) {
   $("#cfg-kq").value = cfg.karaoke_quality || "auto";
   $("#cfg-vq").value = cfg.vocal_quality || "auto";
   $("#cfg-pause-live").checked = cfg.pause_while_streaming !== false;
+  $("#cfg-parallel").checked = !!cfg.parallel_separation;
   $("#cfg-kov").value = String(cfg.karaoke_overlap === 4 ? 4 : 2);
   $("#cfg-autofine").checked = cfg.auto_fine !== false;
   $("#cfg-pitch").value = cfg.pitch_model;
@@ -3507,7 +3530,7 @@ async function saveSettings(extra = {}) {
       anthropic_api_key: $("#cfg-key").value, claude_model: $("#cfg-model").value.trim(),
       whisper_model: $("#cfg-whisper").value, lyrics_language: $("#cfg-lang").value,
       convert_to_taiwan: $("#cfg-tw").checked, auto_recognize_lyrics: $("#cfg-autorec").checked, global_hotkeys: $("#cfg-hotkeys").checked, font: $("#cfg-font").value, audio_out: $("#cfg-out").value, monitor_out: $("#cfg-mon").value, separation_model: $("#cfg-sep").value.trim(),
-      karaoke_model: $("#cfg-kara").value.trim(), karaoke_quality: $("#cfg-kq").value, vocal_quality: $("#cfg-vq").value, pause_while_streaming: $("#cfg-pause-live").checked, karaoke_overlap: +$("#cfg-kov").value, auto_fine: $("#cfg-autofine").checked, pitch_model: $("#cfg-pitch").value,
+      karaoke_model: $("#cfg-kara").value.trim(), karaoke_quality: $("#cfg-kq").value, vocal_quality: $("#cfg-vq").value, pause_while_streaming: $("#cfg-pause-live").checked, parallel_separation: $("#cfg-parallel").checked, karaoke_overlap: +$("#cfg-kov").value, auto_fine: $("#cfg-autofine").checked, pitch_model: $("#cfg-pitch").value,
       balance_usd: $("#cfg-balance").value.trim().replace(/^US\$|^\$/, ""), ...extra,
     } });
     applyFont($("#cfg-font").value);

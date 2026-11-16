@@ -38,6 +38,15 @@
       <span id="yt-msg" class="hint"></span>
     </form>
     <div id="drop" class="drop">把音訊檔拖到這裡。匯入後會自動分離主唱、合音、伴奏，分析旋律並辨識歌詞。</div>
+    <div id="jobs-bar" class="row jobs-bar" hidden>
+      <span id="jobs-sum" class="hint"></span><span class="spacer"></span>
+      <button id="jobs-pause" class="ghost" title="處理中的那首在下一個進度點停下、讓出顯示卡；錄音評分、KEY 轉換照常（Ctrl+Alt+P）">全部暫停</button>
+    </div>
+    <div id="jobs-paused" class="yt-pause" role="status" hidden>
+      <div><b>處理已全部暫停。</b>
+        <span class="hint">排隊中的歌會等你按「繼續處理」才開始；暫停時做到一半的那首會從頭重做。重開程式後仍維持暫停。錄音評分、KEY 轉換不受影響。</span></div>
+      <button id="jobs-resume">繼續處理</button>
+    </div>
     <div id="jobs" class="jobs"></div>
     <div id="live-queue" class="live-queue">
       <div class="row"><b>待唱清單</b><span id="lq-n" class="hint"></span><span class="spacer"></span>
@@ -549,6 +558,7 @@
       <div><button id="cfg-upgrade" type="button">用高品質人聲模型重做全部歌曲</button></div>
       <span class="hint">把還沒用新模型處理的歌排進佇列，重新分離人聲與伴奏、重新分析旋律；歌詞、錄音、KEY 設定都保留。排在最後、直播中會暫停，可以放著慢慢跑（有顯示卡一首約 1～2 分鐘）。</span></div>
     <label class="row"><input id="cfg-pause-live" type="checkbox"> 直播中暫停背景處理：偵測到 OBS、VTube Studio 等直播軟體在跑，或直播模式開著時，不做分離、分析、辨識</label>
+    <label class="row"><input id="cfg-parallel" type="checkbox"> 閒置時兩首同時分離（實驗性）：沒在直播時，大量匯入或升級可以再快約兩到四成；顯示卡記憶體 10 GB 以上才建議開，不夠時會自動退回一次一首</label>
     <label class="field"><span>人聲分離模型（標準品質用的）</span><input id="cfg-sep" type="text"></label>
     <label class="field"><span>主唱／合音分離品質（合音多的歌，高品質的旋律會準很多）</span>
       <select id="cfg-kq"><option value="auto">自動（有顯示卡用高品質）</option><option value="high">高品質（沒有顯示卡會非常慢）</option><option value="standard">標準（快）</option></select></label>

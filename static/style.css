@@ -447,3 +447,4 @@ body.live .lyr-count { font-size: calc(48px * var(--ls)); }
 .hk-field > label.row { display: flex; align-items: center; gap: 6px; }
 .hk-row .hk-key { justify-self: stretch; }
 .live-hold { border-color: var(--accent); }
+.jobs-bar { margin: 6px 0 2px; }
