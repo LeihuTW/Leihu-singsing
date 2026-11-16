@@ -105,6 +105,19 @@ def _cleanup() -> None:
             pass
 
 
+def _vram(tag: str) -> None:
+    """記下顯示卡記憶體剩多少（logs/app.log）。其他程式把顯示卡記憶體用滿時，Windows 會改用很慢的
+    共用記憶體，分離看起來就像卡住；有這行才分得出來。"""
+    try:
+        import torch
+        if torch.cuda.is_available():
+            free, total = torch.cuda.mem_get_info()
+            warn = "（不足：其他程式佔用太多，處理會非常慢）" if free < 1.5e9 else ""
+            print(f"[gpu] {tag}：顯示卡記憶體可用 {free / 1e9:.1f}／{total / 1e9:.1f} GB{warn}", flush=True)
+    except Exception:
+        pass
+
+
 def t_probe(P, progress):
     ok = P.cuda_ok()
     info = {"ok": bool(ok), "note": P.CUDA_NOTE, "cc": None, "name": ""}
@@ -220,6 +233,8 @@ def serve(address, authkey_hex: str, parent_pid: int) -> None:
         def progress(step, p):
             conn.send(("p", step, p))
         try:
+            if name != "probe":
+                _vram(f"{name} 開始")
             res = TASKS[name](P, progress, *args, **kw)
             out = ("ok", res)
         except BaseException as e:   # noqa: BLE001  任何錯誤都要回報給主程式
@@ -227,6 +242,8 @@ def serve(address, authkey_hex: str, parent_pid: int) -> None:
             out = ("err", type(e).__name__, str(e))
         finally:
             _cleanup()
+            if name != "probe":
+                _vram(f"{name} 結束、清理後")
         try:
             conn.send(out)
         except Exception as e:
@@ -258,7 +275,7 @@ class _Worker:
 
     def kill(self) -> None:
         for fn in (lambda: os.kill(self.pid, 9) if sys.platform != "win32" else _win_kill(self.pid),
-                   self.proc.kill):
+                   lambda: _kill_tree(self.proc), self.proc.kill):
             try:
                 fn()
             except Exception:
@@ -313,6 +330,14 @@ def _bind_to_job(proc) -> None:
             print(f"[gpu] 無法把處理程式放進工作物件（{k.GetLastError()}）", flush=True)
     except Exception as e:
         print(f"[gpu] 工作物件設定失敗：{e}", flush=True)
+
+
+def _kill_tree(proc) -> None:
+    """Windows 虛擬環境的 python.exe 只是啟動器，真正的 Python 是它開出來的：要連同它開的程式一起結束，
+    不然真正在用顯示卡的那個會留在背景。"""
+    if sys.platform == "win32" and proc.poll() is None:
+        subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"], capture_output=True,
+                       creationflags=0x08000000, timeout=15)
 
 
 def _win_kill(pid: int) -> None:
@@ -400,6 +425,10 @@ class Pool:
                 if proc.poll() is not None:
                     raise WorkerFailed(f"顯示卡處理程式啟動失敗（代碼 {proc.returncode}），詳細原因在 logs/app.log")
                 if time.time() > end:
+                    try:
+                        _kill_tree(proc)
+                    except Exception:
+                        pass
                     proc.kill()
                     raise WorkerFailed("顯示卡處理程式啟動逾時")
                 self.cv.wait(0.5)
