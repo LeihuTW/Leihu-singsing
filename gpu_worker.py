@@ -273,6 +273,48 @@ class _Worker:
             pass
 
 
+_JOB = {"h": None}
+
+
+def _bind_to_job(proc) -> None:
+    """Windows：把子程式放進「練唱台關掉就一起結束」的工作物件（Job Object）。
+    就算子程式卡在顯示卡運算裡、自己的檢查跑不動，練唱台一關，系統也會把它（和它開的 Python）一起結束。"""
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+        from ctypes import wintypes
+        k = ctypes.windll.kernel32
+        k.CreateJobObjectW.restype = wintypes.HANDLE
+        k.AssignProcessToJobObject.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
+        k.SetInformationJobObject.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD]
+        if _JOB["h"] is None:
+            class BASIC(ctypes.Structure):
+                _fields_ = [("PerProcessUserTimeLimit", ctypes.c_int64), ("PerJobUserTimeLimit", ctypes.c_int64),
+                            ("LimitFlags", wintypes.DWORD), ("MinimumWorkingSetSize", ctypes.c_size_t),
+                            ("MaximumWorkingSetSize", ctypes.c_size_t), ("ActiveProcessLimit", wintypes.DWORD),
+                            ("Affinity", ctypes.c_size_t), ("PriorityClass", wintypes.DWORD),
+                            ("SchedulingClass", wintypes.DWORD)]
+
+            class IO(ctypes.Structure):
+                _fields_ = [(n, ctypes.c_uint64) for n in ("r", "w", "o", "rb", "wb", "ob")]
+
+            class EXT(ctypes.Structure):
+                _fields_ = [("Basic", BASIC), ("Io", IO), ("ProcessMemoryLimit", ctypes.c_size_t),
+                            ("JobMemoryLimit", ctypes.c_size_t), ("PeakProcessMemoryUsed", ctypes.c_size_t),
+                            ("PeakJobMemoryUsed", ctypes.c_size_t)]
+            h = k.CreateJobObjectW(None, None)
+            info = EXT()
+            info.Basic.LimitFlags = 0x2000   # KILL_ON_JOB_CLOSE
+            if not k.SetInformationJobObject(h, 9, ctypes.byref(info), ctypes.sizeof(info)):
+                print(f"[gpu] 無法設定工作物件（{k.GetLastError()}）", flush=True)
+            _JOB["h"] = h
+        if not k.AssignProcessToJobObject(_JOB["h"], int(proc._handle)):
+            print(f"[gpu] 無法把處理程式放進工作物件（{k.GetLastError()}）", flush=True)
+    except Exception as e:
+        print(f"[gpu] 工作物件設定失敗：{e}", flush=True)
+
+
 def _win_kill(pid: int) -> None:
     import ctypes
     k = ctypes.windll.kernel32
@@ -329,8 +371,17 @@ class Pool:
             out = None
         t0 = time.time()
         print("[gpu] 開啟顯示卡處理程式…", flush=True)
+        if sys.platform == "win32":
+            flags |= 0x00000004   # CREATE_SUSPENDED：先放進工作物件再開始跑，它開出的 Python 才會一起被管到
         proc = subprocess.Popen(cmd, cwd=str(ROOT), env=env, creationflags=flags,
                                 stdout=out, stderr=subprocess.STDOUT if out else None)
+        _bind_to_job(proc)
+        if sys.platform == "win32":
+            try:
+                import ctypes
+                ctypes.windll.ntdll.NtResumeProcess(ctypes.c_void_p(int(proc._handle)))
+            except Exception as e:
+                print(f"[gpu] 無法啟動處理程式：{e}", flush=True)
         end = time.time() + SPAWN_TIMEOUT
         with self.cv:
             while True:
