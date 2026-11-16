@@ -515,8 +515,13 @@
       <select id="sl-mode" aria-label="顯示方式"><option value="list">歌單文字</option><option value="chapters">YouTube 章節時間戳</option></select>
       <label id="sl-start-f" class="row" hidden>開台時間 <input id="sl-start" type="time" step="1"></label>
     </div>
+    <div class="sl-items-head row"><label class="row"><input id="sl-all" type="checkbox"> 全選</label>
+      <span class="spacer"></span>
+      <button id="sl-del" class="ghost danger" type="button">刪除勾選的歌</button>
+      <button id="sl-drop" class="ghost danger" type="button">刪除這一場</button></div>
+    <div id="sl-items" class="sl-items"></div>
     <p id="sl-hint" class="hint" hidden>開台時間是影片的 00:00。預設是第一首歌開始的時間，請改成實際開台（影片開始）的時間；YouTube 要至少 3 段、每段 10 秒以上才會顯示章節。</p>
-    <textarea id="sl-text" rows="14" readonly></textarea>
+    <textarea id="sl-text" rows="8" readonly></textarea>
     <div class="row"><button id="sl-copy" class="primary">複製文字</button><button id="sl-save" class="ghost">存成文字檔</button><button id="sl-xlsx" class="ghost">匯出 Excel</button>
       <button id="sl-new" class="ghost danger">開始新的一場</button>
       <span class="spacer"></span><button id="sl-close" class="ghost">關閉</button></div>

@@ -521,6 +521,19 @@ function slStart() {   // 開台時間（epoch 秒）：同一天的時:分:秒
   if (t > songStart(it) + 3600) t -= 86400;   // 跨午夜：開台在前一天
   return t;
 }
+function slItems() {   // 每首歌一列，可以勾選刪除
+  const box = $("#sl-items"); box.innerHTML = "";
+  const items = (SL.data && SL.data.items) || [];
+  items.forEach((x, i) => {
+    const l = document.createElement("label");
+    l.innerHTML = `<input type="checkbox" data-i="${i}"><span class="num"></span><span></span>`;
+    $(".num", l).textContent = `${i + 1}. ${hhmm(songStart(x))}`;
+    $$("span", l)[1].textContent = `${x.title}${x.artist ? ` － ${x.artist}` : ""}${x.key ? `（KEY ${x.key > 0 ? "+" : ""}${x.key}）` : ""}`;
+    box.append(l);
+  });
+  $("#sl-all").checked = false;
+  $("#sl-del").disabled = $("#sl-drop").disabled = $("#sl-all").disabled = !items.length;
+}
 function slRender() {
   const r = SL.data, mode = $("#sl-mode").value;
   $("#sl-start-f").hidden = $("#sl-hint").hidden = mode !== "chapters";
@@ -546,7 +559,7 @@ async function slLoad(file) {
   SL.data = await api(`/api/setlist${SL.file ? `?file=${encodeURIComponent(SL.file)}` : ""}`);
   const it = SL.data.items[0];
   if (it) { const d = new Date(songStart(it) * 1000); $("#sl-start").value = `${pad2(d.getHours())}:${pad2(d.getMinutes())}:00`; }
-  slRender();
+  slItems(); slRender();
 }
 async function openSetlist() {
   try {
@@ -568,6 +581,23 @@ $("#lv-setlist").onclick = openSetlist;
 $("#lib-setlist").onclick = openSetlist;
 $("#sl-session").onchange = e => slLoad(e.target.value).catch(err => toast(err.message));
 $("#sl-mode").onchange = slRender;
+$("#sl-all").onchange = e => $$("#sl-items input").forEach(c => (c.checked = e.target.checked));
+$("#sl-del").onclick = async () => {
+  const idx = $$("#sl-items input:checked").map(c => +c.dataset.i);
+  if (!idx.length) return toast("請先勾選要刪除的歌");
+  if (!confirm(`刪除勾選的 ${idx.length} 首？刪除後無法復原。`)) return;
+  try {
+    const r = await api("/api/setlist/remove", { json: { file: SL.file, idx } });
+    toast(`已刪除 ${idx.length} 首`, 2000);
+    if (!r.left && SL.file) return openSetlist();   // 過去的場次刪光了：整場一起刪掉
+    await slLoad(SL.file);
+  } catch (e) { toast(e.message); }
+};
+$("#sl-drop").onclick = async () => {
+  if (!confirm(SL.file ? "刪除這一場的紀錄？刪除後無法復原。" : "清空本場的紀錄（不保存）？刪除後無法復原。")) return;
+  try { await api("/api/setlist/delete", { json: { file: SL.file } }); toast("已刪除", 2000); LIVE.logged = null; openSetlist(); }
+  catch (e) { toast(e.message); }
+};
 $("#sl-start").oninput = slRender;
 $("#sl-copy").onclick = async () => {
   try { await navigator.clipboard.writeText($("#sl-text").value); toast("已複製", 1500); }

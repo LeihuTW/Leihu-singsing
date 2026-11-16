@@ -456,3 +456,8 @@ body.live .lyr-count { font-size: calc(48px * var(--ls)); }
 #storage-old .row { margin-top: 6px; }
 .sl-opts { flex-wrap: wrap; gap: 8px; margin-bottom: 6px; }
 .sl-opts label.row { gap: 6px; }
+.sl-items { max-height: 220px; overflow: auto; border: 1px solid var(--line); border-radius: 10px; padding: 4px 8px; margin: 4px 0 10px; }
+.sl-items label { display: flex; gap: 8px; align-items: center; padding: 3px 0; font-size: 14px; }
+.sl-items .num { color: var(--muted); }
+.sl-items-head { gap: 8px; margin-top: 6px; }
+.sl-items:empty { display: none; }

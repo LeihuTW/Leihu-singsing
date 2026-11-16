@@ -1573,6 +1573,48 @@ def setlist_get():
         return jsonify(_setlist_load(request.args.get("file")))
 
 
+def _setlist_write(name: str | None, d: dict) -> None:
+    if name:
+        _setlist_load(name)   # 檢查檔名
+        P.atomic_write_text(SETLIST_DIR / name, json.dumps(d, ensure_ascii=False))
+    else:
+        P.atomic_write_text(SETLIST_PATH, json.dumps(d, ensure_ascii=False))
+
+
+@app.post("/api/setlist/remove")
+def setlist_remove():
+    """刪除一場裡勾選的歌（idx：第幾首，從 0 開始）。刪光了就連這一場一起刪。"""
+    b = request.get_json(force=True) or {}
+    name = b.get("file") or None
+    idx = {int(i) for i in (b.get("idx") or []) if str(i).lstrip("-").isdigit()}
+    if not idx:
+        raise P.UserError("請先勾選要刪除的歌")
+    with _SETLIST_LOCK:
+        d = _setlist_load(name)
+        d["items"] = [it for i, it in enumerate(d["items"]) if i not in idx]
+        if name and not d["items"]:
+            (SETLIST_DIR / name).unlink(missing_ok=True)
+        else:
+            if not d["items"]:
+                d["started"] = None
+            _setlist_write(name, d)
+    return jsonify(left=len(d["items"]))
+
+
+@app.post("/api/setlist/delete")
+def setlist_delete():
+    """刪除整場（本場：清空、不保存；過去的場次：刪掉那個檔案）。"""
+    b = request.get_json(force=True) or {}
+    name = b.get("file") or None
+    with _SETLIST_LOCK:
+        if name:
+            _setlist_load(name)
+            (SETLIST_DIR / name).unlink(missing_ok=True)
+        else:
+            P.atomic_write_text(SETLIST_PATH, json.dumps({"started": None, "items": []}))
+    return jsonify(ok=True)
+
+
 @app.get("/api/setlist/history")
 def setlist_history():
     """本場＋過去的場次（新的在前），最多 60 場。"""
