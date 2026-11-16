@@ -22,7 +22,7 @@ import share as SH
 import score_sheet as SS   # 1.7：旋律譜匯出
 import hotkeys as HK   # 2.0：自訂全域快捷鍵
 
-VERSION = "2.2.0"
+VERSION = "2.2.1"
 HOST, PORT = "127.0.0.1", int(os.environ.get("LIANTAI_PORT", "8765"))
 app = Flask(__name__, static_folder=str(P.ROOT / "static"), static_url_path="/static")
 app.config["MAX_CONTENT_LENGTH"] = 1024 * 1024 * 1024
