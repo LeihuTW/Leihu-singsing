@@ -3746,7 +3746,17 @@ $("#st-go").onclick = async () => {
   } catch (e) { toast(e.message); }
 };
 
+/* 2.3.0 設定分頁：一般／聲音輸出／直播／歌詞／處理品質／儲存空間／Claude（記住上次看的分頁） */
+function setTab(name) {
+  if (!$(`.set-pane[data-pane="${name}"]`)) name = "general";
+  $$(".set-tabs [data-tab]").forEach(b => { const on = b.dataset.tab === name; b.classList.toggle("cur", on); b.setAttribute("aria-selected", on); });
+  $$(".set-pane").forEach(p => (p.hidden = p.dataset.pane !== name));
+  store.set("setTab", name);
+  const sh = $(".set-sheet"); if (sh) sh.scrollTop = 0;
+}
+$$(".set-tabs [data-tab]").forEach(b => (b.onclick = () => setTab(b.dataset.tab)));
 async function openSettings(focusUsage) {
+  setTab(focusUsage === true ? "claude" : store.get("setTab", "general"));
   const [cfg, st] = await Promise.all([api("/api/config"), api("/api/status")]);
   $("#cfg-balance").value = cfg.balance_usd == null ? "" : cfg.balance_usd;
   renderUsage().then(() => { if (focusUsage === true) $("#usage").scrollIntoView({ block: "center" }); });

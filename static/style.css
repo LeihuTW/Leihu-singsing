@@ -461,3 +461,16 @@ body.live .lyr-count { font-size: calc(48px * var(--ls)); }
 .sl-items .num { color: var(--muted); }
 .sl-items-head { gap: 8px; margin-top: 6px; }
 .sl-items:empty { display: none; }
+/* 2.3.0 設定分頁 */
+.set-sheet { width: min(680px, 100%); }
+.set-tabs { display: flex; flex-wrap: wrap; gap: 4px; position: sticky; top: -18px; z-index: 2; background: var(--panel); padding: 6px 0 8px; margin-top: -6px; border-bottom: 1px solid var(--line); }
+.set-tabs button { background: none; border: 1px solid transparent; border-radius: 999px; padding: 5px 12px; font-size: 14px; color: var(--muted); cursor: pointer; }
+.set-tabs button:hover { color: var(--ink); background: var(--lane); }
+.set-tabs button.cur { background: var(--accent); color: var(--accent-ink); }
+.set-pane { display: grid; gap: 12px; min-height: 220px; align-content: start; }
+.set-pane[hidden] { display: none; }
+.set-adv summary { cursor: pointer; color: var(--muted); font-size: 14px; margin-bottom: 8px; }
+.set-adv > .field { margin-top: 8px; }
+.set-sheet > .row:last-child { position: sticky; bottom: -18px; background: var(--panel); padding: 10px 0 2px; border-top: 1px solid var(--line); }
+.sheet label.row { flex-wrap: nowrap; align-items: flex-start; }
+.sheet label.row > input[type="checkbox"], .sheet label.row > input[type="radio"] { flex: none; margin-top: 4px; }
