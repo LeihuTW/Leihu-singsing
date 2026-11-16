@@ -26,6 +26,11 @@ import traceback
 from pathlib import Path
 
 IDLE_EXIT = 30.0      # 子程式閒置幾秒後結束（把顯示卡記憶體全部還回去）
+SPAWN_TIMEOUT = 90.0  # 子程式這麼久還沒連上就放棄，改在主程式裡做
+# 子程式多久沒有任何回報就當作卡住（結束它，改在主程式裡做）。分離每一小段都會回報進度；
+# 旋律分析中途沒有進度，用整體時間判斷
+STALL = {"separate": 240.0, "whisper": 900.0, "pitch": 420.0, "probe": 180.0}
+CURRENT = threading.local()   # 目前這個執行緒的工作：check() 會在按停止／暫停時丟出例外
 MAX_WORKERS = 3       # 最多同時幾個子程式（兩首同時分離＋一首分析旋律）
 ROOT = Path(__file__).resolve().parent
 
@@ -232,6 +237,10 @@ def serve(address, authkey_hex: str, parent_pid: int) -> None:
 
 # ================================================================ 主程式這一端
 
+class WorkerFailed(RuntimeError):
+    """子程式開不起來或卡住：改在主程式裡做（顯示卡記憶體會留到程式關閉，但工作不會卡住）。"""
+
+
 class RemoteError(RuntimeError):
     def __init__(self, kind: str, msg: str):
         super().__init__(f"{kind}: {msg}" if kind not in ("RuntimeError",) else msg)
@@ -311,8 +320,18 @@ class Pool:
                f"import gpu_worker; gpu_worker.serve({self.listener.address!r}, {self.authkey.hex()!r}, {os.getpid()})"]
         flags = 0x08000000 if sys.platform == "win32" else 0   # CREATE_NO_WINDOW
         env = dict(os.environ, PYTHONIOENCODING="utf-8", PYTHONUNBUFFERED="1")
-        proc = subprocess.Popen(cmd, cwd=str(ROOT), env=env, creationflags=flags)
-        end = time.time() + 180
+        out = None
+        try:
+            sys.stdout.flush()
+            sys.stdout.fileno()
+            out = sys.stdout   # 子程式的訊息也寫進 logs/app.log（沒指定的話 Windows 會寫到看不見的主控台）
+        except Exception:
+            out = None
+        t0 = time.time()
+        print("[gpu] 開啟顯示卡處理程式…", flush=True)
+        proc = subprocess.Popen(cmd, cwd=str(ROOT), env=env, creationflags=flags,
+                                stdout=out, stderr=subprocess.STDOUT if out else None)
+        end = time.time() + SPAWN_TIMEOUT
         with self.cv:
             while True:
                 # Windows 的虛擬環境 python.exe 會再開一個真正的 Python，回報的 pid 是那一個
@@ -325,12 +344,13 @@ class Pool:
                     pid = next(iter(self.hello))
                     got = (pid, self.hello.pop(pid))
                 if got:
+                    print(f"[gpu] 顯示卡處理程式 {got[0]} 已連上（{time.time() - t0:.1f} 秒）", flush=True)
                     return _Worker(proc, got[1], got[0])
                 if proc.poll() is not None:
-                    raise RuntimeError(f"顯示卡處理程式啟動失敗（代碼 {proc.returncode}），詳細原因在 logs/app.log")
+                    raise WorkerFailed(f"顯示卡處理程式啟動失敗（代碼 {proc.returncode}），詳細原因在 logs/app.log")
                 if time.time() > end:
                     proc.kill()
-                    raise RuntimeError("顯示卡處理程式啟動逾時")
+                    raise WorkerFailed("顯示卡處理程式啟動逾時")
                 self.cv.wait(0.5)
 
     def _acquire(self) -> _Worker:
@@ -399,28 +419,38 @@ class Pool:
 
     # -- 呼叫
     def call(self, name: str, *args, progress=None, low: bool = False, **kw):
-        """在子程式裡執行 TASKS[name]。progress(step, p) 由主程式這邊呼叫；它丟出例外（停止、暫停）時
-        直接結束子程式，顯示卡馬上釋放。"""
+        """在子程式裡執行 TASKS[name]。progress(step, p) 由主程式這邊呼叫；它或 CURRENT.check() 丟出例外
+        （停止、暫停）時直接結束子程式，顯示卡馬上釋放。子程式太久沒回報就當作卡住（WorkerFailed）。"""
         w = self._acquire()
         ok = False
+        check = getattr(CURRENT, "check", None)
+        stall = STALL.get(name, 600.0)
+        t0 = last = time.time()
+        print(f"[gpu] {name} 交給處理程式 {w.pid}" + ("（直播中，低優先順序）" if low else ""), flush=True)
         try:
             w.conn.send(("task", name, args, kw, low))
             while True:
                 if w.conn.poll(0.5):
                     msg = w.conn.recv()
+                    last = time.time()
                     if msg[0] == "p":
                         if progress:
                             progress(msg[1], msg[2])
                         continue
                     ok = True   # 子程式正常回覆（成功或一般錯誤）：可以繼續用
+                    print(f"[gpu] {name} {'完成' if msg[0] == 'ok' else '失敗'}（{time.time() - t0:.1f} 秒）", flush=True)
                     if msg[0] == "ok":
                         return msg[1]
                     if msg[1] == "UserError":
                         import pipeline as P
                         raise P.UserError(msg[2])
                     raise RemoteError(msg[1], msg[2])
+                if check:
+                    check()
                 if not w.alive():
                     raise RuntimeError(f"顯示卡處理程式意外結束（代碼 {w.proc.returncode}），詳細原因在 logs/app.log")
+                if time.time() - last > stall:
+                    raise WorkerFailed(f"顯示卡處理程式 {stall:.0f} 秒沒有回應（{name}）")
         finally:
             if ok and w.alive():
                 self._release(w)
@@ -466,12 +496,30 @@ def _is_child(pid: int, parent: int) -> bool:
 POOL = Pool()
 
 
+_BROKEN = {"until": 0.0, "why": ""}
+
+
+def _local(name: str, *args, progress=None, **kw):
+    """備援：在主程式裡直接做（會載入 CUDA，顯示卡記憶體要等練唱台關掉才會完全還）。"""
+    import pipeline as P
+    print(f"[gpu] {name} 改在主程式裡執行（{_BROKEN['why']}）", flush=True)
+    return TASKS[name](P, progress or (lambda s, p: None), *args, **kw)
+
+
 def call(name: str, *args, progress=None, **kw):
-    """主程式呼叫：直播中（偵測到直播軟體）子程式用較低的優先順序跑。"""
+    """主程式呼叫：直播中（偵測到直播軟體）子程式用較低的優先順序跑。
+    子程式開不起來或卡住時，這次改在主程式裡做，接下來 10 分鐘也先不開子程式，避免每首都卡一次。"""
     low = False
     try:
         import pipeline as P
         low = bool(P.live_status()["hold"])
     except Exception:
         pass
-    return POOL.call(name, *args, progress=progress, low=low, **kw)
+    if time.time() < _BROKEN["until"]:
+        return _local(name, *args, progress=progress, **kw)
+    try:
+        return POOL.call(name, *args, progress=progress, low=low, **kw)
+    except WorkerFailed as e:
+        _BROKEN.update(until=time.time() + 600, why=str(e))
+        print(f"[gpu] {e}", flush=True)
+        return _local(name, *args, progress=progress, **kw)

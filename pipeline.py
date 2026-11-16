@@ -3290,6 +3290,16 @@ class Jobs:
                     self.running[jid] = "post"
                     self.cv.notify_all()
         report.gpu_done = gpu_done
+
+        def check(jid=jid):
+            """顯示卡子程式在跑、沒有進度回報時，也要能馬上停止／暫停。"""
+            st = self.state.get(jid) or {}
+            if st.get("cancel"):
+                raise JobCancelled()
+            if st.get("pause"):
+                raise JobDeferred("paused")
+        import gpu_worker as G
+        G.CURRENT.check = check
         try:
             fn(report)
             self.update(jid, status="done", step="完成", progress=1.0)
@@ -3321,6 +3331,7 @@ class Jobs:
             else:
                 self.update(jid, status="error", error=f"{type(e).__name__}: {e}")
         finally:
+            G.CURRENT.check = None
             with self.cv:
                 self.running.pop(jid, None)
                 (self.state.get(jid) or {}).pop("pause", None)
