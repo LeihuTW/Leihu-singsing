@@ -448,3 +448,5 @@ body.live .lyr-count { font-size: calc(48px * var(--ls)); }
 .hk-row .hk-key { justify-self: stretch; }
 .live-hold { border-color: var(--accent); }
 .jobs-bar { margin: 6px 0 2px; }
+.lyr-snip { font-size: 13px; color: var(--muted); margin-top: 2px; }
+#lib-scope { flex: none; }

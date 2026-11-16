@@ -433,20 +433,75 @@ def _bigrams(s: str) -> set:
     return {s[i:i + 2] for i in range(len(s) - 1)} or ({s} if s else set())
 
 
-def search_songs(q: str) -> dict:
-    """回傳完全符合的歌曲（每個關鍵字都要出現，繁簡互通），以及歌名相近的推薦。"""
+def _skey(*parts) -> str:
+    hay = " ".join(str(x) for x in parts if x)
+    k = _SKEY_CACHE.get(hay)
+    if k is None:
+        k = _SKEY_CACHE[hay] = search_key(hay)
+        if len(_SKEY_CACHE) > 5000:
+            _SKEY_CACHE.clear()
+    return k
+
+
+def _lyric_snip(text: str, words: list[str]) -> str:
+    """歌詞裡符合的那一句（給搜尋結果顯示）。"""
+    if not text:
+        return ""
+    norm = search_key(text)
+    pos = norm.find(words[0]) if words else -1
+    if pos < 0:
+        return ""
+    src = text if len(text) == len(norm) else norm   # 繁簡轉換長度不同時，退回顯示轉換後的文字
+    a = src.rfind(" ", 0, pos) + 1
+    b = src.find(" ", pos + len(words[0]))
+    b = len(src) if b < 0 else b
+    a, b = max(a, pos - 14), min(b, pos + len(words[0]) + 14)
+    return ("…" if a > 0 else "") + src[a:b].strip() + ("…" if b < len(src) else "")
+
+
+def search_songs(q: str, scope: str = "all") -> dict:
+    """回傳符合的歌曲（每個關鍵字都要出現，繁簡互通），依符合的地方排序：
+    歌名 → 歌手 → 歌名＋歌手 → 其他資訊 → 只有歌詞裡有（另外附上符合的那句歌詞），以及歌名相近的推薦。
+    scope：name＝只找歌名、歌手；lyrics＝只找歌詞；all＝都找（歌詞符合的排最後）。"""
     from difflib import SequenceMatcher
     nq = search_key(q).strip()
     if not nq:
-        return {"match": [], "similar": []}
+        return {"match": [], "similar": [], "kind": {}, "snip": {}}
     words = nq.split()
     squash = lambda s: re.sub(r"[\W_]+", "", s)
     qq = squash(nq)
-    match, sim = [], []
-    for m in list_songs():
-        key = _song_search_key(m)
-        if all(w in key for w in words):
-            match.append(m["id"])
+
+    def has(key: str) -> bool:
+        # 也比對去掉空白、標點後的版本（「牛仔很忙cowboy」找得到「牛仔很忙 Cowboy on the Run」）
+        return all(w in key for w in words) or (len(qq) >= 2 and qq in squash(key))
+    ranked, sim, kind, snip = [], [], {}, {}
+    for n, m in enumerate(list_songs()):
+        lo = m.get("lyrics_online") if isinstance(m.get("lyrics_online"), dict) else {}
+        tkey = _skey(m.get("title"), m.get("yt_track"))
+        akey = _skey(m.get("artist"), m.get("yt_artist"), lo.get("artist"), m.get("yt_uploader"))
+        r = None
+        if scope == "lyrics":
+            lyr = _skey(m.get("lyrics_text"))
+            if has(lyr):
+                ranked.append((5, n, m["id"]))
+                kind[m["id"]] = "lyrics"
+                snip[m["id"]] = _lyric_snip(m.get("lyrics_text") or "", words)
+            continue
+        if has(tkey):
+            r = 0 if squash(tkey) == qq else 1
+        elif has(akey):
+            r = 2
+        elif has(tkey + " " + akey):
+            r = 3
+        elif has(_skey(m.get("title"), m.get("yt_track"), m.get("artist"), m.get("yt_artist"), lo.get("artist"),
+                       m.get("yt_uploader"), m.get("yt_title"), m.get("category"))):
+            r = 4
+        elif scope != "name" and has(_song_search_key(m)):
+            r = 5
+            kind[m["id"]] = "lyrics"
+            snip[m["id"]] = _lyric_snip(m.get("lyrics_text") or "", words)
+        if r is not None:
+            ranked.append((r, n, m["id"]))
             continue
         if len(qq) < 2:
             continue
@@ -460,8 +515,9 @@ def search_songs(q: str) -> dict:
             best = max(best, ratio, cover * 0.9)
         if best >= 0.45:
             sim.append((best, m["id"]))
+    ranked.sort()
     sim.sort(reverse=True)
-    return {"match": match, "similar": [i for _, i in sim[:6]]}
+    return {"match": [i for _, _, i in ranked], "similar": [i for _, i in sim[:6]], "kind": kind, "snip": snip}
 
 
 def _blank_song(title: str, **extra) -> str:

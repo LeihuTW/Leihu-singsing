@@ -148,7 +148,17 @@ function renderCats() {
   if (real) $("#cat-hint").textContent = `匯入的歌會放進「${LIB.cur}」`;
 }
 /* 搜尋：伺服器端把繁體、簡體統一後比對（輸入繁體也找得到簡體歌名），另外推薦歌名相近的歌 */
-LIB.hits = null; LIB.similar = [];
+LIB.hits = null; LIB.similar = []; LIB.kind = {}; LIB.snip = {}; LIB.rank = new Map();
+// 2.2.1 搜尋範圍：歌名歌手／歌詞／全部（記住上次的選擇）
+LIB.scope = store.get("libScope", "name");
+const SCOPE_PH = { name: "搜尋曲名、歌手", lyrics: "搜尋歌詞（輸入記得的一句）", all: "搜尋曲名、歌手、歌詞" };
+$("#lib-scope").value = LIB.scope;
+$("#lib-q").placeholder = SCOPE_PH[LIB.scope] || SCOPE_PH.name;
+$("#lib-scope").onchange = e => {
+  LIB.scope = e.target.value; store.set("libScope", LIB.scope);
+  $("#lib-q").placeholder = SCOPE_PH[LIB.scope] || SCOPE_PH.name;
+  libSearch();
+};
 let libSearchTimer = 0, libSearchSeq = 0;
 function libSearch() {
   clearTimeout(libSearchTimer);
@@ -156,14 +166,18 @@ function libSearch() {
   libSearchTimer = setTimeout(async () => {
     const seq = ++libSearchSeq, q = LIB.q;
     try {
-      const r = await api(`/api/songs/search?q=${encodeURIComponent(q)}`);
+      const r = await api(`/api/songs/search?q=${encodeURIComponent(q)}&scope=${LIB.scope}`);
       if (seq !== libSearchSeq) return;
-      LIB.hits = new Set(r.match); LIB.similar = r.similar || [];
-    } catch { LIB.hits = null; LIB.similar = []; }
+      LIB.hits = new Set(r.match); LIB.similar = LIB.scope === "lyrics" ? [] : (r.similar || []);
+      LIB.kind = r.kind || {}; LIB.snip = r.snip || {};
+      LIB.rank = new Map(r.match.map((id, i) => [id, i]));
+    } catch { LIB.hits = null; LIB.similar = []; LIB.kind = {}; LIB.snip = {}; LIB.rank = new Map(); }
     renderSongs();
   }, 180);
 }
-$("#lib-q").addEventListener("input", e => { LIB.q = e.target.value.trim().toLowerCase(); libSearch(); });
+$("#lib-q").addEventListener("input", e => {
+  LIB.q = e.target.value.trim().toLowerCase(); libSearch();
+});
 LIB.sort = store.get("libSort", "new");
 $("#lib-sort").value = LIB.sort;
 $("#lib-sort").onchange = e => { LIB.sort = e.target.value; store.set("libSort", LIB.sort); renderSongs(); };
@@ -219,16 +233,18 @@ $("#cat-del").onclick = async () => {
   catch (e) { toast(e.message); }
   loadSongs();
 };
+function inCurCat(s) {
+  if (LIB.cur === "__flag__") return lyrNeedsFix(s);
+  if (LIB.cur === "__none__") return !s.category;
+  return LIB.cur === "__all__" || s.category === LIB.cur;
+}
+// 2.2.1：有輸入搜尋字時找全部分類（目前分類的排前面），不會因為停在別的分類就「找不到」
 function songMatches(s) {
-  if (LIB.cur === "__flag__") { if (!lyrNeedsFix(s)) return false; }
-  else {
-    if (LIB.cur === "__none__" && s.category) return false;
-    if (LIB.cur !== "__all__" && LIB.cur !== "__none__" && s.category !== LIB.cur) return false;
-  }
-  if (!LIB.q) return true;
+  if (!LIB.q) return inCurCat(s);
   if (LIB.hits) return LIB.hits.has(s.id);
-  const hay = [s.title, s.yt_artist, s.yt_track, s.yt_uploader, s.category, s.lyrics_text,
-    s.lyrics_online && s.lyrics_online.artist].filter(Boolean).join(" ").toLowerCase();
+  const lyr = LIB.scope !== "name" ? s.lyrics_text : "";
+  const hay = (LIB.scope === "lyrics" ? [s.lyrics_text] : [s.title, s.artist, s.yt_artist, s.yt_track, s.yt_uploader, s.category, lyr,
+    s.lyrics_online && s.lyrics_online.artist]).filter(Boolean).join(" ").toLowerCase();
   return LIB.q.split(/\s+/).every(w => hay.includes(w));
 }
 /* ------------------------------------------------------------ 直播模式（精簡版面）
@@ -540,14 +556,42 @@ $("#lib-draw").onclick = () => {
   spin();
 };
 
-function renderLiveSongs(box, list) {
+/* 2.2.1 搜尋結果的排列：歌名歌手符合的（依符合程度；目前分類的排前面）→「歌詞裡有」的 → 歌名相近的。
+   回傳歌曲和 {head: "標題"} 混在一起的陣列；沒有搜尋時依排序方式排列 */
+function libItems(list) {
   const sortBy = LIB.sort || "new";
   const cmp = (a, b) => (a || "").localeCompare(b || "", "zh-Hant");
-  if (sortBy === "title") list.sort((a, b) => cmp(a.title, b.title));
-  if (sortBy === "artist") list.sort((a, b) => (!a.artist - !b.artist) || cmp(a.artist, b.artist) || cmp(a.title, b.title));
-  if (!list.length) { box.innerHTML = `<div class="empty">${LIB.q ? "找不到符合的歌曲。" : "這個分類還沒有歌。"}</div>`; return; }
+  if (!LIB.q) {
+    if (sortBy === "title") list.sort((a, b) => cmp(a.title, b.title));
+    if (sortBy === "artist") list.sort((a, b) => (!a.artist - !b.artist) || cmp(a.artist, b.artist) || cmp(a.title, b.title));
+    return list;
+  }
+  const rk = s => LIB.rank.has(s.id) ? LIB.rank.get(s.id) : 1e9;
+  const byRank = arr => arr.sort((a, b) => (inCurCat(b) - inCurCat(a)) || rk(a) - rk(b));
+  const names = list.filter(s => LIB.kind[s.id] !== "lyrics"), lyr = list.filter(s => LIB.kind[s.id] === "lyrics");
+  const out = [];
+  if (names.length) {
+    const mine = byRank(names.filter(inCurCat)), others = byRank(names.filter(s => !inCurCat(s)));
+    out.push(...mine);
+    if (others.length && LIB.cur !== "__all__") out.push({ head: mine.length ? "其他分類的歌" : "這個分類沒有符合的歌，以下是其他分類找到的：" });
+    out.push(...others);
+  }
+  if (lyr.length) {
+    if (names.length || LIB.scope !== "lyrics") out.push({ head: `歌詞裡有「${LIB.q}」的歌` });
+    out.push(...byRank(lyr));
+  }
+  const sim = LIB.similar.map(id => LIB.songs.find(s => s.id === id)).filter(s => s && !list.includes(s));
+  if (sim.length) out.push({ head: list.length ? "歌名相近的歌" : "找不到完全符合的歌曲，以下是歌名相近的歌：" }, ...sim);
+  return out;
+}
+function libHead(t) { const h = document.createElement("div"); h.className = "sim-head"; h.textContent = t; return h; }
+
+function renderLiveSongs(box, list) {
+  const items = libItems(list);
+  if (!items.length) { box.innerHTML = `<div class="empty">${LIB.q ? "找不到符合的歌曲。" : "這個分類還沒有歌。"}</div>`; return; }
   const frag = document.createDocumentFragment();
-  for (const s of list) {
+  for (const s of items) {
+    if (s.head) { frag.appendChild(libHead(s.head)); continue; }
     const ok = !!(s.steps || {}).pitch;
     const el = document.createElement("button");
     el.className = "live-song" + (S.song && S.song.id === s.id ? " cur" : "");
@@ -555,7 +599,8 @@ function renderLiveSongs(box, list) {
     el.title = ok ? "開始這首" : "還沒處理好";
     el.innerHTML = `<span class="t"></span><span class="a"></span>${ok ? `<span class="add" role="button" title="加進待唱清單">＋</span>` : ""}`;
     $(".t", el).textContent = (lyrNeedsFix(s) ? "⚑ " : "") + s.title;
-    $(".a", el).textContent = [s.artist, s.key ? `KEY ${s.key > 0 ? "+" : ""}${s.key}` : ""].filter(Boolean).join("・");
+    $(".a", el).textContent = LIB.q && LIB.snip[s.id] ? `「${LIB.snip[s.id]}」`
+      : [s.artist, s.key ? `KEY ${s.key > 0 ? "+" : ""}${s.key}` : ""].filter(Boolean).join("・");
     el.onclick = e => {
       if (e.target.classList.contains("add")) { e.stopPropagation(); return queueAdd(s.id); }
       openSong(s.id).then(() => renderSongs());
@@ -579,31 +624,21 @@ function renderSongs() {
     box.scrollTop = keepTop;
     return;
   }
-  const inCat = s => !(LIB.cur === "__none__" && s.category) && (LIB.cur === "__all__" || LIB.cur === "__none__" || s.category === LIB.cur);
-  const sim = LIB.q ? LIB.similar.map(id => LIB.songs.find(s => s.id === id)).filter(s => s && inCat(s) && !list.includes(s)) : [];
-  if (!list.length && !sim.length) {
+  const items = libItems(list);
+  if (!items.length) {
     box.innerHTML = `<div class="empty">${LIB.q ? "找不到符合的歌曲。" : "這個分類還沒有歌。匯入歌曲，或在其他歌的「分類」選單把歌放進來。"}</div>`;
     return;
   }
-  const sortBy = LIB.sort || "new";
-  const cmp = (a, b) => (a || "").localeCompare(b || "", "zh-Hant");
-  if (sortBy === "title") list.sort((a, b) => cmp(a.title, b.title));
-  if (sortBy === "artist") list.sort((a, b) => (!a.artist - !b.artist) || cmp(a.artist, b.artist) || cmp(a.title, b.title));
+  const byArtist = (LIB.sort || "new") === "artist" && !LIB.q;
   let lastArtist = null;
-  for (const s of [...list, ...(sim.length ? ["__sim__", ...sim] : [])]) {
-    if (sortBy === "artist" && s !== "__sim__" && !sim.includes(s) && (s.artist || "") !== lastArtist) {
+  for (const s of items) {
+    if (s.head) { box.appendChild(libHead(s.head)); continue; }
+    if (byArtist && (s.artist || "") !== lastArtist) {
       lastArtist = s.artist || "";
       const h = document.createElement("div");
       h.className = "artist-head";
       h.textContent = lastArtist || "（未填歌手）";
       box.appendChild(h);
-    }
-    if (s === "__sim__") {
-      const h = document.createElement("div");
-      h.className = "sim-head";
-      h.textContent = list.length ? "歌名相近的歌" : "找不到完全符合的歌曲，以下是歌名相近的歌：";
-      box.appendChild(h);
-      continue;
     }
     const el = document.createElement("div");
     el.className = "song";
@@ -658,6 +693,10 @@ function renderSongs() {
     if (s.key) { const k = document.createElement("span"); k.className = "k"; k.textContent = `KEY ${s.key > 0 ? "+" : ""}${s.key}`; sub.append(k); }
     sub.hidden = !s.artist && !s.key;
     $$(".note", el).forEach((n, i) => (n.textContent = s.notes[i]));
+    if (LIB.q && LIB.snip[s.id]) {   // 搜歌詞：顯示符合的那一句
+      const sn = document.createElement("div"); sn.className = "lyr-snip"; sn.textContent = `歌詞：「${LIB.snip[s.id]}」`;
+      $(".sub", el).after(sn);
+    }
     const sel = $('[data-a="cat"]', el);
     sel.innerHTML = `<option value="">未分類</option>` + LIB.cats.map(() => `<option></option>`).join("");
     LIB.cats.forEach((c, i) => { sel.options[i + 1].value = c; sel.options[i + 1].textContent = c; });
@@ -711,7 +750,7 @@ function renderSongs() {
       if (S.song && S.song.id === s.id) { S.song = null; $("#nav-practice").disabled = true; }
       loadSongs();
     };
-    if (sim.includes(s)) el.classList.add("similar");
+    if (LIB.q && !(LIB.hits ? LIB.hits.has(s.id) : true)) el.classList.add("similar");
     box.appendChild(el);
   }
 }

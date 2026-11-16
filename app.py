@@ -195,7 +195,8 @@ def songs():
 @app.get("/api/songs/search")
 def songs_search():
     """歌曲庫搜尋：繁體、簡體互相找得到，另外列出歌名相近的歌。"""
-    return jsonify(P.search_songs(request.args.get("q", "")[:200]))
+    scope = request.args.get("scope", "all")
+    return jsonify(P.search_songs(request.args.get("q", "")[:200], scope if scope in ("name", "lyrics", "all") else "all"))
 
 
 @app.post("/api/songs")

@@ -60,7 +60,12 @@
       <span class="lib-right">
         <button id="lib-draw" title="從目前顯示的歌（分類、搜尋結果）裡隨機抽一首處理好的歌，直接進練唱">抽歌</button>
         <select id="lib-sort" aria-label="排序"><option value="new">最新加入</option><option value="title">依曲名</option><option value="artist">依歌手</option></select>
-        <input id="lib-q" type="search" placeholder="搜尋曲名、歌手、歌詞" aria-label="搜尋歌曲">
+        <select id="lib-scope" aria-label="搜尋範圍" title="搜尋範圍">
+          <option value="name">搜歌名、歌手</option>
+          <option value="lyrics">搜歌詞</option>
+          <option value="all">全部都搜</option>
+        </select>
+        <input id="lib-q" type="search" placeholder="搜尋曲名、歌手" aria-label="搜尋歌曲">
       </span>
     </div>
     <div id="cat-tools" class="row cat-tools" hidden>
