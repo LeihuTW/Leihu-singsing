@@ -108,16 +108,69 @@ def module_status() -> dict:
         "opencc": has("opencc"),
         "anthropic": has("anthropic"),
         "kana": has("sudachipy") and has("sudachidict_small"),
-        "cuda": _cuda(),
+        "cuda": cuda_ok() if IN_WORKER else (gpu_info(block=False) or {}).get("ok", False),
     }
 
 
 _CUDA_OK = None
 CUDA_NOTE = ""
+IN_WORKER = False   # True：這裡是顯示卡子程式（gpu_worker.py），可以載入 PyTorch／CUDA
+_GPU_INFO: dict | None = None
+_GPU_INFO_LOCK = threading.Lock()
+_GPU_PROBING = {"on": False}
 
 
-def _cuda() -> bool:
-    return cuda_ok()
+def _torch_version() -> str:
+    try:
+        from importlib.metadata import version
+        return version("torch")
+    except Exception:
+        return ""
+
+
+def gpu_info(block: bool = True) -> dict | None:
+    """顯示卡能不能用（主程式不載入 CUDA，所以由子程式檢查一次，結果存在 models/gpu_probe.json；
+    換了 PyTorch 版本才重新檢查）。block=False：還不知道時回傳 None，並在背景開始檢查。"""
+    global _GPU_INFO, CUDA_NOTE
+    if _GPU_INFO is not None:
+        return _GPU_INFO
+    tv = _torch_version()
+    if not tv:
+        _GPU_INFO = {"ok": False, "note": "", "cc": None, "torch": ""}
+        return _GPU_INFO
+    cache = MODELS / "gpu_probe.json"
+    try:
+        c = json.loads(cache.read_text("utf-8"))
+        if c.get("torch") == tv:
+            _GPU_INFO = c
+            CUDA_NOTE = c.get("note") or ""
+            return c
+    except Exception:
+        pass
+    if not block:
+        with _GPU_INFO_LOCK:
+            if not _GPU_PROBING["on"]:
+                _GPU_PROBING["on"] = True
+                threading.Thread(target=gpu_info, daemon=True, name="gpu-probe").start()
+        return None
+    with _GPU_INFO_LOCK:
+        if _GPU_INFO is not None:
+            return _GPU_INFO
+        import gpu_worker as G
+        try:
+            info = G.POOL.call("probe")
+        except Exception as e:
+            log_error("gpu probe", e)
+            info = {"ok": False, "note": "", "cc": None}
+        info["torch"] = tv
+        try:
+            MODELS.mkdir(parents=True, exist_ok=True)
+            atomic_write_text(cache, json.dumps(info, ensure_ascii=False))
+        except Exception:
+            pass
+        CUDA_NOTE = info.get("note") or ""
+        _GPU_INFO = info
+        return info
 
 
 def cuda_ok() -> bool:
@@ -127,6 +180,8 @@ def cuda_ok() -> bool:
     （例如 GTX 10 系列配上 CUDA 12.8 版），實際運算時才會出現「no kernel image is available」。
     所以實際跑一個小運算確認，失敗就改用 CPU。結果只算一次。"""
     global _CUDA_OK, CUDA_NOTE
+    if not IN_WORKER:   # 主程式不載入 CUDA：問顯示卡子程式（結果會存起來）
+        return bool((gpu_info() or {}).get("ok"))
     if _CUDA_OK is not None:
         return _CUDA_OK
     try:
@@ -1628,6 +1683,8 @@ def _autocast_ok() -> bool:
     GTX 10 系列以前的顯示卡半精度反而比較慢，維持原本的方式。"""
     if _AUTOCAST["bad"] or not cuda_ok():
         return False
+    if not IN_WORKER:
+        return ((gpu_info() or {}).get("cc") or 0) >= 7
     try:
         import torch
         return torch.cuda.get_device_capability(0)[0] >= 7
@@ -1714,23 +1771,21 @@ def _dl_report(report, label: str, frac: float):
     return cb
 
 
-def separate_uvr(d: Path, cfg: dict, report) -> None:
-    try:
-        import torch  # noqa: F401  先載入 PyTorch 的 CUDA 函式庫，ONNX 會沿用同一份
-    except Exception:
-        pass
-    from audio_separator.separator import Separator
+def _separate(model: str, inp: Path, tmp: Path, overlap: int, autocast: bool,
+              label: str, report, start: float, span: float) -> list[Path]:
+    """用一個分離模型分一次（2.1.1：在顯示卡子程式裡跑，主程式不載入 CUDA）。"""
+    import gpu_worker as G
+    outs = G.call("separate", model, str(inp), str(tmp), overlap, autocast, label, start, span, progress=report)
+    return [Path(p) for p in outs]
 
+
+def separate_uvr(d: Path, cfg: dict, report) -> None:
     tmp = d / "_sep"
     shutil.rmtree(tmp, ignore_errors=True)
     tmp.mkdir()
     (MODELS / "uvr").mkdir(parents=True, exist_ok=True)
     overlap = 4 if cfg.get("karaoke_overlap") == 4 else 2
-    sep = Separator(output_dir=str(tmp), model_file_dir=str(MODELS / "uvr"),
-                    output_format="WAV", sample_rate=SR, use_autocast=_autocast_ok(),
-                    # 高品質模型（Roformer）每一段音訊預設重複算 4 次再平均；2 次的結果幾乎一樣，時間約省一半
-                    mdxc_params={"segment_size": 256, "override_model_segment_size": False, "batch_size": None,
-                                 "overlap": overlap, "pitch_shift": 0})
+    autocast = _autocast_ok()
 
     report("準備人聲分離模型", 0.07)
     vmodel = vocal_model(cfg)
@@ -1738,9 +1793,7 @@ def separate_uvr(d: Path, cfg: dict, report) -> None:
     ensure_model(vmodel, _dl_report(report, "人聲分離模型", 0.07))
     vlabel = "分離人聲與伴奏" + ("（高品質）" if vhq else "（高品質模型下載中，這首先用標準模型）" if HQV_DL["state"] == "downloading" else "")
     report(vlabel, 0.08)
-    sep.load_model(model_filename=vmodel)
-    with _sep_progress(vlabel, report, 0.08, 0.26):
-        outs = _outputs(sep.separate(str(stem_path(d, "mix"))), tmp)
+    outs = _separate(vmodel, stem_path(d, "mix"), tmp, overlap, autocast, vlabel, report, 0.08, 0.26)
     update_meta(d, vocal_model="bs_roformer" if vhq else "mdx")   # 之後可以找出還沒用新模型處理的歌
     voc = tmp / "vocals_only.wav"
     _pick(outs, "vocals").replace(voc)
@@ -1754,27 +1807,21 @@ def separate_uvr(d: Path, cfg: dict, report) -> None:
         ensure_model(kara, _dl_report(report, "主唱分離模型", 0.35))
     report(label, 0.35)
 
-    def run_kara(label):
-        with _sep_progress(label, report, 0.35, 0.18):
-            return [p for p in _outputs(sep.separate(str(voc)), tmp) if p != voc and p != inst_p]
+    def run_kara(kara, label, ac):
+        outs = _separate(kara, voc, tmp, overlap, ac, label, report, 0.35, 0.18)
+        return [p for p in outs if p != voc and p != inst_p]
     try:
         try:
-            sep.load_model(model_filename=kara)
-            outs2 = run_kara(label)
+            outs2 = run_kara(kara, label, autocast)
         except JobCancelled:
             raise
         except Exception as e:
-            if not (hq and sep.use_autocast):
+            if not (hq and autocast) or "out of memory" in str(e).lower():
                 raise
             # 混合精度在這張顯示卡上出問題：之後都改用一般精度，這首重新分一次
             _AUTOCAST["bad"] = True
             log_error("autocast separation", e)
-            sep = Separator(output_dir=str(tmp), model_file_dir=str(MODELS / "uvr"),
-                            output_format="WAV", sample_rate=SR, use_autocast=False,
-                            mdxc_params={"segment_size": 256, "override_model_segment_size": False,
-                                         "batch_size": None, "overlap": overlap, "pitch_shift": 0})
-            sep.load_model(model_filename=kara)
-            outs2 = run_kara(label)
+            outs2 = run_kara(kara, label, False)
     except JobCancelled:
         raise
     except Exception as e:
@@ -1785,8 +1832,7 @@ def separate_uvr(d: Path, cfg: dict, report) -> None:
         kara = cfg["karaoke_model"]
         report("把人聲分成主唱與合音（標準）", 0.35)
         ensure_model(kara, _dl_report(report, "主唱分離模型", 0.35))
-        sep.load_model(model_filename=kara)
-        outs2 = run_kara("把人聲分成主唱與合音（標準）")
+        outs2 = run_kara(kara, "把人聲分成主唱與合音（標準）", autocast)
     with _META_LOCK:   # 讀出到寫回之間不讓別的執行緒改這首歌的資料
         meta = read_meta(d)
         meta["karaoke"] = kara
@@ -1798,8 +1844,6 @@ def separate_uvr(d: Path, cfg: dict, report) -> None:
     for name, p in (("lead", lead_p), ("back", back_p), ("inst", inst_p)):
         save_stem(d, name, fit_length(read_audio(p), n))
     shutil.rmtree(tmp, ignore_errors=True)
-    del sep
-    free_gpu()
     # 合音比重：合音越多，主唱和合音越難分乾淨，更精細的分離越有幫助
     try:
         h = harmony_ratio(d)
@@ -1886,6 +1930,16 @@ def step_separate(d: Path, cfg: dict, report) -> None:
 # ---------------------------------------------------------------- 音高
 
 def track_pitch(y16: np.ndarray, cfg: dict | None = None, strict: bool = False) -> np.ndarray:
+    """16 kHz 單聲道 → 每 10 ms 一個 MIDI 音高（無聲為 NaN）。
+    2.1.1：用 torchcrepe（顯示卡）時在子程式裡跑，主程式不載入 CUDA。"""
+    cfg = cfg or load_config()
+    if not IN_WORKER and module_status()["crepe"]:
+        import gpu_worker as G
+        return G.call("pitch", np.ascontiguousarray(y16, dtype=np.float32), cfg, strict)
+    return _track_pitch_local(y16, cfg, strict)
+
+
+def _track_pitch_local(y16: np.ndarray, cfg: dict | None = None, strict: bool = False) -> np.ndarray:
     """16 kHz 單聲道 → 每 10 ms 一個 MIDI 音高（無聲為 NaN）。
 
     strict=True 用於麥克風錄音：門檻較嚴、依背景噪音決定靜音門檻，並去掉每個音頭尾的滑落／滑入
@@ -2397,33 +2451,20 @@ def lyric_quality(stats: list, words: list, d: Path, lines: list) -> dict:
 def step_lyrics(d: Path, cfg: dict, report) -> None:
     if not module_status()["whisper"]:
         raise UserError("沒有安裝 faster-whisper，無法辨識歌詞")
+    from types import SimpleNamespace
+    import gpu_worker as G
     report("載入語音辨識模型（第一次會下載）", 0.7)
-    free_gpu()
-    model = _whisper_model(cfg)
     y16 = analysis_vocal(d)
-    report("判斷歌詞語言", 0.74)
     meta0 = read_meta(d)
     song_lang = meta0.get("lyrics_language")          # 這首歌個別指定的語言（None＝依設定）
     want = song_lang if song_lang is not None else (cfg.get("lyrics_language") or "")
-    lang, lang_note = pick_language(model, y16, want, song_lang is not None)
-    report("辨識歌詞", 0.75)
-    stats: list = []
-    try:
-        segs, info = model.transcribe(
-            y16, language=lang, vad_filter=True,
-            vad_parameters={"min_silence_duration_ms": 500},
-            word_timestamps=True, condition_on_previous_text=False, beam_size=5)
-        words = _collect_words(segs, len(y16) / PITCH_SR, report, stats)
-    except RuntimeError:
-        # 例如有顯示卡但缺 CUDA 函式庫：改用 CPU 重跑
-        traceback.print_exc()
-        from faster_whisper import WhisperModel
-        model = WhisperModel(cfg.get("whisper_model") or "large-v3-turbo", device="cpu",
-                             compute_type="int8", download_root=str(MODELS / "whisper"))
-        segs, info = model.transcribe(y16, language=lang, vad_filter=True,
-                                      word_timestamps=True, condition_on_previous_text=False)
-        stats = []
-        words = _collect_words(segs, len(y16) / PITCH_SR, report, stats)
+    # 2.1.1：載入模型、判斷語言、辨識都在顯示卡子程式裡跑（CTranslate2 的顯示卡記憶體才放得乾淨）
+    r = G.call("whisper", np.ascontiguousarray(y16, dtype=np.float32), cfg, want, song_lang is not None,
+               progress=report)
+    words = [SimpleNamespace(**w) for w in r["words"]]
+    stats = r["stats"]
+    lang, lang_note = r["lang"], r["lang_note"]
+    info = SimpleNamespace(language=r["language"])
 
     lines, cur = [], []
 
@@ -2567,6 +2608,11 @@ def step_variant(d: Path, key: int, speed: float, report) -> None:
         return
     label = f"移調 {key:+d}、速度 {int(speed * 100)}%"
     cpus = max(1, os.cpu_count() or 1)
+    try:
+        if live_status()["hold"]:   # 2.1.1 直播中：只用一半的 CPU 核心，留給直播軟體和 VTube Studio
+            cpus = max(1, cpus // 2)
+    except Exception:
+        pass
     report(f"{label}：讀取音軌", 0.02)
     data = {}
     for stem in todo:
