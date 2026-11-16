@@ -1341,8 +1341,9 @@ MODEL_FILES = {   # 檔名 → (大小, SHA-256, 下載網址…)
     HQ_KARAOKE: (913096801, "1de20d459332fe8869aeb01327a31df0032262706e1365114e852dc271779813", [
         _HF_UVR + "Roformer/MelBand/" + HQ_KARAOKE, _GH_UVR + HQ_KARAOKE, _GH_AS + HQ_KARAOKE]),
     _HQ_YAML: (None, None, [_GH_AS + _HQ_YAML]),
+    # 2.1.1：Hugging Face 的資料夾是 BandSplit（2.1.0 寫成 BSRoformer → 404）；再多一個 GitHub 來源
     HQ_VOCAL: (639331213, "5b84f37e8d444c8cb30c79d77f613a41c05868ff9c9ac6c7049c00aefae115aa", [
-        _GH_UVR + HQ_VOCAL, _HF_UVR + "Roformer/BSRoformer/" + HQ_VOCAL]),
+        _HF_UVR + "Roformer/BandSplit/" + HQ_VOCAL, _GH_UVR + HQ_VOCAL, _GH_AS + HQ_VOCAL]),
     _HQ_VOCAL_YAML: (2273, "2bfdd16c656bd9519aba757cc4f8834b7ede675eb1e00ec4772d74ae1c41af7f", [
         _GH_AS + _HQ_VOCAL_YAML, _RAW_CFG + _HQ_VOCAL_YAML]),
 }
@@ -1446,9 +1447,25 @@ def fetch_file(urls: list[str], dst: Path, size: int | None = None, sha256: str 
     stop = threading.Event()
     errors: list[Exception] = []
     pref = [0]                             # 目前最好用的來源，其他段落也跟著用
+    dead: set[str] = set()                 # 確定沒有這個檔案的來源（404 等）：之後所有段落都不再用
+    lock = threading.Lock()
 
     def have(k: int) -> int:
         return parts[k].stat().st_size if parts[k].exists() else 0
+
+    def alive() -> list[int]:
+        with lock:
+            return [i for i, u in enumerate(urls) if u not in dead]
+
+    def next_src(ui: int) -> int:
+        """從 ui 的下一個開始，找一個還能用的來源。"""
+        ok = alive()
+        if not ok:
+            return ui
+        for step in range(1, len(urls) + 1):
+            if (ui + step) % len(urls) in ok:
+                return (ui + step) % len(urls)
+        return ui
 
     def worker(k: int) -> None:
         a, b = ranges[k]
@@ -1460,7 +1477,10 @@ def fetch_file(urls: list[str], dst: Path, size: int | None = None, sha256: str 
                     with open(parts[k], "r+b") as f:
                         f.truncate(b - a)
                 return
+            if urls[ui % len(urls)] in dead:
+                ui = next_src(ui)
             url = urls[ui % len(urls)]
+            wrote = 0
             try:
                 with _open(url, a + got, b) as r:
                     if r.status != 206:
@@ -1473,20 +1493,33 @@ def fetch_file(urls: list[str], dst: Path, size: int | None = None, sha256: str 
                                 break
                             f.write(chunk)
                             n0 += len(chunk)
-                            if time.time() - w0 > 30:   # 這個來源慢到不行（每段 < 30 KB/s）：換下一個
-                                if n0 < 30e3 * 30 and len(urls) > 1:
+                            wrote += len(chunk)
+                            if time.time() - w0 > 30:   # 這個來源慢到不行（每段 < 30 KB/s）：有別的來源就換
+                                if n0 < 30e3 * 30 and len(alive()) > 1:
                                     raise _SlowSource()
                                 w0, n0 = time.time(), 0
                 fails = 0
             except _SlowSource:
-                ui += 1                    # 太慢：換來源，不算失敗
-                pref[0] = ui % len(urls)
+                ui = next_src(ui)          # 太慢：換來源，不算失敗
+                pref[0] = ui
             except Exception as e:
-                fails += 1
-                ui += 1                    # 換下一個來源
-                pref[0] = ui % len(urls)
+                code = getattr(e, "code", None)
+                if code in (403, 404, 410):   # 這個來源沒有這個檔案：永久剔除，不要來回切換
+                    with lock:
+                        dead.add(url)
+                    log_error(f"download {dst.name}：來源沒有這個檔案（HTTP {code}），不再使用 {url}", e)
+                    if not alive():
+                        errors.append(IOError(f"所有下載來源都找不到 {dst.name}"))
+                        stop.set()
+                        return
+                    ui = next_src(ui)
+                    pref[0] = ui
+                    continue
+                fails = 0 if wrote else fails + 1   # 有下載到東西（例如中途斷線）不算連續失敗
+                ui = next_src(ui)          # 換下一個來源
+                pref[0] = ui
                 log_error(f"download {dst.name}[{k}] {url}", e)
-                if fails >= 3 * len(urls):
+                if fails >= 3 * max(1, len(alive())):
                     errors.append(e)
                     stop.set()
                     return
