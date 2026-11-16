@@ -3752,7 +3752,7 @@ function setTab(name) {
   $$(".set-tabs [data-tab]").forEach(b => { const on = b.dataset.tab === name; b.classList.toggle("cur", on); b.setAttribute("aria-selected", on); });
   $$(".set-pane").forEach(p => (p.hidden = p.dataset.pane !== name));
   store.set("setTab", name);
-  const sh = $(".set-sheet"); if (sh) sh.scrollTop = 0;
+  const pn = $(`.set-pane[data-pane="${name}"]`); if (pn) pn.scrollTop = 0;   // 視窗固定高度，分頁內容自己捲動
 }
 $$(".set-tabs [data-tab]").forEach(b => (b.onclick = () => setTab(b.dataset.tab)));
 async function openSettings(focusUsage) {
