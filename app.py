@@ -24,7 +24,7 @@ import score_sheet as SS   # 1.7：旋律譜匯出
 import exporter as EX      # 2.3.0：匯出歌單、直播歌單回顧
 import hotkeys as HK   # 2.0：自訂全域快捷鍵
 
-VERSION = "2.3.1"
+VERSION = "2.3.2"
 HOST, PORT = "127.0.0.1", int(os.environ.get("LIANTAI_PORT", "8765"))
 app = Flask(__name__, static_folder=str(P.ROOT / "static"), static_url_path="/static")
 app.config["MAX_CONTENT_LENGTH"] = 1024 * 1024 * 1024
@@ -1427,7 +1427,7 @@ def storage_move():
             out = P.move_storage(target, what, report)
             try:
                 import gpu_worker as G
-                G.POOL.shutdown()   # 顯示卡處理程式重開，才會用新的模型位置
+                G.POOL.shutdown(); G.CPU_POOL.shutdown()   # 顯示卡處理程式重開，才會用新的模型位置
             except Exception:
                 pass
             print(f"[storage] 搬移完成：{out}", flush=True)
@@ -1447,7 +1447,7 @@ def storage_adopt():
     out = P.adopt_storage(str(b.get("path") or ""))
     try:
         import gpu_worker as G
-        G.POOL.shutdown()
+        G.POOL.shutdown(); G.CPU_POOL.shutdown()
     except Exception:
         pass
     return jsonify(out)

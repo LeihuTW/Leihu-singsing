@@ -1877,10 +1877,10 @@ def _dl_report(report, label: str, frac: float):
 
 
 def _separate(model: str, inp: Path, tmp: Path, overlap: int, autocast: bool,
-              label: str, report, start: float, span: float) -> list[Path]:
+              label: str, report, start: float, span: float, cpu: bool = False) -> list[Path]:
     """用一個分離模型分一次（2.1.1：在顯示卡子程式裡跑，主程式不載入 CUDA）。"""
     import gpu_worker as G
-    outs = G.call("separate", model, str(inp), str(tmp), overlap, autocast, label, start, span, progress=report)
+    outs = G.call("separate", model, str(inp), str(tmp), overlap, autocast, label, start, span, progress=report, cpu=cpu)
     return [Path(p) for p in outs]
 
 
@@ -1890,15 +1890,16 @@ def separate_uvr(d: Path, cfg: dict, report) -> None:
     tmp.mkdir()
     (MODELS / "uvr").mkdir(parents=True, exist_ok=True)
     overlap = 4 if cfg.get("karaoke_overlap") == 4 else 2
-    autocast = _autocast_ok()
+    cpu = bool(cfg.get("_cpu"))   # 直播中：只用 CPU
+    autocast = False if cpu else _autocast_ok()
 
     report("準備人聲分離模型", 0.07)
     vmodel = vocal_model(cfg)
     vhq = vmodel == HQ_VOCAL
     ensure_model(vmodel, _dl_report(report, "人聲分離模型", 0.07))
-    vlabel = "分離人聲與伴奏" + ("（高品質）" if vhq else "（高品質模型下載中，這首先用標準模型）" if HQV_DL["state"] == "downloading" else "")
+    vlabel = "分離人聲與伴奏" + ("（直播中：CPU 輕量處理，下播後自動補做高品質）" if cpu else "") + ("（高品質）" if vhq else "（高品質模型下載中，這首先用標準模型）" if HQV_DL["state"] == "downloading" else "")
     report(vlabel, 0.08)
-    outs = _separate(vmodel, stem_path(d, "mix"), tmp, overlap, autocast, vlabel, report, 0.08, 0.26)
+    outs = _separate(vmodel, stem_path(d, "mix"), tmp, overlap, autocast, vlabel, report, 0.08, 0.26, cpu)
     update_meta(d, vocal_model="bs_roformer" if vhq else "mdx")   # 之後可以找出還沒用新模型處理的歌
     voc = tmp / "vocals_only.wav"
     _pick(outs, "vocals").replace(voc)
@@ -1913,7 +1914,7 @@ def separate_uvr(d: Path, cfg: dict, report) -> None:
     report(label, 0.35)
 
     def run_kara(kara, label, ac):
-        outs = _separate(kara, voc, tmp, overlap, ac, label, report, 0.35, 0.18)
+        outs = _separate(kara, voc, tmp, overlap, ac, label, report, 0.35, 0.18, cpu)
         return [p for p in outs if p != voc and p != inst_p]
     try:
         try:
@@ -2040,7 +2041,9 @@ def track_pitch(y16: np.ndarray, cfg: dict | None = None, strict: bool = False) 
     cfg = cfg or load_config()
     if not IN_WORKER and module_status()["crepe"]:
         import gpu_worker as G
-        return G.call("pitch", np.ascontiguousarray(y16, dtype=np.float32), cfg, strict)
+        # 直播中（含錄音評分）：在只用 CPU 的處理程式裡分析，不跟直播軟體、VTube Studio 搶顯示卡
+        cpu = bool(cfg.get("_cpu")) or bool(live_status(cfg)["hold"])
+        return G.call("pitch", np.ascontiguousarray(y16, dtype=np.float32), cfg, strict, cpu=cpu)
     return _track_pitch_local(y16, cfg, strict)
 
 
@@ -3123,9 +3126,9 @@ def hq_models_ready(cfg: dict) -> bool:
 
 def live_light_cfg(cfg: dict) -> dict | None:
     """直播中匯入：回傳要改用的輕量設定；不在直播或本來就用標準模型時回傳 None。"""
-    if not live_status(cfg)["hold"] or not wants_hq(cfg):
+    if not live_status(cfg)["hold"]:
         return None
-    return {"vocal_quality": "standard", "karaoke_quality": "standard", "auto_recognize_lyrics": False}
+    return {"vocal_quality": "standard", "karaoke_quality": "standard", "auto_recognize_lyrics": False, "_cpu": True}
 
 
 # 2.1.1：可以和下一首重疊處理的工作（分離完、還在分析旋律時，下一首就先開始分離）
@@ -3463,7 +3466,8 @@ def process_song(song_id: str, steps: list[str], cfg_override: dict | None = Non
         if "import" in steps or not meta["steps"].get("import"):
             step_import(d, report)
         if "separate" in steps:
-            light = live_light_cfg(cfg) if "import" in steps else None
+            # 2.3.2：直播中不管是匯入、優先處理或重新處理，都改用 CPU＋標準模型（不碰顯示卡），下播後自動補做
+            light = live_light_cfg(cfg)
             if light:   # 直播中匯入：先用輕量模型，直播結束後自動補做高品質
                 cfg.update(light)
                 update_meta(d, live_light=True)
@@ -3629,7 +3633,7 @@ def similarity(recognized: str, candidate: str) -> float | None:
     return round(sum(x.size for x in m.get_matching_blocks()) / len(a), 3)
 
 
-USER_AGENT = "LeihuLiantai/2.3.1 (+https://github.com/LeihuTW/Leihu-singsing)"   # HTTP 標頭只能用英文字
+USER_AGENT = "LeihuLiantai/2.3.2 (+https://github.com/LeihuTW/Leihu-singsing)"   # HTTP 標頭只能用英文字
 
 
 def _http_json(url: str, headers: dict | None = None, timeout: int = 8):
