@@ -60,6 +60,7 @@ DEFAULT_CONFIG = {
     "vocal_quality": "auto",   # 人聲／伴奏分離：auto：有顯示卡用高品質（BS-Roformer，乾淨很多但慢一倍）；standard；high
     "pause_while_streaming": True,   # 偵測到直播軟體（OBS、VTube Studio…）或直播模式開著時，暫停背景的分離、辨識
     "parallel_separation": False,
+    "yt_enabled": False,     # 2.3.1：YouTube 下載與歌單批次匯入預設隱藏；點左上標題五下開啟後一直保持開啟（更新也不會關）
     "queue_paused": False,   # 2.1.1：使用者按了「全部暫停」（重開程式後仍維持暫停）   # 2.1.1：沒在直播時兩首同時分離（顯示卡記憶體 10 GB 以上建議）
     "streaming_apps": ["obs64.exe", "obs32.exe", "VTube Studio.exe", "Streamlabs OBS.exe", "XSplit.Core.exe", "vMix64.exe"],
     "karaoke_model": "UVR_MDXNET_KARA_2.onnx",

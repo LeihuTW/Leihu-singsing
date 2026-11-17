@@ -70,7 +70,7 @@ def status():
     live["holding"] = jobs.holding
     live["paused"] = jobs.paused
     return jsonify(version=VERSION, root=str(P.ROOT), modules=mods, cuda_note=P.CUDA_NOTE, hq=hq,
-                   hq_model=P.HQ_KARAOKE, hqv=hqv, live=live,
+                   hq_model=P.HQ_KARAOKE, hqv=hqv, live=live, yt=bool(cfg.get("yt_enabled")),
                    claude_ready=bool(cfg.get("anthropic_api_key") or os.environ.get("ANTHROPIC_API_KEY")),
                    session_cost=C.summary()["session"]["cost_usd"],
                    remote=dict(REMOTE), yt_pause=dict(P.YT_PAUSE), update=dict(UPDATE), **_jobs_for_ui())
@@ -127,10 +127,14 @@ def _local_only():
         if origin and origin.rstrip("/").lower() not in (f"http://127.0.0.1:{PORT}", f"http://localhost:{PORT}"):
             abort(403)
         # 2.3.0 搬移歌曲庫中：會寫進歌曲庫的操作先擋住（不然搬完會少掉這段時間的修改）
+        if request.path in YT_GATED and not P.load_config().get("yt_enabled"):
+            raise P.UserError("這個功能尚未開啟")
         if P.STORAGE["moving"] and request.path.startswith(MOVE_BLOCK):
             raise P.UserError("正在搬移歌曲庫，搬完才能操作歌曲（大約幾分鐘，進度在處理清單）")
 
 
+# 2.3.1：YouTube 下載、歌單批次匯入要先開啟（點左上標題五下）才能用
+YT_GATED = ("/api/youtube", "/api/youtube/resolve", "/api/youtube/batch", "/api/youtube/sheet", "/api/sheet-template")
 MOVE_BLOCK = ("/api/songs", "/api/youtube", "/api/batch", "/api/upgrade", "/api/categories", "/api/sheet")
 
 
@@ -1438,6 +1442,15 @@ def storage_adopt():
 def storage_delete_old():
     b = request.get_json(force=True) or {}
     P.delete_old_storage(str(b.get("path") or ""))
+    return jsonify(ok=True)
+
+
+@app.post("/api/yt-unlock")
+def yt_unlock():
+    """開啟 YouTube 下載與歌單批次匯入（存在設定檔裡，之後更新版本也維持開啟）。"""
+    cfg = P.load_config()
+    cfg["yt_enabled"] = True
+    P.save_config(cfg)
     return jsonify(ok=True)
 
 

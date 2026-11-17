@@ -8,7 +8,7 @@
 </head>
 <body>
 <header class="bar">
-  <span class="logo">雷虎練唱台<small id="ver">2.3.0</small></span>
+  <span class="logo" id="logo">雷虎練唱台<small id="ver">2.3.0</small></span>
   <nav class="row">
     <button id="nav-lib" class="tab cur">歌曲庫</button>
     <button id="nav-practice" class="tab" disabled>練唱</button>
@@ -27,19 +27,21 @@
   <section id="view-lib">
     <div class="lib-head">
       <h1>歌曲庫</h1>
-      <label class="btn primary">匯入歌曲<input type="file" id="import" accept="audio/*,.mp3,.wav,.flac,.ogg,.m4a" multiple hidden></label>
+      <label class="btn primary">音訊匯入<input type="file" id="import" accept="audio/*,.mp3,.wav,.flac,.ogg,.m4a,.aac,.opus,.wma" multiple hidden></label>
       <button id="export-open" type="button">匯出歌單</button>
       <button id="lib-setlist" type="button" title="這段時間唱過的歌，也能回顧過去的場次、產生 YouTube 章節">直播歌單</button>
       <span class="hint">處理都在這台電腦上進行，第一次使用各模型時需要連網下載。</span>
     </div>
-    <form id="yt-form" class="yt">
+    <form id="yt-form" class="yt yt-only">
       <label for="yt-url" class="yt-label">YouTube</label>
       <input id="yt-url" type="text" inputmode="url" autocomplete="off" placeholder="https://www.youtube.com/watch?v=…">
       <button id="yt-go" type="submit">下載並分析</button>
       <button id="batch-open" type="button" class="ghost" title="一次加入多首：多個網址、歌單網址、歌手＋歌名，或 Excel 歌單">批次加入</button>
       <span id="yt-msg" class="hint"></span>
     </form>
-    <div id="drop" class="drop">把音訊檔拖到這裡。匯入後會自動分離主唱、合音、伴奏，分析旋律並辨識歌詞。</div>
+    <div id="drop" class="drop" role="button" tabindex="0" aria-label="音訊匯入：選擇音訊檔">
+      <b>音訊匯入</b>：點這裡選擇音訊檔，或把檔案拖進來（可以一次多首）
+      <span class="hint">支援 MP3、WAV、FLAC、OGG、M4A、AAC、OPUS、WMA。匯入後會自動分離主唱、合音、伴奏，分析旋律並套用歌詞。</span></div>
     <div id="jobs-bar" class="row jobs-bar" hidden>
       <span id="jobs-sum" class="hint"></span><span class="spacer"></span>
       <button id="jobs-pause" class="ghost" title="處理中的那首在下一個進度點停下、讓出顯示卡；錄音評分、KEY 轉換照常（Ctrl+Alt+P）">全部暫停</button>
@@ -528,14 +530,23 @@
   </div>
 </div>
 
+<div id="yt-notice" class="modal" hidden>
+  <div class="sheet" role="alertdialog" aria-modal="true" aria-labelledby="ytn-title">
+    <h1 id="ytn-title">務必留意 YouTube 平台使用規範</h1>
+    <p>已開啟「YouTube 下載」與「歌單批次加入」。使用時請遵守 YouTube 的服務條款，只下載你有權使用的內容。</p>
+    <p class="hint">這個提醒只會出現這一次；之後功能會一直保持開啟，更新版本也一樣。</p>
+    <div class="row" style="justify-content:flex-end"><button id="ytn-ok" class="primary">我知道了</button></div>
+  </div>
+</div>
+
 <div id="export-dlg" class="modal" hidden>
   <div class="sheet" role="dialog" aria-modal="true" aria-labelledby="ex-title-h">
     <h1 id="ex-title-h">匯出歌單</h1>
     <div class="field"><span>格式</span>
       <label class="row"><input type="radio" name="ex-fmt" value="html" checked> 網頁：給觀眾看，可以搜尋、依分類切換</label>
       <label class="row"><input type="radio" name="ex-fmt" value="xlsx"> Excel（.xlsx）：可以自己排版、篩選</label>
-      <label class="row"><input type="radio" name="ex-fmt" value="csv"> 練唱台歌單（.csv）：備份、換電腦用</label>
-      <span class="hint">網頁檔可以直接傳到 Discord 或放上網路空間，點開就能看。練唱台歌單可以在「批次加入」匯回，會依 YouTube 網址自動重新下載。</span></div>
+      <label class="row yt-only"><input type="radio" name="ex-fmt" value="csv"> 練唱台歌單（.csv）：備份、換電腦用</label>
+      <span class="hint">網頁檔可以直接傳到 Discord 或放上網路空間，點開就能看。<span class="yt-only">練唱台歌單可以在「批次加入」匯回，會依 YouTube 網址自動重新下載。</span></span></div>
     <label class="field" id="ex-title-f"><span>標題</span><input id="ex-title" type="text" maxlength="60" placeholder="點歌清單"></label>
     <div class="field"><span>範圍</span>
       <label class="row"><input type="radio" name="ex-scope" value="all" checked> 全部分類</label>

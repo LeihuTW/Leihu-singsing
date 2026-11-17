@@ -879,8 +879,13 @@ function renderSongs() {
 }
 const importCategory = () => (LIB.cats.includes(LIB.cur) ? LIB.cur : "");
 
+const AUDIO_EXT = ["mp3", "wav", "flac", "ogg", "m4a", "aac", "opus", "wma"];
 async function importFiles(files) {
   for (const f of files) {
+    if (!AUDIO_EXT.includes((f.name.split(".").pop() || "").toLowerCase())) {
+      toast(`${f.name}：不支援的格式（支援 ${AUDIO_EXT.join("、").toUpperCase()}）`, 5000);
+      continue;
+    }
     const fd = new FormData();
     fd.append("file", f);
     fd.append("category", importCategory());
@@ -1005,6 +1010,31 @@ $("#batch-add").onclick = async () => {
 $("#yt-url").addEventListener("input", () => { $("#yt-msg").textContent = ""; $("#yt-msg").classList.remove("err"); });
 $("#import").onchange = e => { importFiles([...e.target.files]); e.target.value = ""; };
 const drop = $("#drop");
+drop.onclick = () => $("#import").click();
+drop.onkeydown = e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); $("#import").click(); } };
+
+/* 2.3.1：YouTube 下載與歌單批次匯入預設隱藏。3 秒內點左上標題五下開啟，開啟時跳一次提醒；
+   開啟狀態存在設定檔，之後更新版本也維持開啟 */
+let ytOn = false;
+function applyYt(on) {
+  ytOn = !!on;
+  document.body.classList.toggle("yt-on", ytOn);
+  store.set("ytOn", ytOn);   // 下次開啟時馬上套用，不用等伺服器回應
+  if (!ytOn && exFmt() === "csv") document.querySelector('input[name="ex-fmt"][value="html"]').checked = true;
+}
+applyYt(store.get("ytOn", false));
+{
+  let clicks = [];
+  $("#logo").addEventListener("click", async () => {
+    const now = Date.now();
+    clicks = clicks.filter(t => now - t < 3000); clicks.push(now);
+    if (clicks.length < 5 || ytOn) return;
+    clicks = [];
+    try { await api("/api/yt-unlock", { json: {} }); applyYt(true); $("#yt-notice").hidden = false; $("#ytn-ok").focus(); }
+    catch (e) { toast(e.message); }
+  });
+  $("#ytn-ok").onclick = () => ($("#yt-notice").hidden = true);
+}
 ["dragenter", "dragover"].forEach(ev => document.addEventListener(ev, e => {
   if (!$("#view-lib").hidden && e.dataTransfer?.types?.includes("Files")) { e.preventDefault(); drop.classList.add("over"); }
 }));
@@ -1025,6 +1055,7 @@ async function pollJobs() {
   try { st = await api(`/api/status${window.LIVE && LIVE.on ? "?live=1" : ""}`); } catch { jobTimer = setTimeout(pollJobs, 3000); return; }
   syncLiveHold(st.live);
   syncPauseBar(st);
+  if (!!st.yt !== ytOn) applyYt(st.yt);
   updateClaudeChip(st.claude_ready, st.session_cost);
   remoteOpen(st.remote);
   syncYtPause(st.yt_pause);

@@ -480,3 +480,9 @@ body.live .lyr-count { font-size: calc(48px * var(--ls)); }
 .set-sheet .set-tabs { flex: none; position: static; margin-top: 0; }
 .set-sheet .set-pane:not([hidden]) { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding-right: 4px; }
 .set-sheet > .row:last-child { flex: none; position: static; }
+/* 2.3.1：YouTube 下載、歌單批次匯入預設隱藏（點左上標題五下開啟） */
+body:not(.yt-on) .yt-only { display: none !important; }
+.drop { cursor: pointer; }
+.drop:hover, .drop:focus-visible { border-color: var(--accent); color: var(--ink); }
+.drop .hint { display: block; margin-top: 4px; }
+.logo { user-select: none; }
