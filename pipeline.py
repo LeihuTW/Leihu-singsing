@@ -2012,7 +2012,17 @@ def step_separate(d: Path, cfg: dict, report) -> None:
     method = "dsp"
     if module_status()["uvr"]:
         try:
-            separate_uvr(d, cfg, report)
+            try:
+                separate_uvr(d, cfg, report)
+            except Exception as e:
+                if type(e).__name__ != "GpuStalled" or cfg.get("_cpu"):
+                    raise
+                # 2.3.2：顯示卡被其他程式佔滿、分離沒有進度 → 改用 CPU＋標準模型重做，之後自動補做高品質
+                print("[gpu] 顯示卡太忙，這首改用 CPU＋標準模型分離（之後自動補做高品質）", flush=True)
+                cfg = dict(cfg, **LIGHT_CFG)
+                update_meta(d, live_light=True)
+                report("顯示卡太忙：改用 CPU 輕量處理（之後自動補做高品質）", 0.08)
+                separate_uvr(d, cfg, report)
             method = "uvr"
         except Exception as e:
             traceback.print_exc()
@@ -3056,17 +3066,113 @@ LIVE_HOLD = {"apps": [], "live_seen": 0.0, "override_until": 0.0, "checked": 0.0
 _live_lock = threading.Lock()
 
 
-def _running_apps(names: list[str]) -> list[str]:
+def _process_names() -> set[str] | None:
+    """目前所有程式的執行檔名稱（小寫）。2.3.2：直接問 Windows（不到 0.1 秒），
+    不再用 tasklist：電腦很忙時 tasklist 會超過 10 秒逾時，結果「沒偵測到直播」。"""
+    try:
+        import ctypes
+        from ctypes import wintypes
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+
+        class PE(ctypes.Structure):
+            _fields_ = [("dwSize", wintypes.DWORD), ("cntUsage", wintypes.DWORD),
+                        ("th32ProcessID", wintypes.DWORD), ("th32DefaultHeapID", ctypes.c_size_t),
+                        ("th32ModuleID", wintypes.DWORD), ("cntThreads", wintypes.DWORD),
+                        ("th32ParentProcessID", wintypes.DWORD), ("pcPriClassBase", ctypes.c_long),
+                        ("dwFlags", wintypes.DWORD), ("szExeFile", ctypes.c_wchar * 260)]
+        k32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+        snap = k32.CreateToolhelp32Snapshot(0x2, 0)
+        if not snap or snap == wintypes.HANDLE(-1).value:
+            return None
+        try:
+            e = PE()
+            e.dwSize = ctypes.sizeof(PE)
+            out = set()
+            ok = k32.Process32FirstW(snap, ctypes.byref(e))
+            while ok:
+                out.add(e.szExeFile.lower())
+                ok = k32.Process32NextW(snap, ctypes.byref(e))
+            return out
+        finally:
+            k32.CloseHandle(snap)
+    except Exception:
+        return None
+
+
+def _running_apps(names: list[str]) -> list[str] | None:
+    """有在跑的直播軟體；查不到（不是「沒有」）時回傳 None，沿用上一次的結果。"""
     if sys.platform != "win32" or not names:
         return []
+    procs = _process_names()
+    if procs is None:
+        try:
+            flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+            out = subprocess.run(["tasklist", "/FO", "CSV", "/NH"], capture_output=True, text=True,
+                                 timeout=20, creationflags=flags, encoding="utf-8", errors="ignore").stdout
+        except Exception:
+            return None
+        low = out.lower()
+        return [n for n in names if f'"{n.lower()}"' in low]
+    return [n for n in names if n.lower() in procs]
+
+
+# 2.3.2：顯示卡被其他程式（直播軟體、VTube Studio、遊戲、錄影）佔滿時，也不要再把重工作丟給顯示卡：
+# 顯示卡記憶體不夠時 Windows 會把它搬到系統記憶體，分離慢幾十倍、整台電腦跟著卡。
+GPU_LOAD = {"checked": 0.0, "free": None, "total": None, "util": None, "hot": 0, "stalled_until": 0.0}
+GPU_MIN_FREE = 3.5e9    # 剩下的顯示卡記憶體少於這個就不用顯示卡分離
+GPU_BUSY_UTIL = 85      # 其他程式已經把顯示卡用到這麼滿（連續兩次）也不用
+
+
+def gpu_stalled_mark(seconds: float = 1800) -> None:
+    """顯示卡處理程式剛剛卡住：接下來一段時間先當作顯示卡很忙。"""
+    GPU_LOAD["stalled_until"] = time.time() + seconds
+
+
+def _sample_gpu_load() -> None:
+    """用 nvidia-smi 看整張顯示卡（含其他程式）的用量。練唱台自己的顯示卡處理程式開著時不看（會算到自己）。"""
+    try:
+        import gpu_worker as G
+        if G.POOL.count():
+            return
+    except Exception:
+        pass
     try:
         flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-        out = subprocess.run(["tasklist", "/FO", "CSV", "/NH"], capture_output=True, text=True,
-                             timeout=10, creationflags=flags, encoding="utf-8", errors="ignore").stdout
+        out = subprocess.run(["nvidia-smi", "--query-gpu=memory.used,memory.total,utilization.gpu",
+                              "--format=csv,noheader,nounits"], capture_output=True, text=True,
+                             timeout=8, creationflags=flags).stdout.strip().splitlines()
+        used, total, util = (float(x) for x in out[0].split(","))
     except Exception:
-        return []
-    low = out.lower()
-    return [n for n in names if f'"{n.lower()}"' in low]
+        return
+    GPU_LOAD.update(free=(total - used) * 2**20, total=total * 2**20, util=util,
+                    hot=GPU_LOAD["hot"] + 1 if util >= GPU_BUSY_UTIL else 0)
+
+
+def gpu_busy_reason() -> str:
+    now = time.time()
+    if now < GPU_LOAD["stalled_until"]:
+        return "顯示卡剛剛處理沒有進度（可能被其他程式佔滿）"
+    if now - GPU_LOAD["checked"] > 20:
+        GPU_LOAD["checked"] = now
+        _sample_gpu_load()
+    free = GPU_LOAD["free"]
+    if free is not None and free < GPU_MIN_FREE:
+        return f"顯示卡記憶體只剩 {free / 1e9:.1f} GB（被其他程式佔用）"
+    if GPU_LOAD["hot"] >= 2:
+        return f"顯示卡已被其他程式用到 {GPU_LOAD['util']:.0f}%"
+    return ""
+
+
+_LIVE_LAST = {"reason": None}
+
+
+def _live_log(st: dict) -> dict:
+    r = st.get("reason") or ""
+    key = ("gpu" if st.get("gpu") else r)   # 顯示卡用量的數字每次都不一樣，只在狀態改變時記
+    if key != _LIVE_LAST["reason"]:
+        _LIVE_LAST["reason"] = key
+        print(f"[live] {r}：新的分離、音高分析改用 CPU，背景工作暫停" if r else "[live] 沒有偵測到直播或顯示卡忙碌：恢復正常處理", flush=True)
+    return st
 
 
 def live_touch() -> None:
@@ -3080,24 +3186,28 @@ def live_override(seconds: float = 3600) -> None:
 
 
 def live_status(cfg: dict | None = None) -> dict:
-    """現在該不該暫停重工作，以及原因（給狀態列顯示）。每 15 秒才真的去查一次程式清單。"""
+    """現在該不該暫停重工作，以及原因（給狀態列顯示）。每 15 秒才真的去查一次程式清單。
+    2.3.2：顯示卡被其他程式佔滿時也算（不管有沒有開「直播中暫停背景處理」）。"""
     cfg = cfg or load_config()
     now = time.time()
-    if not cfg.get("pause_while_streaming", True):
-        return {"hold": False, "reason": "", "apps": []}
     if now < LIVE_HOLD["override_until"]:
-        return {"hold": False, "reason": "", "apps": [], "override": True}
-    with _live_lock:
-        if now - LIVE_HOLD["checked"] > 15:
-            LIVE_HOLD["checked"] = now
-            LIVE_HOLD["apps"] = _running_apps(cfg.get("streaming_apps") or [])
-    apps = list(LIVE_HOLD["apps"])
-    live = now - LIVE_HOLD["live_seen"] < 20
-    if apps:
-        return {"hold": True, "reason": "偵測到 " + "、".join(a.rsplit(".", 1)[0] for a in apps), "apps": apps}
-    if live:
-        return {"hold": True, "reason": "直播模式開著", "apps": []}
-    return {"hold": False, "reason": "", "apps": []}
+        return _live_log({"hold": False, "reason": "", "apps": [], "override": True})
+    if cfg.get("pause_while_streaming", True):
+        with _live_lock:
+            if now - LIVE_HOLD["checked"] > 15:
+                LIVE_HOLD["checked"] = now
+                got = _running_apps(cfg.get("streaming_apps") or [])
+                if got is not None:
+                    LIVE_HOLD["apps"] = got
+        apps = list(LIVE_HOLD["apps"])
+        if apps:
+            return _live_log({"hold": True, "reason": "偵測到 " + "、".join(a.rsplit(".", 1)[0] for a in apps), "apps": apps})
+        if now - LIVE_HOLD["live_seen"] < 20:
+            return _live_log({"hold": True, "reason": "直播模式開著", "apps": []})
+    busy = gpu_busy_reason()
+    if busy:
+        return _live_log({"hold": True, "reason": busy, "apps": [], "gpu": True})
+    return _live_log({"hold": False, "reason": "", "apps": []})
 
 
 # 直播中要先停住的背景工作（使用者沒有在等結果的）
@@ -3124,11 +3234,14 @@ def hq_models_ready(cfg: dict) -> bool:
     return (not hq("vocal_quality") or hqv_ready()) and (not hq("karaoke_quality") or hq_ready())
 
 
+LIGHT_CFG = {"vocal_quality": "standard", "karaoke_quality": "standard", "auto_recognize_lyrics": False, "_cpu": True}
+
+
 def live_light_cfg(cfg: dict) -> dict | None:
-    """直播中匯入：回傳要改用的輕量設定；不在直播或本來就用標準模型時回傳 None。"""
+    """直播中（或顯示卡被其他程式佔滿）：回傳要改用的輕量設定（CPU＋標準模型）；否則 None。"""
     if not live_status(cfg)["hold"]:
         return None
-    return {"vocal_quality": "standard", "karaoke_quality": "standard", "auto_recognize_lyrics": False, "_cpu": True}
+    return dict(LIGHT_CFG)
 
 
 # 2.1.1：可以和下一首重疊處理的工作（分離完、還在分析旋律時，下一首就先開始分離）

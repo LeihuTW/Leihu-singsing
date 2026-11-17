@@ -29,7 +29,7 @@ IDLE_EXIT = 30.0      # 子程式閒置幾秒後結束（把顯示卡記憶體�
 SPAWN_TIMEOUT = 90.0  # 子程式這麼久還沒連上就放棄，改在主程式裡做
 # 子程式多久沒有任何回報就當作卡住（結束它，改在主程式裡做）。分離每一小段都會回報進度；
 # 旋律分析中途沒有進度，用整體時間判斷
-STALL = {"separate": 300.0, "whisper": 900.0, "pitch": 600.0, "probe": 180.0}
+STALL = {"separate": 120.0, "whisper": 900.0, "pitch": 600.0, "probe": 180.0}
 CURRENT = threading.local()   # 目前這個執行緒的工作：check() 會在按停止／暫停時丟出例外
 MAX_WORKERS = 3       # 最多同時幾個子程式（兩首同時分離＋一首分析旋律）
 ROOT = Path(__file__).resolve().parent
@@ -264,6 +264,11 @@ def serve(address, authkey_hex: str, parent_pid: int) -> None:
 
 class WorkerFailed(RuntimeError):
     """子程式開不起來或卡住：改在主程式裡做（顯示卡記憶體會留到程式關閉，但工作不會卡住）。"""
+
+
+class GpuStalled(WorkerFailed):
+    """顯示卡處理程式做到一半沒有進度：幾乎都是顯示卡被其他程式（直播軟體、VTube Studio、遊戲）佔滿。
+    這時改在主程式裡用顯示卡做只會一樣卡、還會拖慢整台電腦，所以不改到主程式，交給呼叫的人改用 CPU。"""
 
 
 class RemoteError(RuntimeError):
@@ -542,7 +547,7 @@ class Pool:
                 if not w.alive():
                     raise RuntimeError(f"顯示卡處理程式意外結束（代碼 {w.proc.returncode}），詳細原因在 logs/app.log")
                 if time.time() - last > stall:
-                    raise WorkerFailed(f"顯示卡處理程式 {stall:.0f} 秒沒有回應（{name}）")
+                    raise GpuStalled(f"顯示卡處理程式 {stall:.0f} 秒沒有回應（{name}）")
         finally:
             if ok and w.alive():
                 self._release(w)
@@ -616,18 +621,18 @@ def call(name: str, *args, progress=None, cpu: bool = False, **kw):
         return _local(name, *args, progress=progress, **kw)
     try:
         return POOL.call(name, *args, progress=progress, low=low, **kw)
-    except WorkerFailed as e:
+    except GpuStalled as e:
         print(f"[gpu] {e}", flush=True)
         try:
             import pipeline as P
-            live = bool(P.live_status()["hold"])
+            P.gpu_stalled_mark()   # 接下來一段時間先當作顯示卡很忙：新工作直接用 CPU
         except Exception:
-            live = low
-        if live and name in ("separate", "pitch"):
-            # 直播中顯示卡被直播軟體佔住才卡住：改在 CPU 處理程式重做，不要在主程式裡跟著卡
-            print(f"[gpu] 直播中顯示卡太忙，{name} 改用 CPU 處理", flush=True)
-            if name == "separate" and len(args) > 4:
-                args = args[:4] + (False,) + args[5:]   # CPU 不用 autocast
+            pass
+        if name == "pitch":
+            print("[gpu] 顯示卡太忙，音高分析改用 CPU 處理", flush=True)
             return CPU_POOL.call(name, *args, progress=progress, low=True, **kw)
+        raise   # separate：由 pipeline 改用 CPU＋標準模型重做；其他工作直接回報失敗
+    except WorkerFailed as e:   # 子程式根本開不起來：才改在主程式裡做
+        print(f"[gpu] {e}", flush=True)
         _BROKEN.update(until=time.time() + 600, why=str(e))
         return _local(name, *args, progress=progress, **kw)

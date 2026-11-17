@@ -1214,7 +1214,7 @@ function syncLiveHold(l) {
   const held = on && !!l.holding;   // 真的有背景工作在等才顯示橫幅
   $("#live-hold").hidden = !held;
   if (held) $("#live-hold-why").textContent = (l.reason ? `原因：${l.reason}。` : "");
-  if (on && liveHoldWas === false) toast(`直播中（${l.reason}）：背景工作暫停，匯入改用輕量模型`, 4000);
+  if (on && liveHoldWas === false) toast(l.gpu ? `${l.reason}：背景工作暫停，新的分離改用 CPU` : `直播中（${l.reason}）：背景工作暫停，匯入改用 CPU 輕量處理`, 4000);
   liveHoldWas = on;
 }
 $("#live-hold-go").onclick = async () => {
