@@ -126,6 +126,7 @@ def t_probe(P, progress):
             import torch
             info["cc"] = torch.cuda.get_device_capability(0)[0]
             info["name"] = torch.cuda.get_device_name(0)
+            info["vram"] = int(torch.cuda.get_device_properties(0).total_memory)   # 顯示卡記憶體總量（位元組）
         except Exception:
             pass
     return info

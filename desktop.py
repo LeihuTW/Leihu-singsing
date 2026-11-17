@@ -38,7 +38,13 @@ def pick_port(preferred: int) -> int:
 
 
 def start_server(port: int) -> subprocess.Popen:
-    log = open(ROOT / "logs" / "app.log", "a", encoding="utf-8", buffering=1)
+    lp = ROOT / "logs" / "app.log"
+    try:   # 記錄檔超過 10 MB：留一份 app.log.old，重新開始（不會無限長大）
+        if lp.exists() and lp.stat().st_size > 10 * 1024 * 1024:
+            os.replace(lp, lp.with_name("app.log.old"))
+    except OSError:
+        pass
+    log = open(lp, "a", encoding="utf-8", buffering=1)
     env = dict(os.environ, LIANTAI_PORT=str(port), PYTHONIOENCODING="utf-8", PYTHONUNBUFFERED="1")
     flags = 0x08000000 if sys.platform == "win32" else 0   # CREATE_NO_WINDOW
     # 伺服器要用 python.exe（不是 pythonw.exe）執行：pythonw 沒有主控台，之後伺服器每次呼叫 ffmpeg、pip 等程式，

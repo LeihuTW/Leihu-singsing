@@ -3806,7 +3806,10 @@ async function openSettings(focusUsage) {
   $("#cfg-kq").value = cfg.karaoke_quality || "auto";
   $("#cfg-vq").value = cfg.vocal_quality || "auto";
   $("#cfg-pause-live").checked = cfg.pause_while_streaming !== false;
-  $("#cfg-parallel").checked = !!cfg.parallel_separation;
+  $("#cfg-parallel").checked = !!cfg.parallel_separation && st.parallel_ok !== false;
+  $("#cfg-parallel").disabled = st.parallel_ok === false;   // 顯示卡記憶體不到 10 GB：不啟用（反而比較慢）
+  $("#cfg-parallel-note").textContent = st.parallel_ok === false
+    ? (st.vram ? `這台電腦的顯示卡記憶體是 ${(st.vram / 1073741824).toFixed(0)} GB，不到 10 GB，同時分離反而比較慢，所以不啟用。` : "需要 10 GB 以上記憶體的顯示卡才能啟用。") : "";
   $("#cfg-kov").value = String(cfg.karaoke_overlap === 4 ? 4 : 2);
   $("#cfg-autofine").checked = cfg.auto_fine !== false;
   $("#cfg-pitch").value = cfg.pitch_model;

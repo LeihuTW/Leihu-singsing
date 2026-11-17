@@ -627,7 +627,7 @@
       <label class="field"><span>高品質分離的速度（大量匯入時建議「快速」）</span>
         <select id="cfg-kov"><option value="2">快速（建議，結果幾乎相同）</option><option value="4">最精細（約慢一倍）</option></select></label>
       <label class="row"><input id="cfg-autofine" type="checkbox" checked> 合音多、需要更精細處理的歌，自動再用最精細的方式分一次（排在佇列最後，不影響其他歌的處理）</label>
-      <label class="row"><input id="cfg-parallel" type="checkbox"> 閒置時兩首同時分離（實驗性）：沒在直播時，大量匯入或升級可以再快約兩到四成；顯示卡記憶體 10 GB 以上才建議開，不夠時會自動退回一次一首</label>
+      <label class="row"><input id="cfg-parallel" type="checkbox"> 閒置時兩首同時分離（實驗性）：沒在直播時，大量匯入或升級可以再快約兩到四成；需要顯示卡記憶體 10 GB 以上 <span id="cfg-parallel-note" class="hint"></span></label>
       <div class="field"><span>已經處理過的歌</span>
         <div><button id="cfg-upgrade" type="button">用高品質人聲模型重做全部歌曲</button></div>
         <span class="hint">把還沒用新模型處理的歌排進佇列，重新分離人聲與伴奏、重新分析旋律；歌詞、錄音、KEY 設定都保留。排在最後、直播中會暫停，可以放著慢慢跑（有顯示卡一首約 1～2 分鐘）。</span></div>

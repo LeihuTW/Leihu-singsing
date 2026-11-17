@@ -157,7 +157,7 @@ def gpu_info(block: bool = True) -> dict | None:
     cache = MODELS / "gpu_probe.json"
     try:
         c = json.loads(cache.read_text("utf-8"))
-        if c.get("torch") == tv:
+        if c.get("torch") == tv and (not c.get("ok") or "vram" in c):   # 舊的紀錄沒有記憶體大小：重新檢查一次
             _GPU_INFO = c
             CUDA_NOTE = c.get("note") or ""
             return c
@@ -3132,6 +3132,16 @@ def live_light_cfg(cfg: dict) -> dict | None:
 PIPELINE_LABELS = {"all", "youtube", "upgrade", "fine", "max"}
 
 
+PARALLEL_MIN_VRAM = 10e9   # 2.3.1：顯示卡記憶體 10 GB 以上才同時分離兩首
+
+
+def parallel_ok() -> bool:
+    """這張顯示卡適不適合兩首同時分離。8 GB 的顯示卡實測：兩首互搶運算，每首反而慢一倍以上，
+    所以記憶體不到 10 GB 就不啟用（設定勾了也一樣）。還不知道顯示卡資訊時先當作不適合。"""
+    info = gpu_info(block=False) or {}
+    return bool(info.get("ok")) and (info.get("vram") or 0) >= PARALLEL_MIN_VRAM
+
+
 class Jobs:
     """重工作的佇列。預設一次分離一首；分離完的那首在分析旋律、存檔時，下一首可以先開始分離（pipeline）。
     設定開啟「閒置時兩首同時分離」且沒在直播時，最多兩首同時分離。"""
@@ -3182,7 +3192,7 @@ class Jobs:
         if not self.pipeline or hold or time.time() < self.oom_until:
             return 1
         try:
-            return 2 if load_config().get("parallel_separation") else 1
+            return 2 if load_config().get("parallel_separation") and parallel_ok() else 1
         except Exception:
             return 1
 

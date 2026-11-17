@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import shutil
@@ -54,6 +55,19 @@ def index():
     return send_from_directory(app.static_folder, "index.html")
 
 
+class _QuietPolls(logging.Filter):
+    """畫面每 1～5 秒會來問一次狀態，這些成功的例行請求不寫進 logs/app.log（不然一個月就幾十 MB，
+    也蓋掉真正有用的訊息）。失敗的照樣記。"""
+    QUIET = ('"GET /api/status', '"GET /api/overlay', '"GET /api/hotkeys/', '"GET /static/')
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        msg = record.getMessage()
+        return not (any(q in msg for q in self.QUIET) and ('" 200 ' in msg or '" 304 ' in msg))
+
+
+logging.getLogger("werkzeug").addFilter(_QuietPolls())
+
+
 # ---------------------------------------------------------------- 狀態與設定
 
 @app.get("/api/status")
@@ -70,6 +84,7 @@ def status():
     live["holding"] = jobs.holding
     live["paused"] = jobs.paused
     return jsonify(version=VERSION, root=str(P.ROOT), modules=mods, cuda_note=P.CUDA_NOTE, hq=hq,
+                   vram=(P.gpu_info(block=False) or {}).get("vram"), parallel_ok=P.parallel_ok(),
                    hq_model=P.HQ_KARAOKE, hqv=hqv, live=live, yt=bool(cfg.get("yt_enabled")),
                    claude_ready=bool(cfg.get("anthropic_api_key") or os.environ.get("ANTHROPIC_API_KEY")),
                    session_cost=C.summary()["session"]["cost_usd"],
@@ -129,7 +144,7 @@ def _local_only():
         # 2.3.0 搬移歌曲庫中：會寫進歌曲庫的操作先擋住（不然搬完會少掉這段時間的修改）
         if request.path in YT_GATED and not P.load_config().get("yt_enabled"):
             raise P.UserError("這個功能尚未開啟")
-        if P.STORAGE["moving"] and request.path.startswith(MOVE_BLOCK):
+        if P.STORAGE["moving"] and request.method != "GET" and request.path.startswith(MOVE_BLOCK):
             raise P.UserError("正在搬移歌曲庫，搬完才能操作歌曲（大約幾分鐘，進度在處理清單）")
 
 
