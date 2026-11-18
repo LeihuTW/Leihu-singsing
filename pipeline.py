@@ -1754,6 +1754,81 @@ def harmony_ratio(d: Path) -> float | None:
     return round(float(np.sqrt(np.sum(br[voiced] ** 2) / np.sum(lr[voiced] ** 2))), 3)
 
 
+LEAD_FIX_V = 1   # 主唱補回的判斷方式版本：改了判斷方式就加一，舊歌會重新檢查一次
+
+
+def _lead_gap_gain(lead_m: np.ndarray, back_m: np.ndarray, sr: int) -> tuple[np.ndarray | None, float]:
+    """找出「主唱幾乎沒聲音、合音卻很大聲」而且持續 8 秒以上的段落（整段副歌）。
+    短短幾秒的通常是真的合音（間奏和聲、前奏哼唱），不動。
+    主唱分離模型會把多軌疊錄（周杰倫〈牛仔很忙〉的副歌）或另一位歌手整段當成合音，
+    主唱只開導唱時那段就整個不見、旋律線也斷掉。回傳每個樣本要搬回主唱的比例（0～1）與搬了幾秒。"""
+    H = sr // 10
+    n = min(len(lead_m), len(back_m)) // H * H
+    if n < H * 50:
+        return None, 0.0
+    lr = np.sqrt(np.mean(lead_m[:n].reshape(-1, H) ** 2, axis=1))
+    br = np.sqrt(np.mean(back_m[:n].reshape(-1, H) ** 2, axis=1))
+    k = np.ones(15) / 15   # 1.5 秒平滑：一個字、一口氣的空檔不算
+    ls = np.sqrt(np.convolve(lr ** 2, k, "same"))
+    bs = np.sqrt(np.convolve(br ** 2, k, "same"))
+    ref = float(np.percentile(np.maximum(ls, bs), 95))
+    if ref <= 1e-5:
+        return None, 0.0
+    cand = (bs > 0.12 * ref) & (ls < 0.1 * bs)
+    blk = np.zeros(len(cand), dtype=np.float32)
+    i = 0
+    while i < len(cand):
+        if not cand[i]:
+            i += 1
+            continue
+        j = i
+        while j < len(cand) and cand[j]:
+            j += 1
+        if j - i >= 80:
+            blk[max(0, i - 3):min(len(cand), j + 3)] = 1.0   # 前後各多 0.3 秒，接縫不會吃字
+        i = j
+    sec = float(blk.sum()) / 10
+    if sec < 8:
+        return None, 0.0
+    fade = np.convolve(blk, np.ones(3) / 3, "same")   # 0.3 秒淡入淡出
+    g = np.interp(np.arange(len(lead_m)), np.arange(len(fade)) * H + H / 2, fade).astype(np.float32)
+    return g, sec
+
+
+def fix_lead_gaps(d: Path) -> float:
+    """主唱被誤分到合音的段落搬回主唱（合音那段同時拿掉）。回傳搬了幾秒；沒有就不改檔。"""
+    lp, bp = stem_path(d, "lead"), stem_path(d, "back")
+    if not lp.exists() or not bp.exists():
+        return 0.0
+    lead, back = read_audio(lp), read_audio(bp)
+    n = min(lead.shape[-1], back.shape[-1])
+    lead, back = lead[..., :n], back[..., :n]
+    g, sec = _lead_gap_gain(lead.mean(axis=0), back.mean(axis=0), SR)
+    if g is not None:
+        save_stem(d, "lead", lead + back * g)
+        save_stem(d, "back", back * (1 - g))
+        print(f"[separate] 主唱有 {sec:.0f} 秒被分到合音（疊錄或另一位歌手），已搬回主唱", flush=True)
+    update_meta(d, lead_fix=LEAD_FIX_V, lead_fix_sec=round(sec, 1))
+    return sec
+
+
+def lead_fix_job(song_id: str, after=None):
+    """舊歌：主唱被分到合音的段落搬回主唱，再重新分析旋律（不用重新分離）。"""
+    def run(report):
+        d = song_dir(song_id)
+        report("檢查主唱有沒有被分到合音", 0.05)
+        if fix_lead_gaps(d) > 0:
+            step_pitch(d, load_config(), report)
+            if after:
+                after(song_id)
+    return run
+
+
+def lead_fix_needed(meta: dict) -> bool:
+    stp = meta.get("steps") or {}
+    return bool(stp.get("separate") and meta.get("separation") == "uvr" and meta.get("lead_fix") != LEAD_FIX_V)
+
+
 def fine_job(song_id: str, after=None):
     """精細處理：用最精細的設定（重疊 4 次）重新分主唱與合音，再重新分析旋律。歌詞、錄音不變。"""
     def run(report):
@@ -1950,6 +2025,10 @@ def separate_uvr(d: Path, cfg: dict, report) -> None:
     for name, p in (("lead", lead_p), ("back", back_p), ("inst", inst_p)):
         save_stem(d, name, fit_length(read_audio(p), n))
     shutil.rmtree(tmp, ignore_errors=True)
+    try:
+        fix_lead_gaps(d)   # 2.3.2：疊錄的副歌被整段分到合音 → 搬回主唱
+    except Exception as e:
+        log_error("fix_lead_gaps", e)
     # 合音比重：合音越多，主唱和合音越難分乾淨，更精細的分離越有幫助
     try:
         h = harmony_ratio(d)
@@ -3217,7 +3296,7 @@ def live_status(cfg: dict | None = None) -> dict:
 
 
 # 直播中要先停住的背景工作（使用者沒有在等結果的）
-LIVE_BACKGROUND = {"upgrade", "fine", "compact", "max"}
+LIVE_BACKGROUND = {"upgrade", "fine", "compact", "max", "leadfix"}
 
 
 class JobDeferred(JobCancelled):

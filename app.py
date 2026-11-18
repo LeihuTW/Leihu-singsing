@@ -1961,6 +1961,40 @@ def remove_duet_leftovers() -> None:
         pass
 
 
+def lead_fix_sweep() -> None:
+    """2.3.2：舊歌檢查一次「主唱被整段分到合音」（疊錄的副歌、另一位歌手）。
+    只讀檔判斷，沒有問題的歌直接記下已檢查；有問題的排一個背景工作搬回主唱並重新分析旋律（直播中暫停）。"""
+    time.sleep(60)
+    try:
+        with _SETLIST_LOCK:
+            sl = {i.get("id") for i in _setlist_read()["items"]}
+        songs = sorted(P.list_songs(), key=lambda m: (-P.usage_score(m, sl), -(m.get("created") or 0)))
+        for s in songs:
+            if not P.lead_fix_needed(s):
+                continue
+            while P.live_status()["hold"] or P.STORAGE.get("moving"):
+                time.sleep(30)
+            sid = s["id"]
+            if any(jobs.find("process", sid, lb) for lb in ("upgrade", "max", "fine", "all", "youtube", "leadfix")):
+                continue
+            d = P.song_dir(sid)
+            try:
+                lead = P.read_audio(P.stem_path(d, "lead"), sr=P.PITCH_SR, mono=True)
+                back = P.read_audio(P.stem_path(d, "back"), sr=P.PITCH_SR, mono=True)
+                g, sec = P._lead_gap_gain(lead, back, P.PITCH_SR)
+            except Exception as e:
+                P.log_error("lead_fix_sweep", e)
+                continue
+            if g is None:
+                P.update_meta(d, lead_fix=P.LEAD_FIX_V, lead_fix_sec=0)
+            else:
+                print(f"[separate] {s.get('title') or sid}：主唱約 {sec:.0f} 秒被分到合音，排入背景修正", flush=True)
+                jobs.submit("process", sid, P.lead_fix_job(sid, after=prerender_key), label="leadfix")
+            time.sleep(0.5)
+    except Exception as e:
+        P.log_error("lead_fix_sweep", e)
+
+
 def live_light_upgrade() -> None:
     """直播中匯入、先用輕量模型處理的歌：直播結束後自動用高品質模型重新分離＋分析旋律（歌詞、錄音不動）。
     upgrade 是背景工作，萬一又開播會自動暫停。"""
@@ -2107,6 +2141,7 @@ def main():
     threading.Thread(target=prefetcher, daemon=True, name="prefetch").start()
     threading.Thread(target=loudness_backfill, daemon=True, name="loudness").start()
     threading.Thread(target=live_light_upgrade, daemon=True, name="live-light").start()
+    threading.Thread(target=lead_fix_sweep, daemon=True, name="lead-fix").start()
     threading.Thread(target=remove_duet_leftovers, daemon=True, name="cleanup").start()
     threading.Thread(target=P.clear_false_recheck, daemon=True, name="recheck").start()
     threading.Thread(target=check_update, daemon=True, name="update").start()
