@@ -2053,6 +2053,8 @@ def track_pitch(y16: np.ndarray, cfg: dict | None = None, strict: bool = False) 
         import gpu_worker as G
         # 直播中（含錄音評分）：在只用 CPU 的處理程式裡分析，不跟直播軟體、VTube Studio 搶顯示卡
         cpu = bool(cfg.get("_cpu")) or bool(live_status(cfg)["hold"])
+        if strict and not cpu and not parallel_ok() and G._GPU_GATE.locked():
+            cpu = True   # 錄音評分不要等顯示卡上的分離做完：先用 CPU 分析
         return G.call("pitch", np.ascontiguousarray(y16, dtype=np.float32), cfg, strict, cpu=cpu)
     return _track_pitch_local(y16, cfg, strict)
 
@@ -3104,6 +3106,10 @@ def _running_apps(names: list[str]) -> list[str] | None:
     if sys.platform != "win32" or not names:
         return []
     procs = _process_names()
+    how = "Windows API" if procs is not None else "tasklist"
+    if _LIVE_LAST.get("how") != how:
+        _LIVE_LAST["how"] = how
+        print(f"[live] 直播軟體偵測方式：{how}", flush=True)
     if procs is None:
         try:
             flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
@@ -3123,7 +3129,7 @@ GPU_MIN_FREE = 3.5e9    # 剩下的顯示卡記憶體少於這個就不用顯示
 GPU_BUSY_UTIL = 85      # 其他程式已經把顯示卡用到這麼滿（連續兩次）也不用
 
 
-def gpu_stalled_mark(seconds: float = 1800) -> None:
+def gpu_stalled_mark(seconds: float = 300) -> None:
     """顯示卡處理程式剛剛卡住：接下來一段時間先當作顯示卡很忙。"""
     GPU_LOAD["stalled_until"] = time.time() + seconds
 

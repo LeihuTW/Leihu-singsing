@@ -595,6 +595,37 @@ CPU_POOL = Pool(cpu=True)   # 2.3.2：直播中用的 CPU 處理程式
 
 
 _BROKEN = {"until": 0.0, "why": ""}
+# 2.3.2：顯示卡記憶體不到 10 GB 時，一次只讓一個工作用顯示卡。
+# 實測 8 GB 卡上「分離（BS-Roformer）」和「上一首的音高分析」同時跑，分離會卡在 2% 不動。
+_GPU_GATE = threading.Lock()
+
+
+class _gate:
+    def __init__(self, progress):
+        self.on, self.progress = False, progress
+
+    def __enter__(self):
+        try:
+            import pipeline as P
+            if P.parallel_ok():
+                return self
+        except Exception:
+            pass
+        check = getattr(CURRENT, "check", None)
+        waited = False
+        while not _GPU_GATE.acquire(timeout=0.5):
+            if not waited:
+                waited = True
+                print("[gpu] 顯示卡正在處理另一個工作，等它做完", flush=True)
+            if check:
+                check()   # 等的時候也能停止、暫停
+        self.on = True
+        return self
+
+    def __exit__(self, *exc):
+        if self.on:
+            _GPU_GATE.release()
+        return False
 
 
 def _local(name: str, *args, progress=None, **kw):
@@ -620,7 +651,8 @@ def call(name: str, *args, progress=None, cpu: bool = False, **kw):
     if time.time() < _BROKEN["until"]:
         return _local(name, *args, progress=progress, **kw)
     try:
-        return POOL.call(name, *args, progress=progress, low=low, **kw)
+        with _gate(progress):
+            return POOL.call(name, *args, progress=progress, low=low, **kw)
     except GpuStalled as e:
         print(f"[gpu] {e}", flush=True)
         try:
