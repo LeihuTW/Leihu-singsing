@@ -1754,18 +1754,44 @@ def harmony_ratio(d: Path) -> float | None:
     return round(float(np.sqrt(np.sum(br[voiced] ** 2) / np.sum(lr[voiced] ** 2))), 3)
 
 
-LEAD_FIX_V = 1   # 主唱補回的判斷方式版本：改了判斷方式就加一，舊歌會重新檢查一次
+LEAD_FIX_V = 2   # 主唱補回的判斷方式版本：改了判斷方式就加一，舊歌會重新檢查一次
+SPLIT_NOTE = "主唱和合音可能沒分好"
 
 
-def _lead_gap_gain(lead_m: np.ndarray, back_m: np.ndarray, sr: int) -> tuple[np.ndarray | None, float]:
-    """找出「主唱幾乎沒聲音、合音卻很大聲」而且持續 8 秒以上的段落（整段副歌）。
-    短短幾秒的通常是真的合音（間奏和聲、前奏哼唱），不動。
-    主唱分離模型會把多軌疊錄（周杰倫〈牛仔很忙〉的副歌）或另一位歌手整段當成合音，
-    主唱只開導唱時那段就整個不見、旋律線也斷掉。回傳每個樣本要搬回主唱的比例（0～1）與搬了幾秒。"""
+def _lyric_spans(d: Path) -> list[tuple[float, float]]:
+    """有時間的歌詞句子（開始、結束秒數）；整句括號的（和聲、旁白）不算。每句最多算 8 秒。"""
+    p = d / "lyrics.lrc"
+    if not p.exists():
+        return []
+    try:
+        rows = [r for r in parse_lrc(p.read_text(encoding="utf-8", errors="ignore")) if r["t"] is not None]
+    except Exception:
+        return []
+    out = []
+    for i, r in enumerate(rows):
+        tx = r["text"].strip()
+        if not tx or re.fullmatch(r"[（(].*[)）]", tx) or ":" in tx[:8] or "：" in tx[:8]:
+            continue   # 空白、整句括號、「作詞：」這類資訊行
+        end = rows[i + 1]["t"] if i + 1 < len(rows) else r["t"] + 5
+        end = min(end, r["t"] + 8)
+        if end - r["t"] >= 1.0:
+            out.append((r["t"], end))
+    return out
+
+
+def _lead_gap_gain(lead_m: np.ndarray, back_m: np.ndarray, sr: int,
+                   spans: list[tuple[float, float]] | None = None) -> tuple[np.ndarray | None, float, dict]:
+    """找出主唱被分到合音的地方，回傳（每個樣本要搬回主唱的比例 0～1、搬了幾秒、統計）。
+    1. 「主唱幾乎沒聲音、合音卻很大聲」持續 8 秒以上（整段疊錄的副歌，例如〈牛仔很忙〉）。
+    2. 有時間歌詞時，再逐句看：明明在唱歌詞，主唱卻幾乎整句沒聲音、合音很大聲 → 那句搬回主唱
+       （對唱、多人輪流唱的歌，常常一兩句被分到合音）。
+    短短幾秒、又不在歌詞句子裡的，通常是真的合音（間奏和聲、前奏哼唱），不動。
+    統計裡 weak 是「主唱有聲音、但比合音小很多」的句數：這種沒辦法整句搬，只提醒。"""
+    stats = {"lines": 0, "moved_lines": 0, "weak": 0}
     H = sr // 10
     n = min(len(lead_m), len(back_m)) // H * H
     if n < H * 50:
-        return None, 0.0
+        return None, 0.0, stats
     lr = np.sqrt(np.mean(lead_m[:n].reshape(-1, H) ** 2, axis=1))
     br = np.sqrt(np.mean(back_m[:n].reshape(-1, H) ** 2, axis=1))
     k = np.ones(15) / 15   # 1.5 秒平滑：一個字、一口氣的空檔不算
@@ -1773,9 +1799,9 @@ def _lead_gap_gain(lead_m: np.ndarray, back_m: np.ndarray, sr: int) -> tuple[np.
     bs = np.sqrt(np.convolve(br ** 2, k, "same"))
     ref = float(np.percentile(np.maximum(ls, bs), 95))
     if ref <= 1e-5:
-        return None, 0.0
+        return None, 0.0, stats
+    blk = np.zeros(len(ls), dtype=np.float32)
     cand = (bs > 0.12 * ref) & (ls < 0.1 * bs)
-    blk = np.zeros(len(cand), dtype=np.float32)
     i = 0
     while i < len(cand):
         if not cand[i]:
@@ -1787,28 +1813,61 @@ def _lead_gap_gain(lead_m: np.ndarray, back_m: np.ndarray, sr: int) -> tuple[np.
         if j - i >= 80:
             blk[max(0, i - 3):min(len(cand), j + 3)] = 1.0   # 前後各多 0.3 秒，接縫不會吃字
         i = j
+    if spans:
+        k2 = np.ones(5) / 5   # 逐句用 0.5 秒平滑
+        ls2 = np.sqrt(np.convolve(lr ** 2, k2, "same"))
+        bs2 = np.sqrt(np.convolve(br ** 2, k2, "same"))
+        for st, en in spans:
+            a, z = int(st * 10), int(en * 10)
+            if z > len(ls2) or z - a < 10:
+                continue
+            act = np.maximum(ls2[a:z], bs2[a:z]) > 0.1 * ref
+            if act.sum() < 10:   # 這句幾乎沒唱到（歌詞時間不準或間奏）
+                continue
+            stats["lines"] += 1
+            miss = float(((ls2[a:z] < 0.1 * bs2[a:z]) & act).sum() / act.sum())
+            weak = float(((ls2[a:z] < 0.5 * bs2[a:z]) & act).sum() / act.sum())
+            if miss >= 0.8:
+                stats["moved_lines"] += 1
+                blk[max(0, a - 2):min(len(blk), z + 2)] = 1.0
+            elif weak >= 0.6:
+                stats["weak"] += 1
     sec = float(blk.sum()) / 10
-    if sec < 8:
-        return None, 0.0
+    if sec < 1.0:
+        return None, 0.0, stats
     fade = np.convolve(blk, np.ones(3) / 3, "same")   # 0.3 秒淡入淡出
     g = np.interp(np.arange(len(lead_m)), np.arange(len(fade)) * H + H / 2, fade).astype(np.float32)
-    return g, sec
+    return g, sec, stats
+
+
+def _split_note(d: Path, stats: dict) -> None:
+    """很多句「主唱比合音小很多」：沒辦法自動整句搬，提醒使用者可以怎麼處理。"""
+    with _META_LOCK:
+        meta = read_meta(d)
+        notes = [x for x in meta.get("notes", []) if SPLIT_NOTE not in x]
+        if stats["lines"] >= 6 and stats["weak"] >= max(3, 0.25 * stats["lines"]):
+            notes.append(f"{SPLIT_NOTE}：有 {stats['weak']} 句主唱聲音很小、合音很大（疊錄、對唱或多人合唱的歌常見）。"
+                         "可以試「用最高品質人聲分離重新辨識」；多人輪流唱的歌可以開「合唱模式」")
+        meta["notes"] = notes
+        meta["split_suspect"] = stats["weak"]
+        write_meta(d, meta)
 
 
 def fix_lead_gaps(d: Path) -> float:
-    """主唱被誤分到合音的段落搬回主唱（合音那段同時拿掉）。回傳搬了幾秒；沒有就不改檔。"""
+    """主唱被誤分到合音的段落、句子搬回主唱（合音那段同時拿掉）。回傳搬了幾秒；沒有就不改檔。"""
     lp, bp = stem_path(d, "lead"), stem_path(d, "back")
     if not lp.exists() or not bp.exists():
         return 0.0
     lead, back = read_audio(lp), read_audio(bp)
     n = min(lead.shape[-1], back.shape[-1])
     lead, back = lead[..., :n], back[..., :n]
-    g, sec = _lead_gap_gain(lead.mean(axis=0), back.mean(axis=0), SR)
+    g, sec, stats = _lead_gap_gain(lead.mean(axis=0), back.mean(axis=0), SR, _lyric_spans(d))
     if g is not None:
         save_stem(d, "lead", lead + back * g)
         save_stem(d, "back", back * (1 - g))
-        print(f"[separate] 主唱有 {sec:.0f} 秒被分到合音（疊錄或另一位歌手），已搬回主唱", flush=True)
-    update_meta(d, lead_fix=LEAD_FIX_V, lead_fix_sec=round(sec, 1))
+        print(f"[separate] 主唱有 {sec:.0f} 秒（{stats['moved_lines']} 句歌詞）被分到合音，已搬回主唱", flush=True)
+    _split_note(d, stats)
+    update_meta(d, lead_fix=LEAD_FIX_V, lead_fix_sec=round(sec, 1), lead_fix_lrc=_lrc_stamp(d))
     return sec
 
 
@@ -1824,9 +1883,19 @@ def lead_fix_job(song_id: str, after=None):
     return run
 
 
+def _lrc_stamp(d: Path) -> float:
+    p = d / "lyrics.lrc"
+    return round(p.stat().st_mtime, 1) if p.exists() else 0.0
+
+
 def lead_fix_needed(meta: dict) -> bool:
+    """還沒用目前的判斷方式檢查過，或檢查之後歌詞換過（逐句檢查要用新的歌詞時間）。"""
     stp = meta.get("steps") or {}
-    return bool(stp.get("separate") and meta.get("separation") == "uvr" and meta.get("lead_fix") != LEAD_FIX_V)
+    if not (stp.get("separate") and meta.get("separation") == "uvr" and meta.get("id")):
+        return False
+    if meta.get("lead_fix") != LEAD_FIX_V:
+        return True
+    return meta.get("lead_fix_lrc", 0.0) != _lrc_stamp(song_dir(meta["id"]))
 
 
 def fine_job(song_id: str, after=None):

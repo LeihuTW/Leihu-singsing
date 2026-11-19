@@ -1962,9 +1962,16 @@ def remove_duet_leftovers() -> None:
 
 
 def lead_fix_sweep() -> None:
-    """2.3.2：舊歌檢查一次「主唱被整段分到合音」（疊錄的副歌、另一位歌手）。
+    """2.3.2：檢查「主唱被分到合音」（疊錄的副歌、對唱、多人輪流唱）。舊歌檢查一次；
+    之後每 5 分鐘看一次有沒有新處理好、或歌詞換過的歌（逐句檢查要等歌詞套用後才準）。
     只讀檔判斷，沒有問題的歌直接記下已檢查；有問題的排一個背景工作搬回主唱並重新分析旋律（直播中暫停）。"""
     time.sleep(60)
+    while True:
+        _lead_fix_scan()
+        time.sleep(300)
+
+
+def _lead_fix_scan() -> None:
     try:
         with _SETLIST_LOCK:
             sl = {i.get("id") for i in _setlist_read()["items"]}
@@ -1981,12 +1988,13 @@ def lead_fix_sweep() -> None:
             try:
                 lead = P.read_audio(P.stem_path(d, "lead"), sr=P.PITCH_SR, mono=True)
                 back = P.read_audio(P.stem_path(d, "back"), sr=P.PITCH_SR, mono=True)
-                g, sec = P._lead_gap_gain(lead, back, P.PITCH_SR)
+                g, sec, stats = P._lead_gap_gain(lead, back, P.PITCH_SR, P._lyric_spans(d))
             except Exception as e:
                 P.log_error("lead_fix_sweep", e)
                 continue
             if g is None:
-                P.update_meta(d, lead_fix=P.LEAD_FIX_V, lead_fix_sec=0)
+                P._split_note(d, stats)
+                P.update_meta(d, lead_fix=P.LEAD_FIX_V, lead_fix_sec=0, lead_fix_lrc=P._lrc_stamp(d))
             else:
                 print(f"[separate] {s.get('title') or sid}：主唱約 {sec:.0f} 秒被分到合音，排入背景修正", flush=True)
                 jobs.submit("process", sid, P.lead_fix_job(sid, after=prerender_key), label="leadfix")
