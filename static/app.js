@@ -2054,7 +2054,9 @@ applyLyrScale();
 /* 歌詞顯示／調整開關（記在這台電腦） */
 S.showLyr = store.get("showLyr", true);
 S.editLyr = false;
+S.dragLyr = store.get("dragLyr", false);   // 2.3.2：播放中也能拖曳上方的句子標記
 function syncLyrButtons() {
+  $("#lyr-drag").classList.toggle("on", S.dragLyr);
   $("#lyr-show").classList.toggle("on", S.showLyr);
   $("#lyr-edit").classList.toggle("on", S.editLyr);
   $("#edit-hint").hidden = !S.editLyr;
@@ -2220,6 +2222,12 @@ $("#lyr").addEventListener("click", e => {
 $("#lyr-color").onclick = () => { S.charColor = !S.charColor; store.set("charColor", S.charColor); syncColorBtn(); toast(S.charColor ? "已開啟逐字上色" : "已關閉逐字上色：只標出正在唱的那一句", 2000); };
 syncColorBtn();
 $("#lyr-show").onclick = () => { S.showLyr = !S.showLyr; if (S.showLyr && !S.showMel) setShowMel(true); if (!S.showLyr) S.editLyr = false; store.set("showLyr", S.showLyr); syncLyrButtons(); };
+$("#lyr-drag").onclick = () => {
+  S.dragLyr = !S.dragLyr; store.set("dragLyr", S.dragLyr);
+  if (S.dragLyr && !S.showMel) setShowMel(true);
+  syncLyrButtons();
+  toast(S.dragLyr ? "拖曳歌詞：練唱中或暫停時，拖曳卷軸上方的句子標記就能調整那一句開始的時間" : "已關閉拖曳歌詞", 3500);
+};
 $("#lyr-edit").onclick = () => { S.editLyr = !S.editLyr; if (S.editLyr) { if (!S.showMel) setShowMel(true); S.showLyr = true; store.set("showLyr", true); if (S.playing) pause(); } syncLyrButtons(); };
 syncLyrButtons();
 
@@ -3336,8 +3344,11 @@ function draw() {
     if (l.end < G.left || l.t > t1) continue;
     const x = G.x(l.t);
     S.lineHits.push({ x, line: l });
-    g.fillStyle = S.editLyr ? C.melody : C.muted;
-    g.fillRect(x - (S.editLyr ? 1 : 0), 2, S.editLyr ? 3 : 1, TOP - 4);
+    const handle = S.editLyr || S.dragLyr;
+    const held = drag && drag.kind === "line" && drag.line === l;
+    g.fillStyle = handle ? C.melody : C.muted;
+    g.fillRect(x - (handle ? 1 : 0), 2, handle ? 3 : 1, TOP - 4);
+    if (held) { g.globalAlpha = 0.35; g.fillRect(x - 0.5, TOP, 1, H - TOP); g.globalAlpha = 1; }   // 拖曳中：往下畫一條參考線對旋律
     g.fillStyle = C.muted;
     g.save(); g.beginPath(); g.rect(x, 0, Math.max(0, G.x(l.end) - x + 40), TOP); g.clip();
     g.fillText(l.text, x + 4, TOP / 2); g.restore();
@@ -3592,6 +3603,7 @@ function frame() {
   if (S.playing) queuePrefetch(cur());
   overlaySync();
   tpSync();
+  dragFollow();
   if (S.dirty && !$("#view-practice").hidden) {
     S.dirty = false;
     const t = cur();
@@ -3606,14 +3618,15 @@ function frame() {
 new ResizeObserver(() => (S.dirty = true)).observe(cv);
 
 /* 卷軸操作：一般模式點一下跳到該時間；調整模式可拖曳句子標記與每個字 */
-let drag = null;
+var drag = null;   // var：draw() 會讀它，初始化順序不影響
 function hitTest(x, y) {
-  if (!S.editLyr) return null;
+  if (!S.editLyr && !S.dragLyr) return null;
   if (y <= TOP + 2) {
     let best = null;
     for (const h of S.lineHits || []) if (Math.abs(h.x - x) < 8 && (!best || Math.abs(h.x - x) < Math.abs(best.x - x))) best = h;
     if (best) return { kind: "line", line: best.line };
   }
+  if (!S.editLyr) return null;   // 拖曳歌詞模式只拖句子標記；逐字調整要開「調整」
   for (const h of S.charHits || []) if (x >= h.x0 && x <= h.x1 && y >= h.y0 && y <= h.y1) return { kind: "char", line: h.line, i: h.i };
   return null;
 }
@@ -3622,8 +3635,9 @@ cv.addEventListener("pointerdown", e => {
   cv.setPointerCapture(e.pointerId);
   if (hit) {
     const G = geom();
-    drag = { ...hit, startX: e.offsetX, t0: hit.kind === "line" ? hit.line.t : hit.line.chars[hit.i].t, moved: false, G };
-    if (hit.line.autoChars) { hit.line.autoChars = false; }
+    drag = { ...hit, startX: e.offsetX, t0: hit.kind === "line" ? hit.line.t : hit.line.chars[hit.i].t, moved: false, G,
+             grab: hit.kind === "line" ? hit.line.t - G.tx(e.offsetX) : 0, lastX: e.offsetX };
+    if (hit.kind === "char" && hit.line.autoChars) { hit.line.autoChars = false; }   // 移整句時，自動分配的逐字時間放開後重新依旋律分配
     return;
   }
   drag = { kind: "seek" };
@@ -3632,19 +3646,16 @@ cv.addEventListener("pointerdown", e => {
 cv.addEventListener("pointermove", e => {
   if (!drag) {
     const h = hitTest(e.offsetX, e.offsetY);
-    cv.style.cursor = h ? "ew-resize" : "";
+    cv.style.cursor = h ? (h.kind === "line" ? "grab" : "ew-resize") : "";
     return;
   }
   if (drag.kind === "seek") { if (!S.playing) seek(geom().tx(e.offsetX)); return; }
   const G = drag.G, dt = ((e.offsetX - drag.startX) / (G.W - KEYW)) * S.zoom;
   if (Math.abs(e.offsetX - drag.startX) > 2) drag.moved = true;
-  const l = drag.line, idx = S.lines.indexOf(l);
+  drag.lastX = e.offsetX;
+  const l = drag.line;
   if (drag.kind === "line") {
-    const prevEnd = idx > 0 ? S.lines[idx - 1].t + 0.1 : 0;
-    const nt = Math.max(prevEnd, Math.min(drag.t0 + dt, (S.lines[idx + 1]?.t ?? 1e9) - 0.1));
-    const d = nt - l.t;
-    l.t = Math.round(nt * 100) / 100;
-    if (l.chars) l.chars.forEach(u => (u.t = Math.round((u.t + d) * 100) / 100));
+    dragLineTo(geom().tx(e.offsetX) + drag.grab);   // 用「現在」的卷軸位置換算：播放中卷軸在動也對得準
   } else {
     const u = l.chars, i = drag.i;
     let lo = i > 0 ? u[i - 1].t + 0.03 : (idx > 0 ? S.lines[idx - 1].t + 0.1 : 0);
@@ -3654,9 +3665,33 @@ cv.addEventListener("pointermove", e => {
   }
   S.dirty = true;
 });
+/* 拖曳整句：不能越過前後句（間隔至少 0.1 秒），逐字時間一起移動 */
+function dragLineTo(t) {
+  const l = drag.line, idx = S.lines.indexOf(l);
+  const prevEnd = idx > 0 ? S.lines[idx - 1].t + 0.1 : 0;
+  const nt = Math.max(prevEnd, Math.min(t, (S.lines[idx + 1]?.t ?? 1e9) - 0.1));
+  const d = nt - l.t;
+  l.t = Math.round(nt * 100) / 100;
+  if (l.chars) l.chars.forEach(u => (u.t = Math.round((u.t + d) * 100) / 100));
+  S.dirty = true;
+}
+/* 播放中按住不動：卷軸一直往前捲，標記要留在滑鼠底下 */
+function dragFollow() {
+  if (drag && drag.kind === "line" && S.playing && drag.moved) dragLineTo(geom().tx(drag.lastX) + drag.grab);
+}
 cv.addEventListener("pointerup", () => {
-  if (drag && drag.kind !== "seek" && drag.moved) { setLineEnds(); commitLines(true); }
+  const d = drag;
   drag = null;
+  if (d && d.kind !== "seek" && d.moved) {
+    setLineEnds();
+    if (d.kind === "line" && d.line.autoChars) {
+      const i = S.lines.indexOf(d.line);
+      d.line.chars = distributeChars({ ...d.line, chars: null }, lineLimit(i));
+    }
+    commitLines(true);
+    if (d.kind === "line" && !S.editLyr) toast(`「${d.line.text.slice(0, 12)}${d.line.text.length > 12 ? "…" : ""}」改從 ${fmt(d.line.t, 2)} 開始`, 2000);
+  }
+  S.dirty = true;
 });
 cv.addEventListener("dblclick", e => {
   const hit = hitTest(e.offsetX, e.offsetY);
