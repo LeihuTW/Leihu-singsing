@@ -2956,7 +2956,7 @@ async function rescoreTake(id, quiet) {
 }
 async function selectTake(id) {
   const t = await api(`/api/songs/${S.song.id}/takes/${id}`);
-  if (t.status === "done" && (t.algo || 1) < 4 && !S.rescored?.[id]) {
+  if (t.status === "done" && (t.algo || 1) < 5 && !S.rescored?.[id]) {
     // 1.2 以前的錄音：用新的分析方式（去掉音頭音尾往下掉的雜訊）自動重新評分一次
     (S.rescored ||= {})[id] = true;
     toast("用新的分析方式重新評分這次錄音…");

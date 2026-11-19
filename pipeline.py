@@ -3098,7 +3098,51 @@ def suggest_key(dd: np.ndarray, key: int) -> dict | None:
     return {"shift": shift, "share": round(share, 2), "suggest": (key + shift + 6) % 12 - 6}   # 保持在 ±6
 
 
-TAKE_ALGO = 4   # 錄音分析方式的版本；舊版分析的錄音會自動重新評分
+TAKE_ALGO = 5   # 錄音分析方式的版本；舊版分析的錄音會自動重新評分（5：用開口瞬間對齊時間）
+
+
+def _onset_env(y: np.ndarray, H: int) -> np.ndarray:
+    """每 10 ms 的「開口力道」：音量（對數）往上跳多少。每個字開口的瞬間會是一個尖峰。"""
+    n = len(y) // H * H
+    if n < H * 10:
+        return np.zeros(0, dtype=np.float32)
+    e = np.log(np.sqrt(np.mean(y[:n].reshape(-1, H) ** 2, axis=1)) + 1e-4)
+    return np.maximum(0, np.diff(e, prepend=e[0])).astype(np.float32)
+
+
+def onset_offset(d: Path, y16: np.ndarray, start: float, speed: float,
+                 lo: float = -0.5, hi: float = 1.0) -> float | None:
+    """2.3.3：用「每個字開口的瞬間」對齊錄音和原唱，回傳 offset（歌曲時間 = start + offset + τ×speed）。
+    以前只用音高對齊：長音只要音高對，早晚 0.1 秒都一樣吻合，實測會把人聲放晚約 0.1 秒，聽起來拖拍。
+    開口瞬間對時間很敏感。找不到明顯的最佳位置（例如幾乎沒唱）時回傳 None，改用音高對齊。"""
+    lp = stem_path(d, "lead")
+    if not lp.exists():
+        return None
+    try:
+        ref = _onset_env(read_audio(lp, sr=PITCH_SR, mono=True), PITCH_SR // 100)
+    except Exception:
+        return None
+    mine = _onset_env(y16, PITCH_SR // 100)
+    if len(mine) < 500 or len(ref) < 500:
+        return None
+    tau = np.arange(len(mine)) * 0.01
+    mine = mine - mine.mean()
+    offs = np.arange(lo, hi + 1e-9, 0.01)
+    score = np.full(len(offs), np.nan)
+    for i, off in enumerate(offs):
+        idx = np.round((start + off + tau * speed) / 0.01).astype(int)
+        ok = (idx >= 0) & (idx < len(ref))
+        if ok.sum() < 500:
+            continue
+        r = ref[idx[ok]]
+        score[i] = float(np.dot(mine[ok], r - r.mean()) / ok.sum())
+    if np.all(np.isnan(score)):
+        return None
+    k = int(np.nanargmax(score))
+    s = score[~np.isnan(score)]
+    if s.std() <= 0 or (score[k] - np.median(s)) / s.std() < 3:   # 最佳位置不夠突出：不可靠
+        return None
+    return float(offs[k])
 TOL_FRAMES = 10   # 評分的時間容錯：±0.1 秒
 
 
@@ -3135,6 +3179,10 @@ def score_take(d: Path, take_id: str, report) -> None:
         m = int(np.sum(np.abs(dd[~np.isnan(dd)]) < 0.5))
         if m > best:
             best, best_off = m, float(off)
+    # 錄音放回伴奏上的位置（播放、合成成品）：用開口瞬間對齊，找不到時才用音高對齊。
+    # 評分仍用音高對齊（換音早晚 0.1 秒內本來就算對），分數不會因為這次修正改變
+    on_off = onset_offset(d, y16, start, speed)
+    place_off = on_off if on_off is not None else best_off
     # 建議 KEY 用另一種對齊：找「最多音都差同樣幾個半音」的位置（整首唱在別的 KEY 時，
     # 上面「最準」的對齊會找錯位置）
     kbest, koff = -1, best_off
@@ -3183,7 +3231,8 @@ def score_take(d: Path, take_id: str, report) -> None:
         atomic_write_text(td / f"{take_id}.json", json.dumps(info, ensure_ascii=False))
         return
     info.update({
-        "offset": round(best_off, 2),
+        "offset": round(place_off, 2),
+        "score_offset": round(best_off, 2),
         "acc": round(float(np.mean(np.abs(cents) <= 50)), 3) if cents.size else None,
         "mean": round(float(np.mean(cents)), 1) if cents.size else None,
         "spread": round(float(np.mean(np.abs(cents))), 1) if cents.size else None,
@@ -3191,7 +3240,7 @@ def score_take(d: Path, take_id: str, report) -> None:
         "octave": octave,
         "lines": per_line,
         "pitch": {
-            "t0": round(start + best_off, 3), "hop": round(HOP_S * speed, 5),
+            "t0": round(start + place_off, 3), "hop": round(HOP_S * speed, 5),
             "midi": [None if np.isnan(v) else round(float(v), 2) for v in mine],
         },
         "status": "done",
@@ -3199,6 +3248,9 @@ def score_take(d: Path, take_id: str, report) -> None:
         "key_hint": key_hint,
     })
     atomic_write_text(td / f"{take_id}.json", json.dumps(info, ensure_ascii=False))
+    # 對齊位置可能變了：先前做好的人聲暫存（試聽、成品用）要重做
+    for old in list(td.glob(f"{take_id}.vocal_*.wav")) + list(td.glob(f"{take_id}.preview.wav")):
+        old.unlink(missing_ok=True)
 
 
 # ---------------------------------------------------------------- 背景工作
@@ -3953,7 +4005,7 @@ def similarity(recognized: str, candidate: str) -> float | None:
     return round(sum(x.size for x in m.get_matching_blocks()) / len(a), 3)
 
 
-USER_AGENT = "LeihuLiantai/2.3.2 (+https://github.com/LeihuTW/Leihu-singsing)"   # HTTP 標頭只能用英文字
+USER_AGENT = "LeihuLiantai/2.3.3 (+https://github.com/LeihuTW/Leihu-singsing)"   # HTTP 標頭只能用英文字
 
 
 def _http_json(url: str, headers: dict | None = None, timeout: int = 8):
