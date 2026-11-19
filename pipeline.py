@@ -3732,6 +3732,13 @@ def process_song(song_id: str, steps: list[str], cfg_override: dict | None = Non
         fit_before = lyrics_timing_fit(d) if recheck else None   # 重新分離前，歌詞和舊的歌聲位置吻合度
         if "import" in steps or not meta["steps"].get("import"):
             step_import(d, report)
+        # 2.3.2：匯入時（不自動辨識）先上網抓歌詞，和分離同時進行；分離完先套用歌詞，
+        # 再用歌詞逐句檢查主唱有沒有被分到合音、搬回來，最後才分析旋律——一次做好，不用事後再補一輪。
+        early = None
+        if ("lyrics" in steps and "import" in steps and "separate" in steps
+                and not cfg.get("auto_recognize_lyrics", False)
+                and not (d / "lyrics.lrc").exists() and not meta.get("lyrics_source")):
+            early = _early_lyrics(read_meta(d))
         if "separate" in steps:
             # 2.3.2：直播中不管是匯入、優先處理或重新處理，都改用 CPU＋標準模型（不碰顯示卡），下播後自動補做
             light = live_light_cfg(cfg)
@@ -3746,6 +3753,8 @@ def process_song(song_id: str, steps: list[str], cfg_override: dict | None = Non
             if not recognize:   # 接下來只剩分析旋律、存檔：下一首可以先開始分離
                 getattr(report, "gpu_done", lambda: None)()
             measure_stem_loudness(d)   # 各音軌響度，播放時依開著的音軌調整音量
+        if early is not None:
+            early = _apply_early_lyrics(d, cfg, early, report)
         if "pitch" in steps:
             step_pitch(d, cfg, report)
         if recheck:
@@ -3753,7 +3762,9 @@ def process_song(song_id: str, steps: list[str], cfg_override: dict | None = Non
                 check_lyrics_after_reseparate(d, fit_before)
             except Exception as e:
                 log_error("check_lyrics_after_reseparate", e)
-        if "lyrics" in steps and "import" in steps and not cfg.get("auto_recognize_lyrics", False):
+        if early:
+            pass   # 歌詞已經在分離後套用（或確定找不到），不用再排背景搜尋
+        elif "lyrics" in steps and "import" in steps and not cfg.get("auto_recognize_lyrics", False):
             # 1.6.5：匯入時預設不自動辨識（準度不穩、又佔顯示卡），直接套用線上搜尋到的第一個版本
             report("排入線上歌詞搜尋（背景進行）", 0.97)
             with _META_LOCK:   # 讀出到寫回之間不讓別的執行緒改這首歌的資料
@@ -3790,6 +3801,48 @@ def process_song(song_id: str, steps: list[str], cfg_override: dict | None = Non
 
 
 _LYRICS_POOL = None
+_EARLY_POOL = None
+
+
+def _early_lyrics(meta: dict):
+    """在背景先上網搜尋歌詞（只抓資料，不需要分離結果）。回傳 Future。"""
+    global _EARLY_POOL
+    from concurrent.futures import ThreadPoolExecutor
+    if _EARLY_POOL is None:
+        _EARLY_POOL = ThreadPoolExecutor(max_workers=2, thread_name_prefix="lyrics-early")
+    return _EARLY_POOL.submit(fetch_candidates, meta, "", None, 45)
+
+
+def _apply_early_lyrics(d: Path, cfg: dict, fut, report) -> bool:
+    """分離完：等先前的歌詞搜尋（最多再等 45 秒），套用最相符的版本，再逐句檢查主唱。
+    回傳 True＝這一步處理完了（套用、或確定沒有相符的）；False＝搜尋失敗，交回原本的背景搜尋。"""
+    report("套用線上歌詞、檢查主唱有沒有被分到合音", 0.62)
+    import gpu_worker as G
+    check = getattr(G.CURRENT, "check", None)
+    end = time.time() + 45
+    while not fut.done() and time.time() < end:
+        if check:
+            check()
+        time.sleep(0.3)
+    if not fut.done():
+        return False
+    try:
+        pre = fut.result()
+        find_and_store_candidates(d, cfg, apply_first=True, pre=pre)
+    except Exception as e:
+        log_error("early lyrics", e)
+        return False
+    with _META_LOCK:
+        meta = read_meta(d)
+        meta["steps"]["lyrics"] = True
+        meta.setdefault("lyrics_recognized", False)
+        write_meta(d, meta)
+    if (d / "lyrics.lrc").exists():
+        try:
+            fix_lead_gaps(d)   # 有歌詞了：逐句檢查一次（分離時只看得到整段的）
+        except Exception as e:
+            log_error("fix_lead_gaps(early)", e)
+    return True
 
 
 def search_lyrics_later(d: Path, cfg: dict, apply_first: bool = False) -> None:
@@ -3998,9 +4051,15 @@ def recognized_text(d: Path) -> str:
 
 
 def find_candidates(d: Path, cfg: dict, query: str = "", check=None,
-                    budget: float = 45) -> tuple[list[str], list[dict]]:
-    """用歌名（原文與簡體）到 LRCLIB、網易雲和酷狗搜尋，與辨識結果比對後排序。"""
-    meta = read_meta(d)
+                    budget: float = 45, pre: tuple | None = None) -> tuple[list[str], list[dict]]:
+    """用歌名（原文與簡體）到 LRCLIB、網易雲和酷狗搜尋，與辨識結果比對後排序。
+    pre：先前已經抓好的（搜尋字串, 原始結果）——2.3.2 匯入時在分離的同時先上網抓，分離完再排序、套用。"""
+    tried, found = pre if pre else fetch_candidates(read_meta(d), query, check, budget)
+    return rank_candidates(d, cfg, tried, found)
+
+
+def fetch_candidates(meta: dict, query: str = "", check=None, budget: float = 45) -> tuple[list[str], dict]:
+    """只做上網搜尋（不需要分離結果）。"""
     queries = [query] if query else lyric_queries(meta)
     from concurrent.futures import ThreadPoolExecutor, wait as fwait
     tried, found, errors = [], {}, []
@@ -4038,6 +4097,12 @@ def find_candidates(d: Path, cfg: dict, query: str = "", check=None,
         pool.shutdown(wait=False, cancel_futures=True)
     if not found and errors and len(dead) == len(sites):
         raise UserError("無法連到歌詞網站，請確認網路後再試。")
+    return tried, found
+
+
+def rank_candidates(d: Path, cfg: dict, tried: list[str], found: dict) -> tuple[list[str], list[dict]]:
+    meta = read_meta(d)
+    found = {k: dict(v) for k, v in found.items()}   # 不改到呼叫的人手上的原始結果
     reliable = recognition_reliable(meta)
     rec = recognized_text(d) if reliable else ""
     dur = meta.get("duration")
@@ -4185,8 +4250,8 @@ def _lyrics_note(d: Path, note: str | None) -> None:
         write_meta(d, meta)
 
 
-def find_and_store_candidates(d: Path, cfg: dict, check=None, apply_first: bool = False) -> None:
-    _, cands = find_candidates(d, cfg, check=check)
+def find_and_store_candidates(d: Path, cfg: dict, check=None, apply_first: bool = False, pre=None) -> None:
+    _, cands = find_candidates(d, cfg, check=check, pre=pre)
     meta = read_meta(d)
     # 候選一律保留給使用者看，不再用辨識結果過濾。是否主動提示「有線上歌詞可選」：
     # 辨識可靠時看和辨識結果像不像；辨識不可靠（或沒有辨識）時看歌名和長度。
@@ -4220,14 +4285,53 @@ def find_and_store_candidates(d: Path, cfg: dict, check=None, apply_first: bool 
 
 # ---------------------------------------------------------------- 依主唱聲音對時間（不需要辨識結果，任何語言都可以）
 
+def vocal_energy_phrases(d: Path, gap: float = 0.35, min_len: float = 0.3) -> list[tuple[float, float]]:
+    """2.3.2：還沒分析旋律時，用「主唱＋合音」的音量找有在唱的段落。
+    主唱被分到合音的副歌也算得到，所以拿來對歌詞時間不會因為主唱分錯而對歪。"""
+    try:
+        y = read_audio(stem_path(d, "lead"), sr=PITCH_SR, mono=True)
+        b = stem_path(d, "back")
+        if b.exists():
+            yb = read_audio(b, sr=PITCH_SR, mono=True)
+            n = min(len(y), len(yb))
+            y = y[:n] + yb[:n]
+    except Exception:
+        return []
+    H = int(PITCH_SR * 0.02)
+    n = len(y) // H * H
+    if n < H * 50:
+        return []
+    r = np.sqrt(np.mean(y[:n].reshape(-1, H) ** 2, axis=1))
+    r = np.convolve(r, np.ones(3) / 3, "same")
+    ref = float(np.percentile(r, 95))
+    if ref <= 1e-5:
+        return []
+    on = r > 0.3 * ref   # 實測 6 首：和旋律分析結果對歌詞時間的準度相當
+    out, i = [], 0
+    while i < len(on):
+        if not on[i]:
+            i += 1
+            continue
+        j = i
+        while j < len(on) and on[j]:
+            j += 1
+        a, e = i * 0.02, j * 0.02
+        if out and a - out[-1][1] < gap:
+            out[-1] = (out[-1][0], e)
+        else:
+            out.append((a, e))
+        i = j
+    return [(a, e) for a, e in out if e - a >= min_len]
+
+
 def voice_phrases(d, gap: float = 0.35, min_len: float = 0.3) -> list[tuple[float, float]]:
-    """從旋律分析結果找出「有在唱」的段落 (開始, 結束)。"""
+    """從旋律分析結果找出「有在唱」的段落 (開始, 結束)。還沒分析旋律時改用主唱＋合音的音量。"""
     if isinstance(d, _PhraseStub):
         return d.phrases
     try:
         pj = json.loads((d / "pitch.json").read_text("utf-8"))
     except Exception:
-        return []
+        return vocal_energy_phrases(d, gap, min_len) if isinstance(d, Path) else []
     hop = pj.get("hop", HOP_S)
     on = np.array([v is not None for v in pj["midi"]])
     out, i, n = [], 0, len(on)
