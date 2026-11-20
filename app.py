@@ -398,7 +398,7 @@ def _resubmit(sid: str, label: str) -> None:
 
 
 def restore_queue() -> None:
-    """重開後把上次還在排的工作照順序排回去；舊版留下「精細處理排隊中」標記但佇列裡沒有的，也排回去。"""
+    """重開後把上次還在排的工作照順序排回去（只看 queue.json）。"""
     try:
         try:
             saved = json.loads(QUEUE_FILE.read_text("utf-8")) if QUEUE_FILE.exists() else []
@@ -411,10 +411,11 @@ def restore_queue() -> None:
                 n += 1
             except Exception as e:
                 P.log_error("restore_queue", e)
+        # 舊版留下的「精細處理排隊中」標記（佇列早就不見了）：清掉標記，不自動補排，
+        # 免得一次冒出幾十首已經處理好的歌重跑；歌曲清單會改回「建議精細處理」按鈕，要做再按
         for m in P.list_songs():
-            if m.get("fine_queued") and not m.get("fine_done") and not jobs.find("process", m["id"], "fine"):
-                queue_fine(m["id"])
-                n += 1
+            if m.get("fine_queued") and not jobs.find("process", m["id"], "fine"):
+                P.update_meta(P.song_dir(m["id"]), fine_queued=False)
         if n:
             print(f"[job] 上次關掉時還在排的 {n} 個工作已重新排回佇列", flush=True)
     except Exception as e:
