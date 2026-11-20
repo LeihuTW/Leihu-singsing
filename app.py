@@ -317,17 +317,110 @@ def queue_fine(sid: str) -> str:
     return jobs.submit("process", sid, run, label="fine")
 
 
-def requeue_fine() -> None:
-    """2.3.3：佇列不會跨重開保存。上次關掉時還在排的精細處理，重開後重新排回去（排在最後）。"""
-    time.sleep(20)
+# ---------------------------------------------------------------- 佇列跨重開保存（2.3.3）
+# 佇列只存在記憶體裡：以前重開練唱台，還在排的匯入、精細處理、最高品質、重新處理都會不見，
+# 歌曲停在「旋律未完成」或一直顯示「排隊中」。現在每 3 秒把排隊中的工作（歌曲＋種類）存到檔案，
+# 重開後照原本的順序排回去。YouTube 下載、主唱檢查、下播後補做高品質本來就會自己接續，不在這裡。
+QUEUE_FILE = P.ROOT / "queue.json"
+_QUEUE_READY = threading.Event()
+
+
+def _restorable(label: str) -> bool:
+    if label in ("all", "fine", "max", "upgrade"):
+        return True
+    parts = label.split(",") if label else []
+    return bool(parts) and all(x in ("import", "separate", "pitch", "lyrics") for x in parts)
+
+
+def _queue_snapshot() -> list[dict]:
+    with jobs.lock:
+        out, seen = [], set()
+        order = [j for j in jobs.running] + [j for j, _ in jobs.pending]
+        for jid in order:
+            st = jobs.state.get(jid) or {}
+            key = (st.get("song"), st.get("label"))
+            if (st.get("kind") == "process" and st.get("song") and _restorable(st.get("label") or "")
+                    and st.get("status") in ("queued", "running") and not st.get("cancel") and key not in seen):
+                seen.add(key)
+                out.append({"song": st["song"], "label": st["label"]})
+        return out
+
+
+def queue_saver() -> None:
+    _QUEUE_READY.wait()
+    last = None
+    while True:
+        try:
+            snap = _queue_snapshot()
+            if snap != last:
+                P.atomic_write_text(QUEUE_FILE, json.dumps(snap, ensure_ascii=False))
+                last = snap
+        except Exception as e:
+            P.log_error("queue_saver", e)
+        time.sleep(3)
+
+
+def _resubmit(sid: str, label: str) -> None:
+    if not P.song_dir(sid).exists() or jobs.find("process", sid, label):
+        return
+    meta = P.read_meta(P.song_dir(sid))
+    if label == "fine":
+        if not meta.get("fine_done"):
+            queue_fine(sid)
+        return
+    if label == "max":
+        try:
+            queue_max(sid)
+        except P.UserError:
+            pass   # 最高品質模型不在了：不排
+        return
+    if label == "upgrade":
+        proc = P.process_song(sid, ["separate", "pitch"])
+
+        def run(report, sid=sid, proc=proc):
+            proc(report)
+            prerender_key(sid)
+        jobs.submit("process", sid, run, label="upgrade")
+        return
+    if label == "all":
+        steps = ["import", "separate", "pitch", "lyrics"]
+        proc = P.process_song(sid, steps)
+
+        def run(report, sid=sid, proc=proc):
+            proc(report)
+            try:
+                after_process(sid)
+            except Exception as e:
+                P.log_error("after_process", e)
+        jobs.submit("process", sid, run, label="all")
+        return
+    jobs.submit("process", sid, P.process_song(sid, label.split(",")), label=label)
+
+
+def restore_queue() -> None:
+    """重開後把上次還在排的工作照順序排回去；舊版留下「精細處理排隊中」標記但佇列裡沒有的，也排回去。"""
     try:
+        try:
+            saved = json.loads(QUEUE_FILE.read_text("utf-8")) if QUEUE_FILE.exists() else []
+        except Exception:
+            saved = []
+        n = 0
+        for it in saved:
+            try:
+                _resubmit(str(it["song"]), str(it["label"]))
+                n += 1
+            except Exception as e:
+                P.log_error("restore_queue", e)
         for m in P.list_songs():
             if m.get("fine_queued") and not m.get("fine_done") and not jobs.find("process", m["id"], "fine"):
                 queue_fine(m["id"])
-                print(f"[job] 重新排入精細處理：{m.get('title') or m['id']}", flush=True)
+                n += 1
+        if n:
+            print(f"[job] 上次關掉時還在排的 {n} 個工作已重新排回佇列", flush=True)
     except Exception as e:
-        P.log_error("requeue_fine", e)
-
+        P.log_error("restore_queue", e)
+    finally:
+        _QUEUE_READY.set()
 
 def yt_submit(sid: str, url: str) -> str:
     return jobs.submit("process", sid, P.youtube_job(sid, url, after=after_process), label="youtube")
@@ -2176,7 +2269,8 @@ def main():
     threading.Thread(target=loudness_backfill, daemon=True, name="loudness").start()
     threading.Thread(target=live_light_upgrade, daemon=True, name="live-light").start()
     threading.Thread(target=lead_fix_sweep, daemon=True, name="lead-fix").start()
-    threading.Thread(target=requeue_fine, daemon=True, name="requeue-fine").start()
+    restore_queue()   # 先排回上次的佇列，再開始存新的
+    threading.Thread(target=queue_saver, daemon=True, name="queue-saver").start()
     threading.Thread(target=remove_duet_leftovers, daemon=True, name="cleanup").start()
     threading.Thread(target=P.clear_false_recheck, daemon=True, name="recheck").start()
     threading.Thread(target=check_update, daemon=True, name="update").start()
