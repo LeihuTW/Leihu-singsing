@@ -215,7 +215,11 @@ def set_config():
 
 @app.get("/api/songs")
 def songs():
-    return jsonify(P.list_songs())
+    out = P.list_songs()
+    for m in out:   # 2.3.3：「精細處理排隊中」看實際的佇列，不只看歌曲資料裡的標記
+        if m.get("fine_queued"):
+            m["fine_queued"] = bool(jobs.find("process", m["id"], "fine"))
+    return jsonify(out)
 
 
 @app.get("/api/songs/search")
@@ -300,7 +304,29 @@ def queue_fine(sid: str) -> str:
     if jid:
         return jid
     P.update_meta(P.song_dir(sid), fine_queued=True)
-    return jobs.submit("process", sid, P.fine_job(sid, after=prerender_key), label="fine")
+    job = P.fine_job(sid, after=prerender_key)
+
+    def run(report):
+        try:
+            job(report)
+        except P.JobDeferred:
+            raise   # 直播中先延後：還在佇列裡，標記保留
+        except BaseException:
+            P.update_meta(P.song_dir(sid), fine_queued=False)   # 失敗或取消：不要一直顯示「排隊中」
+            raise
+    return jobs.submit("process", sid, run, label="fine")
+
+
+def requeue_fine() -> None:
+    """2.3.3：佇列不會跨重開保存。上次關掉時還在排的精細處理，重開後重新排回去（排在最後）。"""
+    time.sleep(20)
+    try:
+        for m in P.list_songs():
+            if m.get("fine_queued") and not m.get("fine_done") and not jobs.find("process", m["id"], "fine"):
+                queue_fine(m["id"])
+                print(f"[job] 重新排入精細處理：{m.get('title') or m['id']}", flush=True)
+    except Exception as e:
+        P.log_error("requeue_fine", e)
 
 
 def yt_submit(sid: str, url: str) -> str:
@@ -2150,6 +2176,7 @@ def main():
     threading.Thread(target=loudness_backfill, daemon=True, name="loudness").start()
     threading.Thread(target=live_light_upgrade, daemon=True, name="live-light").start()
     threading.Thread(target=lead_fix_sweep, daemon=True, name="lead-fix").start()
+    threading.Thread(target=requeue_fine, daemon=True, name="requeue-fine").start()
     threading.Thread(target=remove_duet_leftovers, daemon=True, name="cleanup").start()
     threading.Thread(target=P.clear_false_recheck, daemon=True, name="recheck").start()
     threading.Thread(target=check_update, daemon=True, name="update").start()
