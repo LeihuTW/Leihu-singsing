@@ -222,6 +222,23 @@ def cuda_ok() -> bool:
 
 # ---------------------------------------------------------------- 檔案
 
+def unique_path(p: Path, siblings: tuple[str, ...] = ()) -> Path:
+    """2.3.3：下載資料夾裡已經有同名的檔案（或資料夾）時，改成「名稱 (2)」「名稱 (3)」…，不覆蓋、也不會因為
+    舊檔正被播放器開著而匯出失敗。siblings：同一次匯出會一起產生的其他副檔名（例如 .mp3、.mp4），一起避開。"""
+    def taken(q: Path) -> bool:
+        return q.exists() or any(q.with_name(q.name + s).exists() if s.startswith("_") else q.with_suffix(s).exists()
+                                 for s in siblings)
+    if not taken(p):
+        return p
+    stem, suf = (p.stem, p.suffix) if p.suffix and not p.is_dir() else (p.name, "")
+    n = 2
+    while True:
+        q = p.with_name(f"{stem} ({n}){suf}")
+        if not taken(q):
+            return q
+        n += 1
+
+
 def downloads_dir() -> Path:
     """使用者的「下載」資料夾（Windows 會讀系統設定，處理被搬到其他磁碟的情況）。"""
     if sys.platform == "win32":

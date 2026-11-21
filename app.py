@@ -579,7 +579,7 @@ def mixdown(sid):
     kname = f"KEY{key:+d}" if key else "原調"
     sname = f"_{int(round(speed * 100))}%" if abs(speed - 1) > 1e-3 else ""
     vname = "伴奏" if gains["lead"] == 0 else "混音"
-    out = P.downloads_dir() / P.APP_NAME / f"{_safe_name(meta.get('title', '歌曲'))[:50]}_{vname}_{kname}{sname}.{fmt}"
+    out = P.unique_path(P.downloads_dir() / P.APP_NAME / f"{_safe_name(meta.get('title', '歌曲'))[:50]}_{vname}_{kname}{sname}.{fmt}")
 
     def run(report):
         report("混音中", 0.2)
@@ -723,7 +723,7 @@ def export_sheet(sid):
     meta = P.read_meta(d)
     body.setdefault("title", meta.get("title", ""))
     layout = "A4" if body.get("layout") == "a4" else "手機"
-    folder = P.downloads_dir() / P.APP_NAME / f"{SS.safe_name(meta.get('title', '旋律譜'))} 旋律譜（{layout}）"
+    folder = P.unique_path(P.downloads_dir() / P.APP_NAME / f"{SS.safe_name(meta.get('title', '旋律譜'))} 旋律譜（{layout}）")
     files, tonic = SS.render(d, body, folder)
     return jsonify(files=[str(f) for f in files], folder=str(folder), tonic=tonic)
 
@@ -765,7 +765,7 @@ def get_lyrics(sid):
                    recognized=meta.get("lyrics_recognized") is not False or (d / "lyrics_auto.lrc").exists(),
                    reasons=(meta.get("lyrics_quality") or {}).get("reasons", []),
                    language=meta.get("language"), song_language=meta.get("lyrics_language"),
-                   kana_fix=meta.get("kana_fix") or {})
+                   kana_fix=meta.get("kana_fix") or {}, kana_at=meta.get("kana_at") or {})
 
 
 @app.post("/api/furigana")
@@ -787,22 +787,34 @@ def furigana():
 
 @app.post("/api/songs/<sid>/kana")
 def set_kana(sid):
-    """修改這首歌某個漢字詞的讀音（每首歌各自記住）；讀音空白＝恢復自動判斷。"""
+    """修改這首歌某個漢字的讀音（每首歌各自記住）；讀音空白＝恢復。
+    at：只改這一處（那句歌詞＋第幾次出現＋第幾個字，2.3.3）；沒有 at＝整首歌同字都套用。
+    clear_keys：整首套用時，把這個字先前「只改這一處」的設定一起清掉，整首才會一致。"""
     b = request.get_json(force=True) or {}
     base, reading = str(b.get("base") or "").strip()[:40], str(b.get("reading") or "").strip()[:80]
-    if not base:
+    at = str(b.get("at") or "")[:600]
+    if not base and not at:
         raise P.UserError("缺少要修改的字")
     d = P.song_dir(sid)
     with P._META_LOCK:   # 讀出到寫回之間不讓別的執行緒改這首歌的資料
         meta = P.read_meta(d)
         fix = meta.get("kana_fix") or {}
-        if reading:
-            fix[base] = reading
+        pos = meta.get("kana_at") or {}
+        if at:
+            if reading:
+                pos[at] = reading
+            else:
+                pos.pop(at, None)
         else:
-            fix.pop(base, None)
-        meta["kana_fix"] = fix
+            if reading:
+                fix[base] = reading
+            else:
+                fix.pop(base, None)
+            for k in b.get("clear_keys") or []:   # 這個字先前「只改這一處」的設定（前端算好位置）
+                pos.pop(str(k), None)
+        meta["kana_fix"], meta["kana_at"] = fix, pos
         P.write_meta(d, meta)
-    return jsonify(kana_fix=fix)
+    return jsonify(kana_fix=fix, kana_at=pos)
 
 
 @app.post("/api/songs/<sid>/lyrics/use")
@@ -1179,6 +1191,12 @@ def take_export(sid, tid):
     SH.load_take(d, tid)
     title = P.read_meta(d).get("title", "我的演唱")
     base = P.downloads_dir() / P.APP_NAME / f"{_safe_name(title)[:50]}_我的演唱_{tid[:13]}"
+    sib = tuple("." + f for f in ("wav", "mp3", "mp4") if f in opts["formats"]) + (("_成績卡.png",) if "png" in opts["formats"] else ())
+    if any((base.with_name(base.name + s) if s.startswith("_") else base.with_suffix(s)).exists() for s in sib):
+        n = 2   # 同一次錄音匯出過：這次的檔名加上編號，不覆蓋上次的
+        while any((base.with_name(f"{base.name} ({n}){s}") if s.startswith("_") else base.with_name(f"{base.name} ({n})").with_suffix(s)).exists() for s in sib):
+            n += 1
+        base = base.with_name(f"{base.name} ({n})")
     files = ([str(base.with_name(base.name + "_成績卡.png"))] if "png" in opts["formats"] else []) + \
         [str(base.with_suffix("." + f)) for f in ("wav", "mp3", "mp4") if f in opts["formats"]]
     jid = jobs.submit("export", sid, lambda report: SH.export_take(d, tid, opts, base, report), label=tid)
@@ -1458,7 +1476,7 @@ def export_lyrics(sid):
         out = "\n".join(rows)
     folder = P.downloads_dir() / P.APP_NAME
     folder.mkdir(parents=True, exist_ok=True)
-    path = folder / f"{_safe_name(meta.get('title', '歌詞'))}.{fmt}"
+    path = P.unique_path(folder / f"{_safe_name(meta.get('title', '歌詞'))}.{fmt}")
     path.write_text(out, encoding="utf-8-sig" if fmt in ("txt", "srt") else "utf-8")
     return jsonify(path=str(path))
 

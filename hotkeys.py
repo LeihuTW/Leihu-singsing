@@ -9,6 +9,7 @@ ACTIONS = [
     ("play", "播放／暫停", "Ctrl+Alt+Space"),
     ("now", "這句對準", "Ctrl+Alt+A"),
     ("next-line", "下一句對準", "Ctrl+Alt+S"),
+    ("prev-line", "上一句對準", ""),
     ("minus", "目前這句提早 0.1 秒", "Ctrl+Alt+Comma"),
     ("plus", "目前這句延後 0.1 秒", "Ctrl+Alt+Period"),
     ("mode", "原曲／卡拉OK 切換", "Ctrl+Alt+K"),
