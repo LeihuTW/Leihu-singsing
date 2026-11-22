@@ -6,9 +6,35 @@ const NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
 const noteName = m => NAMES[((Math.round(m) % 12) + 12) % 12] + (Math.floor(Math.round(m) / 12) - 1);
 const fmt = (t, dec = 1) => { t = Math.max(0, t); const m = Math.floor(t / 60); const s = t - m * 60; return `${m}:${s.toFixed(dec).padStart(dec ? dec + 3 : 2, "0")}`; };
 const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
+/* 2.3.4：音量類設定另外存在練唱台資料夾（ui_prefs.json）。瀏覽器的儲存空間跟著連接埠走，
+   連接埠一換（例如 8765 被別的程式占用）或用獨立視窗開，就會回到預設音量。 */
+const SERVER_PREFS = ["masterVol", "micGain", "lastVol"];
+(() => {
+  try {
+    const x = new XMLHttpRequest();
+    x.open("GET", "/api/ui-prefs", false);   // 開頁面時同步讀一次：後面的程式一開始就讀得到
+    x.send();
+    if (x.status === 200) {
+      const p = JSON.parse(x.responseText) || {};
+      for (const k of SERVER_PREFS) if (p[k] != null) localStorage.setItem(k, JSON.stringify(p[k]));
+    }
+  } catch {}
+})();
+const _prefQ = {};
+let _prefT = 0;
 const store = {
   get(k, d) { try { const v = localStorage.getItem(k); return v == null ? d : JSON.parse(v); } catch { return d; } },
-  set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} },
+  set(k, v) {
+    try { localStorage.setItem(k, JSON.stringify(v)); } catch {}
+    if (SERVER_PREFS.includes(k)) {   // 拉音量時不用每一下都寫檔：停 0.5 秒再存
+      _prefQ[k] = v; clearTimeout(_prefT);
+      _prefT = setTimeout(() => {
+        const body = JSON.stringify(_prefQ);
+        for (const q of Object.keys(_prefQ)) delete _prefQ[q];
+        fetch("/api/ui-prefs", { method: "POST", headers: { "Content-Type": "application/json" }, body }).catch(() => {});
+      }, 500);
+    }
+  },
 };
 
 /* 字體：粉圓（內建）／楷書／黑體。先套用上次的設定避免閃一下，再跟伺服器的設定同步 */
@@ -40,7 +66,7 @@ function toast(msg, ms = 3500) {
 const S = {
   song: null, pitch: null, notes: [], lines: [], range: [55, 79],
   key: 0, speed: 1, bufs: {}, guide: null,
-  vol: { lead: 1, back: 1, inst: 1, guide: 0, take: 0.9 },
+  vol: Object.assign({ lead: 1, back: 1, inst: 1, guide: 0, take: 0.9 }, store.get("lastVol", {})),   // 2.3.4：沿用上次關閉時的音量
   playing: false, t: 0, startCtx: 0, nodes: {}, loopA: null, loopB: null, zoom: 8,
   mic: null, live: [], liveNow: null, rec: null,
   takes: [], take: null, takeBuf: null,
@@ -1334,7 +1360,7 @@ async function openSong(id) {
   // 歌曲資料裡的預設 KEY 比這台電腦上次記住的新（例如剛從表單匯入或改了預設 KEY）就用預設 KEY
   const useDefault = song.key_set_at && !(saved.at > song.key_set_at * 1000);
   S.key = clamp((useDefault ? song.key : saved.key) || 0, -6, 6); S.speed = useDefault ? 1 : saved.speed || 1;
-  if (saved.vol) Object.assign(S.vol, saved.vol);
+  // 2.3.4：音量不再每首各自記，一律沿用上次調的（開程式時也是上次關閉時的音量）
   S.t = 0; S.loopA = S.loopB = null; S.live = []; S.take = null; S.takeBuf = null; judgeReset();
   keyHintReset();
   computeRange();
@@ -1731,7 +1757,10 @@ async function changeVariant(key, speed) {
   sel.onchange = () => changeVariant(+sel.value, S.speed);
 })();
 $("#speed").onchange = e => changeVariant(S.key, +e.target.value);
-function saveSongPrefs() { if (S.song) store.set(`song:${S.song.id}`, { key: S.key, speed: S.speed, vol: S.vol, at: Date.now() }); }
+function saveSongPrefs() {
+  store.set("lastVol", { lead: S.vol.lead, back: S.vol.back, inst: S.vol.inst, guide: S.vol.guide, take: S.vol.take });
+  if (S.song) store.set(`song:${S.song.id}`, { key: S.key, speed: S.speed, at: Date.now() });
+}
 
 /* 混音 */
 const PRESETS = {

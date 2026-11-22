@@ -489,3 +489,6 @@ body:not(.yt-on) .yt-only { display: none !important; }
 .drop:hover, .drop:focus-visible { border-color: var(--accent); color: var(--ink); }
 .drop .hint { display: block; margin-top: 4px; }
 .logo { user-select: none; }
+
+/* 2.3.4：左上角標誌 */
+.logo-mark { width: 26px; height: 26px; vertical-align: -6px; margin-right: 8px; }

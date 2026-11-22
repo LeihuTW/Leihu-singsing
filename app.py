@@ -173,6 +173,33 @@ def remote_open():
         return jsonify(seq=REMOTE["seq"])
 
 
+UI_PREFS = P.ROOT / "ui_prefs.json"
+UI_PREF_KEYS = {"masterVol", "micGain", "lastVol"}
+
+
+@app.get("/api/ui-prefs")
+def ui_prefs_get():
+    """2.3.4：介面的音量設定（主音量、麥克風增益、各音軌音量），開程式時沿用上次關閉時的值。"""
+    try:
+        return jsonify(json.loads(UI_PREFS.read_text("utf-8")))
+    except Exception:
+        return jsonify({})
+
+
+@app.post("/api/ui-prefs")
+def ui_prefs_set():
+    b = request.get_json(force=True) or {}
+    try:
+        cur = json.loads(UI_PREFS.read_text("utf-8")) if UI_PREFS.exists() else {}
+    except Exception:
+        cur = {}
+    for k, v in b.items():
+        if k in UI_PREF_KEYS:
+            cur[k] = v
+    P.atomic_write_text(UI_PREFS, json.dumps(cur, ensure_ascii=False))
+    return jsonify(ok=True)
+
+
 @app.get("/api/config")
 def get_config():
     cfg = P.load_config()

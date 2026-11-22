@@ -128,6 +128,7 @@ class Api:
                 self._timing = None
         w = webview.create_window("逐句調整 · 雷虎練唱台", url, width=560, height=860, min_size=(320, 360),
                                   background_color="#0E1318", text_select=True)
+        set_window_icon("逐句調整 · 雷虎練唱台")
 
         def closed():
             if self._timing is w:
@@ -228,7 +229,54 @@ class _Existing:
     def kill(self): pass
 
 
+APP_ID = "LeihuTW.LeihuLiantai"
+
+
+def set_app_id() -> None:
+    """2.3.4：讓工作列把練唱台當成自己的程式（用練唱台的圖示），不要併到 Python 底下顯示 Python 的圖示。"""
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(APP_ID)
+    except Exception:
+        pass
+
+
+def set_window_icon(title: str, tries: int = 40) -> None:
+    """2.3.4：把視窗左上角、工作列、Alt+Tab 的小圖示換成練唱台的圖示（pywebview 在 Windows 只會用 python 的圖示）。
+    視窗建好之前找不到，所以在背景每 0.25 秒試一次。"""
+    if sys.platform != "win32":
+        return
+    ico = ROOT / "static" / "icon.ico"
+    if not ico.exists():
+        return
+
+    def run():
+        try:
+            import ctypes
+            from ctypes import wintypes
+            user32 = ctypes.windll.user32
+            user32.FindWindowW.restype = wintypes.HWND
+            user32.LoadImageW.restype = wintypes.HANDLE
+            user32.SendMessageW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
+            for _ in range(tries):
+                hwnd = user32.FindWindowW(None, title)
+                if hwnd:
+                    for which, size in ((1, 32), (0, 16)):   # ICON_BIG、ICON_SMALL
+                        sx = user32.GetSystemMetrics(11 if which else 49) or size   # SM_CXICON／SM_CXSMICON（高 DPI 時更大）
+                        h = user32.LoadImageW(None, str(ico), 1, sx, sx, 0x10)      # IMAGE_ICON, LR_LOADFROMFILE
+                        if h:
+                            user32.SendMessageW(hwnd, 0x80, which, h)              # WM_SETICON
+                    return
+                time.sleep(0.25)
+        except Exception:
+            traceback.print_exc()
+    threading.Thread(target=run, daemon=True, name="window-icon").start()
+
+
 def main():
+    set_app_id()
     try:
         import webview
     except Exception:
@@ -262,8 +310,10 @@ def main():
             version = (ROOT / "VERSION").read_text("utf-8").strip() or version
         except OSError:
             pass
+        title = f"雷虎練唱台 {version}"
+        set_window_icon(title)
         window = webview.create_window(
-            f"雷虎練唱台 {version}", base + "/", width=1380, height=920, min_size=(960, 640),
+            title, base + "/", width=1380, height=920, min_size=(960, 640),
             background_color="#0E1318", text_select=True, js_api=Api(base),
         )
         done: list = []
