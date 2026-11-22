@@ -4022,7 +4022,7 @@ def similarity(recognized: str, candidate: str) -> float | None:
     return round(sum(x.size for x in m.get_matching_blocks()) / len(a), 3)
 
 
-USER_AGENT = "LeihuLiantai/2.3.4 (+https://github.com/LeihuTW/Leihu-singsing)"   # HTTP 標頭只能用英文字
+USER_AGENT = "LeihuLiantai/2.3.5 (+https://github.com/LeihuTW/Leihu-singsing)"   # HTTP 標頭只能用英文字
 
 
 def _http_json(url: str, headers: dict | None = None, timeout: int = 8):
@@ -4450,10 +4450,14 @@ def voice_fit(times: list[float], d: Path, cand_dur: float | None = None, dur: f
         return float(np.exp(-(dist ** 2) / (2 * 0.3 ** 2)).sum())
     base = fit(ts)
     best = (base, 1.0, 0.0)
-    # 1.6.8：MV 版前奏常常長很多，範圍放寬到 ±60 秒；先每 0.25 秒粗找，再在最佳位置附近每 0.02 秒細找
+    t0 = float(ts.min())
+    # 1.6.8：MV 版前奏常常長很多，範圍放寬（2.3.5：往後最多 120 秒）；先每 0.25 秒粗找，再在最佳位置附近每 0.02 秒細找
+    # 2.3.5：不能把任何一句移到 0 秒以前——以前會被擠在 0 秒、好幾句黏在一起（〈オーケストラ〉前 6 句）
     for sc in scales:
-        coarse = max(((fit(ts * sc + off), float(off)) for off in np.arange(-60, 60.01, 0.25)))
-        for off in np.arange(coarse[1] - 0.5, coarse[1] + 0.501, 0.02):
+        lo = max(-60.0, -t0 * sc - 0.3)
+        hi = 120.0   # THE FIRST TAKE、現場版開頭常有一分鐘以上的講話（〈オーケストラ〉約 66 秒）
+        coarse = max(((fit(ts * sc + off), float(off)) for off in np.arange(lo, hi + 0.01, 0.25)))
+        for off in np.arange(max(lo, coarse[1] - 0.5), coarse[1] + 0.501, 0.02):
             v = fit(ts * sc + off)
             if v > best[0] + 1e-9:
                 best = (v, sc, round(float(off), 2))

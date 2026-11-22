@@ -2403,6 +2403,7 @@ $("#fl-auto").onclick = async () => {
   try {
     const r = await api(`/api/songs/${S.song.id}/lyrics/autoshift`, { json: { times: S.lines.map(l => l.t) } });
     if (r.scale === 1 && !r.offset) return toast("歌詞時間和歌聲已經對得上，不需要調整", 3000);
+    if (S.lines.length && S.lines[0].t * r.scale + r.offset < -0.3) return toast("自動校正會把開頭幾句移到 0 秒以前，已略過；請改用「對準目前位置」", 5000);
     const f = t => Math.max(0, Math.round((t * r.scale + r.offset) * 100) / 100);
     for (const l of S.lines) { l.t = f(l.t); if (l.chars) l.chars.forEach(u => (u.t = f(u.t))); }
     setLineEnds(); commitLines(true);
