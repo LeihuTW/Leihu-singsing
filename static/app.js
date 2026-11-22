@@ -2150,6 +2150,39 @@ function romaji(h, particle) {
   return s;
 }
 
+/* 羅馬拼音 → 平假名（2.3.5：羅馬拼音模式直接打 kaze 修改讀音）。也接受 si/ti/tu/hu/zi 這類寫法、ō 長音 */
+const KANA_OF = (() => {
+  const m = {};
+  for (const [k, v] of Object.entries(ROMA)) if (!"ぁぃぅぇぉゃゅょゎゐゑをゔ".includes(k) && !m[v]) m[v] = k;
+  Object.assign(m, { si: "し", ti: "ち", tu: "つ", hu: "ふ", zi: "じ", di: "ぢ", du: "づ", wo: "を", vu: "ゔ", la: "ぁ", li: "ぃ", lu: "ぅ", le: "ぇ", lo: "ぉ",
+    xa: "ぁ", xi: "ぃ", xu: "ぅ", xe: "ぇ", xo: "ぉ", xtu: "っ", ltu: "っ", xya: "ゃ", xyu: "ゅ", xyo: "ょ",
+    fa: "ふぁ", fi: "ふぃ", fe: "ふぇ", fo: "ふぉ", ti_: "てぃ", di_: "でぃ", she: "しぇ", che: "ちぇ", je: "じぇ", wi: "うぃ", we: "うぇ" });
+  for (const b of "きしちにひみりぎじびぴぢ") {
+    const r = ROMA[b], stem = /^(sh|ch|j)/.test(r) ? r.slice(0, -1) : r.slice(0, -1) + "y";
+    for (const [s, v] of [["a", "ゃ"], ["u", "ゅ"], ["o", "ょ"]]) if (!m[stem + s]) m[stem + s] = b + v;
+  }
+  Object.assign(m, { sya: "しゃ", syu: "しゅ", syo: "しょ", tya: "ちゃ", tyu: "ちゅ", tyo: "ちょ", cya: "ちゃ", cyu: "ちゅ", cyo: "ちょ",
+    zya: "じゃ", zyu: "じゅ", zyo: "じょ", jya: "じゃ", jyu: "じゅ", jyo: "じょ" });
+  return m;
+})();
+function roma2hira(s) {
+  s = s.toLowerCase().replace(/ā/g, "aa").replace(/ī/g, "ii").replace(/ū/g, "uu").replace(/ē/g, "ee").replace(/ō/g, "ou").replace(/[\s'’-]/g, (c) => c === "'" || c === "’" ? "'" : "");
+  let out = "", i = 0;
+  while (i < s.length) {
+    const c = s[i];
+    if (c === "'") { i++; continue; }
+    if (c === "n" && (s[i + 1] === "n" || s[i + 1] === "'")) { out += "ん"; i += 2; continue; }
+    if (c === "n" && (i + 1 >= s.length || !/[aiueoy]/.test(s[i + 1]))) { out += "ん"; i++; continue; }
+    if (/[bcdfghjkmpqrstvwxyz]/.test(c) && s[i + 1] === c) { out += "っ"; i++; continue; }   // kk → っk
+    if (c === "t" && s[i + 1] === "c" && s[i + 2] === "h") { out += "っ"; i++; continue; }   // tch → っch
+    let hit = "";
+    for (let L = 3; L >= 1; L--) { const seg = s.slice(i, i + L); if (KANA_OF[seg]) { hit = seg; break; } }
+    if (!hit) { out += c; i++; continue; }   // 不認得的字母原樣留下（會提示讀音對不上）
+    out += KANA_OF[hit]; i += hit.length;
+  }
+  return out;
+}
+
 /* 這句是整首歌裡第幾次出現同樣的歌詞（副歌重複時，每一次可以各自改讀音） */
 function lineRep(li) {
   if (li == null || li < 0 || !S.lines[li]) return 0;
@@ -2179,11 +2212,14 @@ function kanaSegs(text, li) {
       const parts = fixedParts(t, txt, rep, ctr), surf = parts.map(p => p[0]).join("");
       if (!JA_RE.test(surf)) return [surf, ""];
       const ro = romaji(parts.map(([b, r]) => r || b).join(""), t.pt);
-      return [surf, KANJI_RE.test(ro) ? "" : ro];   // 字典查不到讀音的字：不標（可以切到假名標音補上讀音）
+      // 2.3.5：含漢字的詞帶上每個部分（字、讀音、位置 key），羅馬拼音模式也能點一下修改
+      const info = KANJI_RE.test(surf) ? parts : null;
+      return [surf, KANJI_RE.test(ro) ? "" : ro, info];   // 字典查不到讀音的字：不標（可以點一下輸入）
     });
   }
   return toks.flatMap(t => fixedParts(t, txt, rep, ctr)).map(([b, r]) => [b, r]);
 }
+function romaSegsKeyed(text, li) { return kanaSegs(text, li); }
 function kanaSegsKeyed(text, li) {   // 平假名模式：多帶每個字的位置 key，給點一下修改用
   const toks = S.furiOn && text ? FURI.map.get(text) : null;
   if (!toks) return null;
@@ -2192,6 +2228,13 @@ function kanaSegsKeyed(text, li) {   // 平假名模式：多帶每個字的位�
 }
 function furiHTML(text, li) {
   const edit = S.kanaMode === "hira";
+  if (S.kanaMode === "romaji") {   // 2.3.5：羅馬拼音模式也能點一下修改（整個詞的讀音）
+    const segs = kanaSegs(text, li);
+    if (!segs) return null;
+    return segs.map(([b, t, info]) => (t || info)
+      ? `<ruby${info ? ` data-b="${escH(b)}" data-parts="${escH(JSON.stringify(info))}" title="${t ? "點一下修改讀音" : "查不到讀音，點一下輸入"}"` : ""}>${escH(b)}<rt>${escH(t)}</rt></ruby>`
+      : escH(b)).join("");
+  }
   const segs = edit ? kanaSegsKeyed(text, li) : kanaSegs(text, li);
   if (!segs) return null;
   return segs.map(([b, t, key]) => (t || (edit && KANJI_RE.test(b)))
@@ -2254,8 +2297,9 @@ $("#lyr-kana").onchange = e => {
    勾「整首歌的同字都套用」才會全部一起改。清空＝恢復（這一處回到整首設定或字典判斷） */
 $("#lyr").addEventListener("click", e => {
   const rb = e.target.closest("ruby[data-b]");
-  if (!rb || !S.song || S.kanaMode !== "hira") return;
+  if (!rb || !S.song || (S.kanaMode !== "hira" && !rb.dataset.parts)) return;
   e.stopPropagation();
+  if (rb.dataset.parts) return romaEdit(rb);
   const base = rb.dataset.b, at = rb.dataset.k || "", cur = rb.querySelector("rt")?.textContent || "";
   document.querySelector(".kana-pop")?.remove();
   const pop = document.createElement("div");
@@ -2287,6 +2331,53 @@ $("#lyr").addEventListener("click", e => {
   pop.addEventListener("focusout", () => setTimeout(() => { if (!pop.contains(document.activeElement)) finish(true); }, 0));
   all.onkeydown = ev => { ev.stopPropagation(); if (ev.key === "Enter") finish(true); else if (ev.key === "Escape") finish(false); };
 }, true);
+/* 羅馬拼音模式修改一個詞的讀音：打羅馬拼音（或平假名），依送假名拆回每個漢字，存成「只改這一處」或整首套用 */
+function romaEdit(rb) {
+  const parts = JSON.parse(rb.dataset.parts), word = rb.dataset.b, cur = rb.querySelector("rt")?.textContent || "";
+  const kanjiParts = parts.filter(p => KANJI_RE.test(p[0]));
+  const at = kanjiParts.every(p => p[2]);
+  document.querySelector(".kana-pop")?.remove();
+  const pop = document.createElement("div");
+  pop.className = "kana-pop";
+  pop.innerHTML = `<input class="kana-edit" placeholder="羅馬拼音或平假名，例如 kaze"><label><input type="checkbox"> 整首歌的「${escH(kanjiParts.map(p => p[0]).join("、"))}」都套用</label>`;
+  const box = pop.querySelector("input.kana-edit"), all = pop.querySelector("input[type=checkbox]");
+  box.value = cur; box.setAttribute("aria-label", `「${word}」的讀音`);
+  if (!at) { all.checked = true; all.disabled = true; }
+  const rc = rb.getBoundingClientRect();
+  pop.style.left = Math.max(8, Math.min(innerWidth - 228, rc.left + rc.width / 2 - 110)) + "px";
+  pop.style.top = Math.max(8, rc.top - 64) + "px";
+  document.body.appendChild(pop); box.focus(); box.select();
+  let done = false;
+  const finish = async save => {
+    if (done) return; done = true; pop.remove();
+    const raw = box.value.trim(), whole = all.checked;
+    if (!save || (raw === cur && !whole)) return;
+    const hira = toHira(/[a-zāīūēō]/i.test(raw) ? roma2hira(raw) : raw);
+    // 依送假名把整個詞的讀音拆回每個漢字：漢字部分 (.+?)，假名部分照原樣
+    let groups = null;
+    if (hira) {
+      const esc = x => x.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const re = new RegExp("^" + parts.map(p => KANJI_RE.test(p[0]) ? "(.+?)" : esc(toHira(p[0]))).join("") + "$");
+      const m = hira.match(re);
+      if (!m) return toast(`「${raw}」和「${word}」的送假名對不上，請確認拼法（例如 kie＝消え）`, 4000);
+      groups = m.slice(1);
+    }
+    try {
+      let r = null;
+      for (let gi = 0; gi < kanjiParts.length; gi++) {
+        const [b, , key] = kanjiParts[gi], v = groups ? groups[gi] : "";
+        const clear = [];
+        if (whole) S.lines.forEach((l, li) => (kanaSegsKeyed(l.text, li) || []).forEach(([bb, , k]) => { if (bb === b && k && S.kanaAt[k] != null) clear.push(k); }));
+        r = await api(`/api/songs/${S.song.id}/kana`, { json: whole ? { base: b, reading: v, clear_keys: clear } : { at: key, base: b, reading: v } });
+      }
+      S.kanaFix = r.kana_fix || {}; S.kanaAt = r.kana_at || {}; resetLyrNodes();
+      toast(hira ? `「${word}」改唸「${romaji(hira)}」${whole ? "，整首歌都會套用" : "（只改這一處）"}` : `「${word}」恢復原本的讀音`, 2500);
+    } catch (err) { toast(err.message); }
+  };
+  box.onkeydown = ev => { ev.stopPropagation(); if (ev.key === "Enter") finish(true); else if (ev.key === "Escape") finish(false); };
+  pop.addEventListener("focusout", () => setTimeout(() => { if (!pop.contains(document.activeElement)) finish(true); }, 0));
+  all.onkeydown = ev => { ev.stopPropagation(); if (ev.key === "Enter") finish(true); else if (ev.key === "Escape") finish(false); };
+}
 $("#lyr-color").onclick = () => { S.charColor = !S.charColor; store.set("charColor", S.charColor); syncColorBtn(); toast(S.charColor ? "已開啟逐字上色" : "已關閉逐字上色：只標出正在唱的那一句", 2000); };
 syncColorBtn();
 $("#lyr-show").onclick = () => { S.showLyr = !S.showLyr; if (S.showLyr && !S.showMel) setShowMel(true); if (!S.showLyr) S.editLyr = false; store.set("showLyr", S.showLyr); syncLyrButtons(); };
