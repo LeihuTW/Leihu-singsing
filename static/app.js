@@ -272,9 +272,9 @@ S.masterVol = store.get("masterVol", 1);
 function syncLiveVol() { $("#live-vol").value = String(S.masterVol); $("#live-vol-v").textContent = Math.round(S.masterVol * 100); if (S.master) S.master.gain.value = S.masterVol; syncMonGain(); }
 $("#live-vol").oninput = e => { S.masterVol = +e.target.value; store.set("masterVol", S.masterVol); syncLiveVol(); };
 syncLiveVol();
-function liveAdjust(which, d) {
+function liveAdjust(which, d, alone) {
   if (!S.song || !S.lines.length) return toast("這首歌還沒有含時間的歌詞");
-  const t = cur(), from = $("#lv-from").checked;
+  const t = cur(), from = !alone && $("#lv-from").checked;
   let k = Math.max(0, lineIndexAt(t));
   if (which === "next") { k = lineIndexAt(t) + 1; if (k >= S.lines.length) return toast("後面沒有歌詞了"); }
   if (which === "prev") { k = lineIndexAt(t) - 1; if (k < 0) return toast("前面沒有歌詞了"); }
@@ -2285,25 +2285,46 @@ function moveLineTo(x, nt) {
   x.t = nt;
   if (x.chars) x.chars.forEach(u => (u.t = Math.max(0, Math.round((u.t + d) * 100) / 100)));
 }
-function keepOrder(i) {
+/* 第 i 句移動了 d 秒之後，維持歌詞順序。
+   2.3.4：被擠到的相鄰句子「跟著移動同樣的秒數」（原本的間隔不變），不再擠成只差 0.1 秒——
+   以前擠在一起的兩句，之後不管移哪一句都會互相推，看起來就像黏在一起一起動。 */
+/* 一句大概要唱多久：這首歌每個字平均幾秒 × 字數（1.5～8 秒） */
+function estLineDur(l) {
+  const r = [];
+  for (let k = 0; k + 1 < S.lines.length; k++) {
+    const g = S.lines[k + 1].t - S.lines[k].t, n = S.lines[k].text.replace(/\s/g, "").length;
+    if (g > 0.5 && g < 15 && n) r.push(g / n);
+  }
+  r.sort((a, b) => a - b);
+  const spc = r.length ? r[r.length >> 1] : 0.35;
+  return Math.max(1.5, Math.min(8, spc * Math.max(1, l.text.replace(/\s/g, "").length)));
+}
+function keepOrder(i, d) {
   let moved = 0;
+  const GAP = 0.1, STUCK = 0.3;   // 和移動的那句只差不到 0.3 秒＝以前被擠在一起的，推開到合理的位置
+  if (d == null) d = 0;
   for (let j = i - 1; j >= 0; j--) {   // 前面的句子：不能晚於下一句
-    const lim = Math.round((S.lines[j + 1].t - 0.1) * 100) / 100;
-    if (S.lines[j].t <= lim) break;
-    moveLineTo(S.lines[j], lim); moved++;
+    const lim = S.lines[j + 1].t - GAP;
+    if (S.lines[j].t <= lim + 1e-6) break;
+    const to = d < 0 ? Math.min(S.lines[j].t + d, lim) : lim;
+    moveLineTo(S.lines[j], Math.max(0, Math.round(to * 100) / 100)); moved++;
   }
   for (let j = i + 1; j < S.lines.length; j++) {   // 後面的句子：不能早於上一句
-    const lim = Math.round((S.lines[j - 1].t + 0.1) * 100) / 100;
-    if (S.lines[j].t >= lim) break;
-    moveLineTo(S.lines[j], lim); moved++;
+    const lim = S.lines[j - 1].t + GAP;
+    if (S.lines[j].t >= lim - 1e-6) break;
+    let to = d > 0 ? Math.max(S.lines[j].t + d, lim) : lim;
+    if (j === i + 1 && d > 0 && S.lines[j].t - (S.lines[i].t - d) < STUCK)
+      to = Math.max(to, S.lines[i].t + estLineDur(S.lines[i]));   // 黏在一起的下一句：放到這句大概唱完的位置
+    moveLineTo(S.lines[j], Math.round(to * 100) / 100); moved++;
   }
   return moved;
 }
 function shiftLine(l, nt) {
   const i = S.lines.indexOf(l);
   if (i < 0) return;
+  const d = nt - l.t;
   moveLineTo(l, nt);
-  const moved = keepOrder(i);
+  const moved = keepOrder(i, d);
   if (moved) toast(`為了維持歌詞順序，${moved} 句相鄰的歌詞也一起移動了`, 2500);
   setLineEnds(); commitLines(false); $("#timing-box").dataset.dirty = "1";
 }
@@ -2326,7 +2347,7 @@ function shiftFrom(i, nt) {
   const d = Math.round((Math.max(0, nt) - l.t) * 100) / 100;
   if (!d) return;
   for (const x of S.lines.slice(i)) moveLineTo(x, x.t + d);
-  keepOrder(i);   // 往前移時，前面時間太晚的句子推到這句之前（順序不變）
+  keepOrder(i, d);   // 往前移時，前面時間太晚的句子跟著往前（間隔不變、順序不變）
   setLineEnds(); commitLines(true);
   toast(`從「${l.text.slice(0, 14)}${l.text.length > 14 ? "…" : ""}」起 ${S.lines.length - i} 句${d > 0 ? "延後" : "提前"} ${Math.abs(d).toFixed(2)} 秒`, 2500);
 }
@@ -3771,10 +3792,10 @@ document.addEventListener("keydown", e => {
   else if (e.code === "ArrowLeft") seek(cur() - 3);
   else if (e.code === "ArrowRight") seek(cur() + 3);
   // 2.3.3：九宮格 1／2／3 ＝ 上一句／這一句／下一句「從現在開始」（播放中邊聽邊對，暫停時也可以）
-  // 「後面的句子一起移動」照直播操作區那個勾選；不管 NumLock 有沒有開都可以用
+  // 只移那一句（後面的句子不跟著平移；撞到相鄰的句子才把它推開、間隔不變）；不管 NumLock 有沒有開都可以用
   else if (/^Numpad[123]$/.test(e.code) && !e.ctrlKey && !e.altKey && !e.metaKey && S.numLyr) {
     e.preventDefault();
-    liveAdjust({ Numpad1: "prev", Numpad2: "cur", Numpad3: "next" }[e.code]);
+    liveAdjust({ Numpad1: "prev", Numpad2: "cur", Numpad3: "next" }[e.code], null, true);   // 一句一句分別移動
   }
 });
 
