@@ -1709,9 +1709,22 @@ function seek(t) {
 }
 $("#play").onclick = () => (S.playing || S.wantPlay ? pause() : play());
 
+/* 2.3.5：歌詞開頭的「歌名 - 歌手」標題行、作詞作曲這類資訊行（線上歌詞常有，例如「五天幾年 - 林凡」在 0:02） */
+const CREDIT_RE = /^\s*(作词|作曲|编曲|作詞|編曲|制作人|製作人|制作|製作|监制|監製|演唱|原唱|词|詞|曲|混音|录音|錄音|和声|和聲|吉他|贝斯|貝斯|鼓|弦乐|弦樂|出品|发行|發行|OP|SP|Lyrics|Composer|Arranger|Producer)\s*[:：]/i;
+function isInfoLine(text) {
+  const t = (text || "").trim();
+  if (!t) return true;
+  if (CREDIT_RE.test(t)) return true;
+  const sides = t.split(/\s+[-–—]\s+/);
+  if (sides.length !== 2 || !S.song) return false;
+  const n = s => (s || "").replace(/\(.*?\)|（.*?）/g, "").toLowerCase().replace(/[\s\p{P}\p{S}]/gu, "");
+  const T = n(S.song.title), A = n(S.song.artist);
+  const hit = q => !!q && ((T && (T.includes(q) || q.includes(T))) || (A && (A.includes(q) || q.includes(A))));
+  return sides.some(p => hit(n(p)));
+}
 /* 跳過前奏：跳到第一句歌詞（沒有歌詞就用第一個旋律音）前 5 秒 */
 function introSkipTime() {
-  const first = S.lines.find(l => l.t != null && l.text && l.text.trim());
+  const first = S.lines.find(l => l.t != null && l.text && !isInfoLine(l.text));
   const t = first ? first.t : (S.notes.length ? S.notes[0].s : null);
   return t == null ? null : Math.max(0, t - 5);
 }

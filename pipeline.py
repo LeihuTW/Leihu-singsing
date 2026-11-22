@@ -3997,9 +3997,21 @@ def clean_lrc(text: str, track: str = "", artist: str = "") -> str:
     """去掉作詞作曲等資訊行、「歌手 - 歌名」標題行與空白行。"""
     out = []
     title_lines = {f"{artist} - {track}", f"{track} - {artist}"} if track and artist else set()
+
+    def n(s: str) -> str:
+        s = re.sub(r"\(.*?\)|（.*?）", "", s or "")
+        return "".join(ch for ch in s.lower() if ch.isalnum())
+    T, A = n(track), n(artist)
+
+    def title_line(body: str) -> bool:
+        # 2.3.5：「巴黎草莓 - 許茹芸 (Valen Hsu)」這種標題行，歌手名後面多了英文名也要認得
+        sides = re.split(r"\s+[-–—]\s+", body)
+        if len(sides) != 2:
+            return False
+        return any(q and ((T and (q in T or T in q)) or (A and (q in A or A in q))) for q in map(n, sides))
     for line in (text or "").splitlines():
         body = re.sub(r"\[[^\]]*\]", "", line).strip()
-        if not body or _CREDIT.match(body) or body in title_lines or \
+        if not body or _CREDIT.match(body) or body in title_lines or title_line(body) or \
                 re.match(r"^\[(ti|ar|al|by|offset|length|re|id|hash|sign|qq|total):", line, re.I):
             continue
         out.append(line.strip())
