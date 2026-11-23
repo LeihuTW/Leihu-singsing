@@ -1451,6 +1451,48 @@ HQV_FILES = {k: MODEL_FILES[k] for k in (HQ_VOCAL, _HQ_VOCAL_YAML)}
 HQV_DL = {"state": "idle", "got": 0, "total": HQV_FILES[HQ_VOCAL][0], "error": ""}
 
 
+STD_VOCAL = "UVR-MDX-NET-Inst_HQ_3.onnx"
+_HQ_FAIL = {"vocal": 0, "kara": 0}   # 這次執行中高品質模型失敗幾次；連續失敗 2 次就先不用（重開練唱台再試）
+
+
+def _hq_fail_note(d: Path, what: str, e: Exception) -> None:
+    msg = f"高品質{what}分離模型無法使用，這首改用標準模型：{str(e)[:160]}"
+    with _META_LOCK:
+        meta = read_meta(d)
+        meta["notes"] = [x for x in meta.get("notes", []) if not x.startswith(f"高品質{what}分離模型無法使用")] + [msg]
+        write_meta(d, meta)
+_MODEL_CHECKED: set = set()
+
+
+def _check_model_file(name: str) -> None:
+    """模型載入失敗時核對檔案（大小、SHA-256），不對就刪掉讓下次重新下載。每個模型一次執行只核對一次。"""
+    spec = MODEL_FILES.get(name)
+    p = MODELS / "uvr" / name
+    if not spec or not p.exists() or name in _MODEL_CHECKED:
+        return
+    _MODEL_CHECKED.add(name)
+    size, sha, _ = spec
+    try:
+        bad = (size and p.stat().st_size != size) or (sha and _sha256(p) != sha)
+    except OSError:
+        bad = False
+    if bad:
+        print(f"[separate] 模型檔 {name} 核對不正確，已刪除，下次會重新下載", flush=True)
+        p.unlink(missing_ok=True)
+        for tr in (HQV_DL, HQ_DL):
+            tr.update(state="idle")
+    # 設定檔（yaml）也一起看：下載到錯誤頁面時會是 HTML
+    for cfgname, (csize, csha, _) in MODEL_FILES.items():
+        if cfgname.endswith(".yaml") and name.rsplit(".", 1)[0] in cfgname:
+            cp = MODELS / "uvr" / cfgname
+            try:
+                if cp.exists() and ((csha and _sha256(cp) != csha) or cp.read_bytes()[:20].lstrip().startswith(b"<")):
+                    print(f"[separate] 設定檔 {cfgname} 不正確，已刪除", flush=True)
+                    cp.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+
 def hqv_ready() -> bool:
     return _files_ready(HQV_FILES)
 
@@ -1718,7 +1760,7 @@ def hqv_status() -> dict:
 def vocal_model(cfg: dict) -> str:
     """要用的人聲／伴奏分離模型。高品質模型還沒下載好時，這首先用標準模型，模型在背景下載。"""
     q = cfg.get("vocal_quality", "auto")
-    if q == "high" or (q == "auto" and cuda_ok()):
+    if (q == "high" or (q == "auto" and cuda_ok())) and _HQ_FAIL["vocal"] < 2:
         if hqv_ready():
             return HQ_VOCAL
         start_hqv_download()
@@ -1728,7 +1770,7 @@ def vocal_model(cfg: dict) -> str:
 def karaoke_model(cfg: dict) -> str:
     """要用的主唱／合音分離模型。高品質模型還沒下載好時，這首先用標準模型，模型在背景下載。"""
     q = cfg.get("karaoke_quality", "auto")
-    if q == "high" or (q == "auto" and cuda_ok()):
+    if (q == "high" or (q == "auto" and cuda_ok())) and _HQ_FAIL["kara"] < 2:
         if hq_ready():
             return HQ_KARAOKE
         start_hq_download()
@@ -2060,7 +2102,36 @@ def separate_uvr(d: Path, cfg: dict, report) -> None:
     ensure_model(vmodel, _dl_report(report, "人聲分離模型", 0.07))
     vlabel = "分離人聲與伴奏" + ("（直播中：CPU 輕量處理，下播後自動補做高品質）" if cpu else "") + ("（高品質）" if vhq else "（高品質模型下載中，這首先用標準模型）" if HQV_DL["state"] == "downloading" else "")
     report(vlabel, 0.08)
-    outs = _separate(vmodel, stem_path(d, "mix"), tmp, overlap, autocast, vlabel, report, 0.08, 0.26, cpu)
+    try:
+        try:
+            outs = _separate(vmodel, stem_path(d, "mix"), tmp, overlap, autocast, vlabel, report, 0.08, 0.26, cpu)
+        except JobCancelled:
+            raise
+        except Exception as e:
+            if not (vhq and autocast) or "out of memory" in str(e).lower() or "GpuStalled" in type(e).__name__:
+                raise
+            _AUTOCAST["bad"] = True   # 混合精度在這張顯示卡上出問題：之後都改用一般精度
+            log_error("autocast vocal separation", e)
+            outs = _separate(vmodel, stem_path(d, "mix"), tmp, overlap, False, vlabel, report, 0.08, 0.26, cpu)
+    except JobCancelled:
+        raise
+    except Exception as e:
+        if not vhq or type(e).__name__ == "GpuStalled":
+            raise
+        # 2.3.5：高品質人聲模型載入或執行失敗（模型檔損壞、顯示卡不支援…）：改用標準模型，不要整首退回聲像分離。
+        # 模型檔核對不過就刪掉，下次會重新下載
+        print(f"[separate] 高品質人聲分離失敗，改用標準模型：{type(e).__name__}: {e}", flush=True)
+        log_error("hq vocal separation", e)
+        _check_model_file(vmodel)
+        _HQ_FAIL["vocal"] += 1
+        _hq_fail_note(d, "人聲", e)
+        vmodel, vhq = cfg.get("separation_model") or STD_VOCAL, False
+        vlabel = "分離人聲與伴奏（高品質模型失敗，這首先用標準模型）"
+        report(vlabel, 0.08)
+        ensure_model(vmodel, _dl_report(report, "人聲分離模型", 0.07))
+        shutil.rmtree(tmp, ignore_errors=True)
+        tmp.mkdir()
+        outs = _separate(vmodel, stem_path(d, "mix"), tmp, overlap, autocast, vlabel, report, 0.08, 0.26, cpu)
     update_meta(d, vocal_model="bs_roformer" if vhq else "mdx")   # 之後可以找出還沒用新模型處理的歌
     voc = tmp / "vocals_only.wav"
     _pick(outs, "vocals").replace(voc)
@@ -2096,6 +2167,10 @@ def separate_uvr(d: Path, cfg: dict, report) -> None:
             raise
         # 高品質模型下載失敗或顯示卡記憶體不夠：改用標準模型，不要整首失敗
         print(f"[separate] 高品質主唱分離失敗，改用標準模型：{type(e).__name__}: {e}", flush=True)
+        if "out of memory" not in str(e).lower():
+            _check_model_file(HQ_KARAOKE)
+            _HQ_FAIL["kara"] += 1
+            _hq_fail_note(d, "主唱", e)
         kara = cfg["karaoke_model"]
         report("把人聲分成主唱與合音（標準）", 0.35)
         ensure_model(kara, _dl_report(report, "主唱分離模型", 0.35))

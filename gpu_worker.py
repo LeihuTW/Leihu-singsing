@@ -144,12 +144,28 @@ def t_separate(P, progress, model: str, inp: str, out: str, overlap: int, autoca
                     # 高品質模型（Roformer）每一段音訊預設重複算 4 次再平均；2 次的結果幾乎一樣，時間約省一半
                     mdxc_params={"segment_size": 256, "override_model_segment_size": False, "batch_size": None,
                                  "overlap": overlap, "pitch_shift": 0})
+    # 2.3.5：audio-separator 模型載入失敗時會直接 sys.exit(1)，錯誤只剩「SystemExit: 1」看不出原因。
+    # 把它的錯誤訊息收起來，改丟一般的錯誤，主程式才能改用標準模型、也能在歌曲清單上顯示真正的原因
+    import logging
+    errs: list[str] = []
+
+    class _Grab(logging.Handler):
+        def emit(self, rec):
+            if rec.levelno >= logging.ERROR:
+                errs.append(rec.getMessage())
+    grab = _Grab()
+    logging.getLogger("audio_separator").addHandler(grab)
     try:
-        sep.load_model(model_filename=model)
+        try:
+            sep.load_model(model_filename=model)
+        except SystemExit:
+            why = next((e for e in errs if e.startswith("Error:") or "Failed" in e), errs[0] if errs else "")
+            raise RuntimeError(f"模型載入失敗（{model}）：{why[:300] or '原因不明'}") from None
         with P._sep_progress(label, progress, start, span):
             outs = sep.separate(inp)
         return [str(p) for p in P._outputs(outs, Path(out))]
     finally:
+        logging.getLogger("audio_separator").removeHandler(grab)
         # 確實刪掉模型與 ONNX session（ONNX Runtime 的顯示卡記憶體池要 session 被刪掉才會還）
         mi = getattr(sep, "model_instance", None)
         if mi is not None:
