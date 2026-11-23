@@ -421,7 +421,11 @@ def _resubmit(sid: str, label: str) -> None:
                 P.log_error("after_process", e)
         jobs.submit("process", sid, run, label="all")
         return
-    jobs.submit("process", sid, P.process_song(sid, label.split(",")), label=label)
+    parts = label.split(",")
+    if "import" not in parts and "lyrics" not in parts:
+        submit_unfinished(sid, parts)   # 補做分離／旋律，做完沒歌詞的順便找線上歌詞
+    else:
+        jobs.submit("process", sid, P.process_song(sid, parts), label=label)
 
 
 def restore_queue() -> None:
@@ -971,6 +975,24 @@ def job_cancel(jid):
     return jsonify(ok=True)
 
 
+def submit_unfinished(sid: str, steps: list[str]) -> str:
+    """2.3.5：補做沒處理完的歌（分離、旋律），做完如果還沒有歌詞，就上網找歌詞並套用最相符的版本。
+    以前重開練唱台時佇列不會保存，匯入到一半的歌會一直停在「旋律未完成」「無歌詞」。"""
+    proc = P.process_song(sid, steps)
+
+    def run(report, sid=sid, proc=proc):
+        proc(report)
+        d = P.song_dir(sid)
+        meta = P.read_meta(d)
+        if not (d / "lyrics.lrc").exists() and not meta.get("lyrics_source") and not meta.get("lyrics_pending"):
+            try:
+                P.search_lyrics_later(d, P.load_config(), apply_first=True)
+            except Exception as e:
+                P.log_error("search_lyrics_later", e)
+        prerender_key(sid)
+    return jobs.submit("process", sid, run, label=",".join(steps))
+
+
 @app.post("/api/songs/<sid>/prioritize")
 def prioritize(sid):
     """2.1.1「優先處理」：這首歌排到處理佇列最前面。
@@ -996,7 +1018,7 @@ def prioritize(sid):
         steps = [s for s in ("separate", "pitch") if not st.get(s)]
         if not st.get("separate"):
             steps = ["separate", "pitch"]
-        jid = jobs.submit("process", sid, P.process_song(sid, steps), label=",".join(steps))
+        jid = submit_unfinished(sid, steps)
         what = "process"
     elif meta.get("separation") == "uvr" and meta.get("vocal_model") != "bs_roformer" \
             and P.hqv_ready() and P.vocal_model(P.load_config()) == P.HQ_VOCAL:
@@ -1665,15 +1687,25 @@ def upgrade_separation():
     with _SETLIST_LOCK:
         sl = {i.get("id") for i in _setlist_read()["items"]}
     songs = sorted(P.list_songs(), key=lambda m: (-P.usage_score(m, sl), -(m.get("created") or 0)))   # 常唱的先做
+    unfinished = 0
+    busy = {j.get("song") for j in jobs.active() if j.get("kind") == "process"}
     for s in songs:
         stp = s.get("steps") or {}
-        if not stp.get("separate") or (s.get("vocal_model") == "bs_roformer" and stp.get("pitch")) or s.get("separation") != "uvr":
+        if s["id"] in busy:
+            continue   # 已經在排或正在做
+        if not stp.get("import"):
+            continue   # 音檔還沒下載好（要先下載）
+        if not stp.get("separate") or not stp.get("pitch") or s.get("separation") != "uvr":
+            # 2.3.5：從來沒分離完（匯入到一半被中斷）、只分析到一半、或 AI 分離失敗改用聲像分離的：也一起補做
+            submit_unfinished(s["id"], ["separate", "pitch"])
+            n += 1
+            unfinished += 1
             continue
-        if jobs.find("process", s["id"], "upgrade") or jobs.find("process", s["id"], "max"):
+        if s.get("vocal_model") == "bs_roformer":
             continue
         jobs.submit("process", s["id"], P.process_song(s["id"], ["separate", "pitch"]), label="upgrade")
         n += 1
-    return jsonify(queued=n)
+    return jsonify(queued=n, unfinished=unfinished)
 
 
 # ---------------------------------------------------------------- 全域快捷鍵設定（2.0）

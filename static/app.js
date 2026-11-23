@@ -4102,7 +4102,7 @@ $("#cfg-upgrade").onclick = async () => {
   const b = $("#cfg-upgrade"); b.disabled = true;
   try {
     const r = await api("/api/upgrade-separation", { json: {} });
-    toast(r.queued ? `已排入 ${r.queued} 首，會在背景慢慢重做（直播中會暫停）` : "所有歌都已經是用高品質人聲模型處理的", 5000);
+    toast(r.queued ? `已排入 ${r.queued} 首${r.unfinished ? `（其中 ${r.unfinished} 首是之前沒處理完的，會補做分離、旋律和歌詞）` : ""}，會在背景慢慢處理（直播中會暫停）` : "所有歌都已經是用高品質人聲模型處理的", 6000);
     pollJobs();
   } catch (e) { toast(e.message, 6000); }
   finally { b.disabled = false; }
